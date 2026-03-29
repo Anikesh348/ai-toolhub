@@ -335,9 +335,27 @@ body::before {
     transform: translateX(0);
   }
 
-  body.pwa-mobile .chat-page-header,
-  body.pwa-mobile .chat-page-modes {
+  body.pwa-mobile .chat-page-header {
     display: none;
+  }
+
+  body.pwa-mobile .chat-page-modes {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 0.45rem;
+    margin-bottom: 0.55rem;
+    padding: 0 0.1rem 0.1rem;
+    scrollbar-width: none;
+  }
+
+  body.pwa-mobile .chat-page-modes::-webkit-scrollbar {
+    display: none;
+  }
+
+  body.pwa-mobile .chat-page-modes > button {
+    white-space: nowrap;
   }
 
   body.pwa-mobile .chat-page-composer {
