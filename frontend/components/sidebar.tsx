@@ -1,6 +1,7 @@
 "use client";
 
-import { MouseEvent, useEffect, useState } from "react";
+import type { MouseEvent } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
@@ -8,13 +9,15 @@ import { ChatSession, deleteChatSession, fetchChatSessions } from "@/lib/api";
 
 const NAV_ITEMS = [
   { href: "/chat", label: "Chat", subtitle: "Conversation" },
-  { href: "/build-tool", label: "Build tool", subtitle: "Generate apps" },
   { href: "/requests", label: "Tools generated", subtitle: "Manage runtime" }
 ];
 
 type SidebarProps = {
   sidebarWidth: number;
-  onResizeStart: (event: MouseEvent<HTMLButtonElement>) => void;
+  onResizeStart?: (event: MouseEvent<HTMLButtonElement>) => void;
+  mobile?: boolean;
+  onNavigate?: () => void;
+  chatOnly?: boolean;
 };
 
 function sortChatsForSidebar(list: ChatSession[]): ChatSession[] {
@@ -30,7 +33,7 @@ function sortChatsForSidebar(list: ChatSession[]): ChatSession[] {
   });
 }
 
-export function Sidebar({ sidebarWidth, onResizeStart }: SidebarProps) {
+export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigate, chatOnly = false }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -74,10 +77,12 @@ export function Sidebar({ sidebarWidth, onResizeStart }: SidebarProps) {
   }, []);
 
   function openNewChat(): void {
+    onNavigate?.();
     router.push(`/chat?new=${Date.now()}`);
   }
 
   function openChat(chatId: string): void {
+    onNavigate?.();
     router.push(`/chat?chatId=${chatId}`);
   }
 
@@ -120,12 +125,16 @@ export function Sidebar({ sidebarWidth, onResizeStart }: SidebarProps) {
 
   return (
     <aside
-      className="relative flex h-full w-full flex-col border-r border-amber/20 bg-black/45 px-3 py-4 backdrop-blur lg:min-h-0 lg:w-[var(--sidebar-width)] lg:min-w-[var(--sidebar-width)] lg:px-4"
+      className={`relative flex h-full w-full flex-col border-r border-amber/20 bg-black/45 backdrop-blur ${
+        mobile
+          ? "min-h-0 px-3 py-4"
+          : "px-3 py-4 lg:min-h-0 lg:w-[var(--sidebar-width)] lg:min-w-[var(--sidebar-width)] lg:px-4"
+      }`}
       style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
     >
       <div className="px-2 pb-4">
         <p className="text-[10px] uppercase tracking-[0.24em] text-muted">AI ToolHub</p>
-        <h1 className="mt-1 text-xl font-semibold text-[color:var(--text-main)]">Workspace</h1>
+        <h1 className="mt-1 text-xl font-semibold text-[color:var(--text-main)]">{chatOnly ? "Chats" : "Workspace"}</h1>
       </div>
 
       <button
@@ -137,27 +146,30 @@ export function Sidebar({ sidebarWidth, onResizeStart }: SidebarProps) {
         New chat
       </button>
 
-      <nav className="space-y-1.5">
-        {NAV_ITEMS.map((item) => {
-          const active = pathname === item.href;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`block rounded-xl px-3 py-2.5 transition ${
-                active
-                  ? "bg-amber/14 text-[color:var(--text-main)]"
-                  : "text-muted hover:bg-black/55 hover:text-[color:var(--text-main)]"
-              }`}
-            >
-              <p className="text-sm font-medium">{item.label}</p>
-              <p className="mt-0.5 text-xs text-muted">{item.subtitle}</p>
-            </Link>
-          );
-        })}
-      </nav>
+      {!chatOnly && (
+        <nav className="space-y-1.5">
+          {NAV_ITEMS.map((item) => {
+            const active = pathname === item.href;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={() => onNavigate?.()}
+                className={`block rounded-xl px-3 py-2.5 transition ${
+                  active
+                    ? "bg-amber/14 text-[color:var(--text-main)]"
+                    : "text-muted hover:bg-black/55 hover:text-[color:var(--text-main)]"
+                }`}
+              >
+                <p className="text-sm font-medium">{item.label}</p>
+                <p className="mt-0.5 text-xs text-muted">{item.subtitle}</p>
+              </Link>
+            );
+          })}
+        </nav>
+      )}
 
-      <section className="mt-4 flex min-h-0 flex-1 flex-col">
+      <section className={`${chatOnly ? "mt-1" : "mt-4"} flex min-h-0 flex-1 flex-col`}>
         <div className="flex items-center justify-between px-1">
           <p className="text-[10px] uppercase tracking-[0.16em] text-muted">Recent chats</p>
           <span className="text-[11px] text-muted">{chats.length}</span>
@@ -187,7 +199,7 @@ export function Sidebar({ sidebarWidth, onResizeStart }: SidebarProps) {
                   onClick={(event) => handleDeleteClick(event, chat)}
                   disabled={deletingChatId === chat.id}
                   className={`absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-coral/35 bg-coral/10 p-1 text-coral transition ${
-                    deletingChatId === chat.id ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    deletingChatId === chat.id ? "opacity-100" : mobile ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                   } disabled:cursor-not-allowed disabled:opacity-70`}
                   title={`Delete ${chat.title}`}
                   aria-label={`Delete ${chat.title}`}
@@ -212,29 +224,32 @@ export function Sidebar({ sidebarWidth, onResizeStart }: SidebarProps) {
         {deleteError && <p className="mt-2 px-2 text-xs text-coral">{deleteError}</p>}
       </section>
 
-      <div className="mt-3 border-t border-amber/20 pt-3">
-        <Link
-          href="/account"
-          className={`flex items-center gap-3 rounded-xl px-2.5 py-2 transition ${
-            pathname === "/account"
-              ? "bg-amber/14 text-[color:var(--text-main)]"
-              : "text-muted hover:bg-black/55 hover:text-[color:var(--text-main)]"
-          }`}
-        >
-          <div className="flex h-9 w-9 items-center justify-center rounded-full border border-amber/35 bg-black/50 text-xs font-semibold text-amber">
-            AT
-          </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-[color:var(--text-main)]">Your profile</p>
-            <p className="truncate text-xs text-muted">Open settings</p>
-          </div>
-        </Link>
-      </div>
+      {!chatOnly && (
+        <div className="mt-3 border-t border-amber/20 pt-3">
+          <Link
+            href="/account"
+            onClick={() => onNavigate?.()}
+            className={`flex items-center gap-3 rounded-xl px-2.5 py-2 transition ${
+              pathname === "/account"
+                ? "bg-amber/14 text-[color:var(--text-main)]"
+                : "text-muted hover:bg-black/55 hover:text-[color:var(--text-main)]"
+            }`}
+          >
+            <div className="flex h-9 w-9 items-center justify-center rounded-full border border-amber/35 bg-black/50 text-xs font-semibold text-amber">
+              AT
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-[color:var(--text-main)]">Your profile</p>
+              <p className="truncate text-xs text-muted">Open settings</p>
+            </div>
+          </Link>
+        </div>
+      )}
 
       <button
         type="button"
         onMouseDown={onResizeStart}
-        className="absolute -right-1 top-0 hidden h-full w-2 cursor-col-resize bg-transparent lg:block"
+        className={`absolute -right-1 top-0 h-full w-2 cursor-col-resize bg-transparent ${mobile ? "hidden" : "hidden lg:block"}`}
         aria-label="Resize sidebar"
       />
 

@@ -1,14 +1,17 @@
 "use client";
 
 import { useAuth, useSignIn } from "@clerk/nextjs";
-import type { ReactNode } from "react";
-import { useCallback, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Sidebar } from "@/components/sidebar";
+
 const DEFAULT_SIDEBAR_WIDTH = 268;
 const MIN_SIDEBAR_WIDTH = 236;
 const MAX_SIDEBAR_WIDTH = 420;
+const MOBILE_BREAKPOINT_QUERY = "(max-width: 1023px)";
+const LAST_SIGNED_IN_STORAGE_KEY = "toolhub.auth.lastSignedIn";
 
 function getErrorMessage(error: unknown): string {
   if (!error) {
@@ -27,6 +30,14 @@ function getErrorMessage(error: unknown): string {
   }
 
   return "Unable to complete Google sign in. Please retry.";
+}
+
+function getPhoneViewState(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
 }
 
 function GoogleSignInLayer() {
@@ -89,6 +100,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { isLoaded, isSignedIn } = useAuth();
   const pathname = usePathname();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [isPhoneView, setIsPhoneView] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [optimisticSignedIn, setOptimisticSignedIn] = useState(false);
+  const [allowSignedOutUi, setAllowSignedOutUi] = useState(false);
+  const isEffectivelySignedIn = Boolean(isSignedIn) || (!isLoaded && optimisticSignedIn);
 
   const clampSidebarWidth = useCallback((width: number): number => {
     return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width));
@@ -111,14 +127,84 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     try {
+      setOptimisticSignedIn(window.localStorage.getItem(LAST_SIGNED_IN_STORAGE_KEY) === "1");
+    } catch {
+      // Ignore storage errors.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
       window.localStorage.setItem("toolhub.sidebar.width", String(sidebarWidth));
     } catch {
       // Ignore storage errors.
     }
   }, [sidebarWidth]);
 
+  useEffect(() => {
+    if (!isLoaded) {
+      return;
+    }
+
+    try {
+      window.localStorage.setItem(LAST_SIGNED_IN_STORAGE_KEY, isSignedIn ? "1" : "0");
+    } catch {
+      // Ignore storage errors.
+    }
+  }, [isLoaded, isSignedIn]);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Ignore service worker registration failures.
+    });
+  }, []);
+
+  useEffect(() => {
+    const updateMode = (): void => {
+      setIsPhoneView(getPhoneViewState());
+    };
+
+    updateMode();
+    window.addEventListener("resize", updateMode);
+    document.addEventListener("visibilitychange", updateMode);
+
+    return () => {
+      window.removeEventListener("resize", updateMode);
+      document.removeEventListener("visibilitychange", updateMode);
+    };
+  }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle("pwa-mobile", isPhoneView);
+    return () => {
+      document.body.classList.remove("pwa-mobile");
+    };
+  }, [isPhoneView]);
+
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!isLoaded || isSignedIn) {
+      setAllowSignedOutUi(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setAllowSignedOutUi(true);
+    }, 450);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isLoaded, isSignedIn]);
+
   const handleSidebarResizeStart = useCallback(
-    (event: import("react").MouseEvent<HTMLButtonElement>): void => {
+    (event: ReactMouseEvent<HTMLButtonElement>): void => {
       event.preventDefault();
       const startX = event.clientX;
       const startWidth = sidebarWidth;
@@ -146,21 +232,57 @@ export function AppShell({ children }: { children: ReactNode }) {
     [sidebarWidth, clampSidebarWidth]
   );
 
-  if (!isLoaded) {
-    return (
-      <main className="mx-auto flex min-h-screen w-full max-w-3xl items-center justify-center px-4 py-8">
-        <section className="w-full border border-amber/25 bg-black/50 p-6 backdrop-blur md:p-8">
-          <p className="text-sm text-muted">Loading authentication...</p>
-        </section>
-      </main>
-    );
-  }
-
-  if (!isSignedIn) {
+  if (!isEffectivelySignedIn) {
     if (pathname.startsWith("/sso-callback")) {
       return <>{children}</>;
     }
+
+    if (!isLoaded || !allowSignedOutUi) {
+      return <main className="min-h-screen" aria-hidden="true" />;
+    }
+
     return <GoogleSignInLayer />;
+  }
+
+  if (isPhoneView) {
+    return (
+      <div className="pwa-mobile-shell">
+        <div
+          className={`pwa-mobile-backdrop ${mobileMenuOpen ? "is-open" : ""}`}
+          onClick={() => setMobileMenuOpen(false)}
+          aria-hidden="true"
+        />
+
+        <div className={`pwa-mobile-drawer ${mobileMenuOpen ? "is-open" : ""}`}>
+          <Sidebar sidebarWidth={Math.max(260, Math.min(sidebarWidth, 320))} mobile onNavigate={() => setMobileMenuOpen(false)} />
+        </div>
+
+        <header className="pwa-mobile-topbar">
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(true)}
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-amber/30 bg-black/40 text-[color:var(--text-main)]"
+            aria-label="Open navigation menu"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M4 7h16" />
+              <path d="M4 12h16" />
+              <path d="M4 17h16" />
+            </svg>
+          </button>
+          <div className="flex flex-1 justify-center px-2">
+            <div className="pwa-mobile-title-pill">
+              <p className="truncate text-sm font-semibold text-[color:var(--text-main)]">AI ToolHub</p>
+            </div>
+          </div>
+          <div aria-hidden="true" className="h-10 w-10" />
+        </header>
+
+        <main className="fade-in pwa-mobile-content">
+          <div className="h-full px-3 py-3">{children}</div>
+        </main>
+      </div>
+    );
   }
 
   return (
