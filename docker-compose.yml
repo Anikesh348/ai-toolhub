@@ -28,7 +28,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -40,7 +40,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
       args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
     container_name: tool-builder-ui
     restart: unless-stopped
