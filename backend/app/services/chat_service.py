@@ -1,0 +1,1003 @@
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from app.repositories.chat_message_repository import ChatMessageRepository
+from app.repositories.chat_session_repository import ChatSessionRepository
+from app.services.codex_service import CodexService
+from app.services.docker_service import DockerService
+from app.services.operator_access_service import OperatorAccessService
+from app.services.system_context_service import SystemContextService
+from app.services.tool_builder_service import ToolBuilderService
+from app.utils.logger import get_logger
+
+CHAT_MODES = {"general", "tool_builder", "operator", "pi_operator"}
+
+
+class ChatService:
+    def __init__(
+        self,
+        session_repository: ChatSessionRepository,
+        message_repository: ChatMessageRepository,
+        codex_service: CodexService,
+        docker_service: DockerService | None = None,
+        operator_access_service: OperatorAccessService | None = None,
+        system_context_service: SystemContextService | None = None,
+        tool_builder_service: ToolBuilderService | None = None,
+    ) -> None:
+        self._session_repository = session_repository
+        self._message_repository = message_repository
+        self._codex_service = codex_service
+        self._docker_service = docker_service
+        self._operator_access_service = operator_access_service
+        self._system_context_service = system_context_service
+        self._tool_builder_service = tool_builder_service
+        self._logger = get_logger(__name__)
+
+    def create_session(self, title: str | None, mode: str) -> dict:
+        normalized_mode = self._normalize_mode(mode)
+        cleaned_title = (title or "").strip()
+        session_title = cleaned_title if cleaned_title else "New Chat"
+        return self._session_repository.create(title=session_title, mode=normalized_mode)
+
+    def list_sessions(self, limit: int = 100) -> list[dict]:
+        return self._session_repository.list_recent(limit=limit)
+
+    def get_session(self, session_id: str) -> dict | None:
+        return self._session_repository.get_by_id(session_id)
+
+    def list_messages(self, session_id: str, limit: int = 500) -> list[dict]:
+        return self._message_repository.list_for_session(session_id=session_id, limit=limit)
+
+    def send_message(self, session_id: str, content: str) -> tuple[dict | None, dict | None, str | None]:
+        session = self._session_repository.get_by_id(session_id)
+        if session is None:
+            return None, None, "Session not found"
+
+        existing_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=1)
+        user_message = self._message_repository.create(
+            session_id=session_id,
+            role="user",
+            content=content.strip(),
+        )
+        if not existing_messages:
+            session = self._auto_name_session(session, content)
+
+        recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=18)
+        prompt = self._build_chat_prompt(
+            mode=self._normalize_mode(session["mode"]),
+            messages=recent_messages,
+        )
+        quick_answer = self._try_direct_operator_answer(
+            mode=self._normalize_mode(session["mode"]),
+            user_content=content,
+        )
+        assistant_metadata: dict[str, Any] = {}
+        if quick_answer is not None:
+            assistant_text = quick_answer
+            success = True
+            exit_code = 0
+        elif self._normalize_mode(session["mode"]) == "operator":
+            assistant_text = self._run_operator_task(session_id=session_id, user_content=content)
+            success = True
+            exit_code = 0
+        elif self._normalize_mode(session["mode"]) == "tool_builder":
+            assistant_text, tool_builder_context = self._run_tool_builder_task(session_id=session_id, user_content=content)
+            success = True
+            exit_code = 0
+            if tool_builder_context:
+                assistant_metadata["toolBuilder"] = tool_builder_context
+        else:
+            completion = self._codex_service.run_chat(session_id=session_id, prompt=prompt)
+            assistant_text = self._build_assistant_text(completion.logs, completion.success)
+            success = completion.success
+            exit_code = completion.exit_code
+            if not completion.success:
+                self._logger.warning(
+                    "Chat completion failed for session %s: exit=%s",
+                    session_id,
+                    completion.exit_code,
+                )
+
+        assistant_metadata["success"] = success
+        assistant_metadata["exitCode"] = exit_code
+        assistant_message = self._message_repository.create(
+            session_id=session_id,
+            role="assistant",
+            content=assistant_text,
+            metadata=assistant_metadata,
+        )
+        self._session_repository.touch(session_id)
+        return user_message, assistant_message, None
+
+    def stream_message(self, session_id: str, content: str) -> Iterable[dict[str, Any]]:
+        session = self._session_repository.get_by_id(session_id)
+        if session is None:
+            yield {"type": "error", "error": "Session not found"}
+            return
+
+        user_content = content.strip()
+        if not user_content:
+            yield {"type": "error", "error": "Message content cannot be empty"}
+            return
+
+        existing_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=1)
+        user_message = self._message_repository.create(
+            session_id=session_id,
+            role="user",
+            content=user_content,
+        )
+        if not existing_messages:
+            session = self._auto_name_session(session, user_content)
+
+        yield {"type": "user_message", "session": session, "message": user_message}
+        yield {"type": "status", "status": "thinking"}
+
+        recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=18)
+        prompt = self._build_chat_prompt(
+            mode=self._normalize_mode(session["mode"]),
+            messages=recent_messages,
+        )
+        quick_answer = self._try_direct_operator_answer(
+            mode=self._normalize_mode(session["mode"]),
+            user_content=user_content,
+        )
+        streamed_assistant = ""
+        stream_status = "thinking"
+        assistant_metadata: dict[str, Any] = {}
+        if quick_answer is not None:
+            assistant_text = quick_answer
+            success = True
+            exit_code = 0
+        elif self._normalize_mode(session["mode"]) == "operator":
+            assistant_text = self._run_operator_task(session_id=session_id, user_content=user_content)
+            success = True
+            exit_code = 0
+        elif self._normalize_mode(session["mode"]) == "tool_builder":
+            assistant_text, tool_builder_context = self._run_tool_builder_task(session_id=session_id, user_content=user_content)
+            success = True
+            exit_code = 0
+            if tool_builder_context:
+                assistant_metadata["toolBuilder"] = tool_builder_context
+        else:
+            completion = None
+            raw_logs = ""
+            for stream_event in self._codex_service.stream_chat(session_id=session_id, prompt=prompt):
+                if stream_event.type == "log" and stream_event.chunk:
+                    raw_logs = f"{raw_logs}{stream_event.chunk}"
+                    if len(raw_logs) > 24000:
+                        raw_logs = raw_logs[-24000:]
+                    detected_status = self._detect_stream_status(stream_event.chunk)
+                    if detected_status and detected_status != stream_status:
+                        stream_status = detected_status
+                        yield {"type": "status", "status": stream_status}
+                    parsed_partial = self._sanitize_assistant_output(self._extract_assistant_text(raw_logs))
+                    delta = self._incremental_delta(streamed_assistant, parsed_partial)
+                    if delta:
+                        if stream_status != "thinking":
+                            stream_status = "thinking"
+                            yield {"type": "status", "status": stream_status}
+                        streamed_assistant = parsed_partial
+                        yield {"type": "assistant_delta", "delta": delta}
+                    continue
+                if stream_event.type == "done":
+                    completion = stream_event.result
+
+            if completion is None:
+                assistant_text = "I could not generate a response right now. Please retry."
+                success = False
+                exit_code = 1
+            else:
+                assistant_text = self._build_assistant_text(completion.logs, completion.success)
+                success = completion.success
+                exit_code = completion.exit_code
+            if completion is not None and not completion.success:
+                self._logger.warning(
+                    "Chat stream completion failed for session %s: exit=%s",
+                    session_id,
+                    completion.exit_code,
+                )
+
+        assistant_metadata["success"] = success
+        assistant_metadata["exitCode"] = exit_code
+        remaining = assistant_text
+        if streamed_assistant and assistant_text.startswith(streamed_assistant):
+            remaining = assistant_text[len(streamed_assistant) :]
+        for chunk in self._chunk_text(remaining):
+            yield {"type": "assistant_delta", "delta": chunk}
+
+        assistant_message = self._message_repository.create(
+            session_id=session_id,
+            role="assistant",
+            content=assistant_text,
+            metadata=assistant_metadata,
+        )
+        self._session_repository.touch(session_id)
+        updated_session = self._session_repository.get_by_id(session_id)
+        if updated_session is not None:
+            session = updated_session
+
+        yield {"type": "assistant_message", "session": session, "message": assistant_message}
+        yield {"type": "done"}
+
+    def update_session(
+        self,
+        session_id: str,
+        title: str | None = None,
+        mode: str | None = None,
+        archived: bool | None = None,
+    ) -> dict | None:
+        normalized_mode = self._normalize_mode(mode) if mode is not None else None
+        normalized_title = title.strip() if isinstance(title, str) else None
+        return self._session_repository.update(
+            session_id=session_id,
+            title=normalized_title if normalized_title else None,
+            mode=normalized_mode,
+            archived=archived,
+        )
+
+    def delete_session(self, session_id: str) -> bool:
+        session = self._session_repository.get_by_id(session_id)
+        if session is None:
+            return False
+        self._message_repository.delete_for_session(session_id=session_id)
+        return self._session_repository.delete(session_id=session_id)
+
+    def _build_chat_prompt(self, mode: str, messages: list[dict[str, Any]]) -> str:
+        normalized_mode = self._normalize_mode(mode)
+        system_prompt = self._system_prompt_for_mode(normalized_mode)
+        lines = [system_prompt, "", "Conversation:"]
+        if normalized_mode == "operator" and self._system_context_service is not None:
+            lines = [
+                system_prompt,
+                "",
+                self._system_context_service.format_for_prompt(),
+                "",
+                "Conversation:",
+            ]
+        for message in messages:
+            role = message["role"].upper()
+            # Keep history entries on one serialized line so echoed prompts
+            # do not inject multiline prior responses into incremental parsing.
+            content = re.sub(r"\s+", " ", message["content"]).strip()
+            serialized_content = json.dumps(content, ensure_ascii=False)
+            lines.append(f"{role}: {serialized_content}")
+        lines.append("")
+        lines.append("Respond as ASSISTANT in clear Markdown. Keep answers concise unless asked for details.")
+        lines.append("Return only the final answer. Do not include tool logs, search traces, or intermediate status narration.")
+        return "\n".join(lines)
+
+    def _build_assistant_text(self, raw_logs: str, success: bool) -> str:
+        parsed = self._extract_assistant_text(raw_logs)
+        if parsed:
+            return self._sanitize_assistant_output(parsed)
+        if success:
+            return "No response was produced."
+        return "I could not generate a response right now. Please retry."
+
+    @staticmethod
+    def _sanitize_assistant_output(text: str) -> str:
+        if not text:
+            return ""
+
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        filtered_lines: list[str] = []
+        for line in normalized.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                if filtered_lines and filtered_lines[-1] != "":
+                    filtered_lines.append("")
+                continue
+            if ChatService._is_prompt_echo_line(stripped):
+                continue
+            lowered = stripped.lower()
+            if lowered.startswith("assistant:"):
+                assistant_value = stripped.split(":", 1)[1].lstrip()
+                if not assistant_value:
+                    continue
+                # Serialized history prompt echoes are quoted/json-like. Skip them.
+                if (
+                    (assistant_value.startswith('"') and assistant_value.endswith('"'))
+                    or (assistant_value.startswith("'") and assistant_value.endswith("'"))
+                    or (assistant_value.startswith("{") and assistant_value.endswith("}"))
+                    or (assistant_value.startswith("[") and assistant_value.endswith("]"))
+                ):
+                    continue
+                stripped = assistant_value
+                lowered = stripped.lower()
+            if lowered.startswith("user:"):
+                continue
+            filtered_lines.append(stripped)
+
+        cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(filtered_lines).strip())
+        blocks = [block.strip() for block in cleaned.split("\n\n") if block.strip()]
+        if not blocks:
+            return cleaned
+
+        deduped_blocks: list[str] = []
+        seen_block_keys: set[str] = set()
+        for block in blocks:
+            block_key = re.sub(r"\s+", " ", block).strip().lower()
+            if not block_key:
+                continue
+            if deduped_blocks and deduped_blocks[-1] == block:
+                continue
+            if block_key in seen_block_keys:
+                continue
+            deduped_blocks.append(block)
+            seen_block_keys.add(block_key)
+
+        count = len(deduped_blocks)
+        if count > 1 and count % 2 == 0:
+            midpoint = count // 2
+            lhs = [re.sub(r"\s+", " ", block).strip().lower() for block in deduped_blocks[:midpoint]]
+            rhs = [re.sub(r"\s+", " ", block).strip().lower() for block in deduped_blocks[midpoint:]]
+            if lhs == rhs:
+                deduped_blocks = deduped_blocks[:midpoint]
+
+        return "\n\n".join(deduped_blocks).strip()
+
+    @staticmethod
+    def _is_prompt_echo_line(stripped: str) -> bool:
+        lowered = stripped.lower()
+        return (
+            lowered.startswith("you are a helpful engineering assistant for a self-hosted ai tool platform")
+            or lowered.startswith("respond as assistant in clear markdown")
+            or lowered.startswith("return only the final answer")
+            or lowered == "conversation:"
+            or lowered.startswith("conversation:")
+        )
+
+    @staticmethod
+    def _is_docker_summary_query(user_content: str) -> bool:
+        lowered = user_content.lower()
+        if "docker" not in lowered:
+            return False
+
+        has_summary_marker = any(
+            keyword in lowered
+            for keyword in (
+                "running",
+                "containers",
+                "summary",
+                "list",
+                "show",
+                "status",
+                "what is running",
+            )
+        )
+        if not has_summary_marker:
+            return False
+
+        action_pattern = re.compile(
+            r"\b("
+            r"deploy|redeploy|rebuild|build|spin\s+up|start(?:\s+up)?|launch|run|"
+            r"bring\s+up|restart|stop|shutdown|remove|delete|create|"
+            r"compose\s+up|up\s+-d|docker\s+up"
+            r")\b"
+        )
+        return action_pattern.search(lowered) is None
+
+    def _try_direct_operator_answer(self, mode: str, user_content: str) -> str | None:
+        if mode != "operator" or self._system_context_service is None:
+            if mode != "operator":
+                return None
+
+        lowered = user_content.lower()
+
+        # Docker runtime summaries
+        if self._docker_service is not None and self._is_docker_summary_query(user_content):
+            containers = self._docker_service.list_containers_summary(running_only=True)
+            if not containers:
+                return "No running Docker containers found."
+
+            lines = [f"Running Docker containers: {len(containers)}", ""]
+            for item in containers[:25]:
+                health = item.get("health") or "n/a"
+                ports = ", ".join(item.get("ports") or []) or "no published ports"
+                lines.append(
+                    f"- {item['name']} ({item['image']})\n"
+                    f"  status: {item['status']} | health: {health}\n"
+                    f"  ports: {ports}"
+                )
+            if len(containers) > 25:
+                lines.append(f"\n...and {len(containers) - 25} more containers.")
+            return "\n".join(lines)
+
+        # Health check / restart actions
+        if self._docker_service is not None:
+            health_match = re.search(r"check if ([a-zA-Z0-9_.-]+) container is healthy", lowered)
+            if health_match:
+                target_name = health_match.group(1)
+                should_restart = "restart" in lowered
+                if should_restart:
+                    result = self._docker_service.check_container_health_and_restart(target_name)
+                else:
+                    result = self._docker_service.get_container_health(target_name)
+                return str(result.get("message", "Unable to check container health."))
+
+        if self._system_context_service is None:
+            return None
+        if not any(keyword in lowered for keyword in ("battery", "ram", "memory", "cpu", "disk", "storage", "uptime")):
+            return None
+
+        snapshot = self._system_context_service.snapshot()
+        cpu = snapshot["cpu"]
+        memory = snapshot["memory"]
+        disk = snapshot["disk"]
+        battery = snapshot["battery"]
+
+        details: list[str] = []
+        if "battery" in lowered:
+            if battery is None:
+                details.append("Battery: unavailable in current runtime context.")
+            else:
+                battery_state = "plugged in" if battery["isPlugged"] else "on battery"
+                details.append(f"Battery: {battery['percent']}% ({battery_state}).")
+        if "ram" in lowered or "memory" in lowered:
+            details.append(
+                f"RAM: {memory['percent']}% used ({self._bytes_to_gb(memory['usedBytes'])}GB / {self._bytes_to_gb(memory['totalBytes'])}GB)."
+            )
+        if "cpu" in lowered:
+            details.append(f"CPU: {cpu['percent']}% usage right now.")
+        if "disk" in lowered or "storage" in lowered:
+            details.append(
+                f"Disk (/): {disk['percent']}% used ({self._bytes_to_gb(disk['usedBytes'])}GB / {self._bytes_to_gb(disk['totalBytes'])}GB)."
+            )
+        if "uptime" in lowered:
+            details.append(f"Uptime: {self._format_uptime(int(snapshot['uptimeSeconds']))}.")
+
+        if snapshot.get("isContainer"):
+            details.append("Note: this agent is running in a container, so host-only signals may be limited.")
+
+        return "\n".join(details) if details else None
+
+    def _run_operator_task(self, session_id: str, user_content: str) -> str:
+        if self._operator_access_service is None:
+            return "Operator policy is not configured. Please set OPERATOR_ALLOWED_PATHS / OPERATOR_DENIED_PATHS."
+
+        session = self._session_repository.get_by_id(session_id)
+        project_hint = self._extract_project_hint(user_content)
+        host_cwd = self._operator_access_service.resolve_project_path(project_hint)
+        if host_cwd is None:
+            host_cwd = self._operator_access_service.normalize_cwd(None)
+        container_cwd = self._operator_access_service.to_container_path(host_cwd)
+        mounts = self._operator_access_service.build_mounts(primary_path=host_cwd)
+        if Path("/var/run/docker.sock").exists():
+            mounts["/var/run/docker.sock"] = {
+                "bind": "/var/run/docker.sock",
+                "mode": "rw",
+            }
+        branch_name = f"codex/operator-{datetime.now(tz=timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=24)
+        conversation_context = self._format_operator_conversation_context(recent_messages)
+        cross_session_context = self._recent_operator_session_context(
+            current_session_id=session_id,
+            current_session_messages=recent_messages,
+        )
+        extra_context_block = ""
+        if cross_session_context:
+            extra_context_block = (
+                "Recent operator context from previous session (use only if relevant):\n"
+                f"{cross_session_context}\n\n"
+            )
+
+        operator_prompt = (
+            "You are operating as a software engineering operator on a host-mounted filesystem.\n"
+            f"{self._operator_access_service.policy_summary()}\n\n"
+            f"Session title: {(session or {}).get('title', 'Operator Session')}\n"
+            f"Session mode: {(session or {}).get('mode', 'operator')}\n\n"
+            "Conversation context (older to newer):\n"
+            f"{conversation_context}\n\n"
+            f"{extra_context_block}"
+            f"Current user task:\n{user_content}\n\n"
+            "Execution requirements:\n"
+            f"- Work under: {container_cwd}\n"
+            "- If this is a code-change task in a git repository, identify the target repository and execute:\n"
+            f"  1) `git checkout -b {branch_name}` (or a close unique variant if it already exists)\n"
+            "  2) implement the requested change\n"
+            "  3) run relevant tests/lint/build checks only when needed for confidence\n"
+            "- If this is non-code ops query, provide concise factual summary.\n"
+            "- For container operations, try `docker compose` first and fall back to `docker-compose` if needed.\n"
+            "- Keep response crisp and readable (3-6 short lines by default).\n"
+            "- Include verification details, branch names, modified file lists, and environment diagnostics only when the user explicitly asks.\n"
+            "- Never access denied paths.\n"
+            "- Resolve follow-up references (for example: 'that repo', 'continue', 'as discussed') using conversation context.\n"
+            "- If context is still ambiguous, state the ambiguity briefly and proceed with the most likely interpretation.\n"
+        )
+
+        try:
+            completion = self._codex_service.run_operator(
+                session_id=session_id,
+                prompt=operator_prompt,
+                container_cwd=container_cwd,
+                extra_volumes=mounts,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.exception("Operator task execution failed for session %s", session_id)
+            return f"Operator task failed to start: {exc}"
+
+        output = self._build_assistant_text(completion.logs, completion.success)
+        output = self._sanitize_operator_output(user_content=user_content, output=output)
+        if not completion.success:
+            return f"{output}\n\n(Operator execution exited with code {completion.exit_code})"
+        return output
+
+    @staticmethod
+    def _sanitize_operator_output(user_content: str, output: str) -> str:
+        cleaned = output.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not cleaned:
+            return ""
+
+        lowered_request = user_content.lower()
+        requested_details = any(
+            token in lowered_request for token in ("verify", "verification", "logs", "details", "output")
+        )
+        if requested_details:
+            return cleaned
+
+        filtered_lines: list[str] = []
+        skip_verification_block = False
+        for line in cleaned.split("\n"):
+            stripped = line.strip()
+            lowered = stripped.lower()
+
+            if lowered in {"verification", "verification:"}:
+                skip_verification_block = True
+                continue
+            if skip_verification_block:
+                if not stripped:
+                    skip_verification_block = False
+                continue
+
+            if lowered.startswith("if you want, i can"):
+                continue
+            filtered_lines.append(line.rstrip())
+
+        normalized = "\n".join(filtered_lines).strip()
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized
+
+    def _run_tool_builder_task(self, session_id: str, user_content: str) -> tuple[str, dict[str, Any] | None]:
+        if self._tool_builder_service is None:
+            return "Tool builder workflow is not configured yet. Please check backend startup dependencies.", None
+
+        context = self._resolve_tool_builder_context(session_id)
+        if context and not context.get("requestId") and not context.get("toolId"):
+            context = None
+        explicit_tool_id = self._extract_tool_id(user_content)
+        if explicit_tool_id:
+            referenced_tool = self._tool_builder_service.get_tool(explicit_tool_id)
+            if referenced_tool:
+                context = {
+                    "toolId": referenced_tool["toolId"],
+                    "requestId": referenced_tool["requestId"],
+                    "toolName": referenced_tool["name"],
+                    "phase": "running" if referenced_tool["status"] == "RUNNING" else "building",
+                }
+
+        if context:
+            request_id = str(context.get("requestId") or "").strip()
+            tool_id = str(context.get("toolId") or "").strip() or None
+            tool = self._tool_builder_service.get_tool(tool_id) if tool_id else None
+            if tool is None and request_id:
+                tool = self._tool_builder_service.get_tool_for_request(request_id=request_id)
+            if tool:
+                context["toolId"] = tool["toolId"]
+                context["toolName"] = tool["name"]
+                context["requestId"] = tool["requestId"]
+                context["phase"] = "running" if tool["status"] == "RUNNING" else "building"
+
+            if self._is_tool_builder_status_query(user_content):
+                return self._tool_builder_status_message(context=context), context
+
+            base_request_id = str(context.get("requestId") or "").strip()
+            if not base_request_id:
+                return (
+                    "I could not find the active tool context for this chat. "
+                    "Please mention the tool id explicitly and I will continue from there.",
+                    context,
+                )
+
+            rebuild_tool_id = str(context.get("toolId") or "").strip() or None
+            tool_name = str(context.get("toolName") or "").strip() or None
+            modification_prompt = self._build_tool_modification_prompt(user_content)
+            job = self._tool_builder_service.start_generation(
+                prompt=modification_prompt,
+                name=tool_name,
+                base_request_id=base_request_id,
+                rebuild_tool_id=rebuild_tool_id,
+            )
+            next_context = {
+                "requestId": job["id"],
+                "toolId": rebuild_tool_id,
+                "toolName": tool_name,
+                "phase": "building",
+            }
+            message = (
+                "Started applying your changes to the existing tool.\n\n"
+                f"- Request ID: `{job['id']}`\n"
+                f"- Tool ID: `{rebuild_tool_id or 'will be resolved after build starts'}`\n"
+                "- I will rebuild and redeploy the tool container once tests pass.\n"
+                "- Ask `status` anytime in this chat to get the latest state and port."
+            )
+            return message, next_context
+
+        if self._needs_tool_builder_clarification(user_content):
+            clarification = (
+                "Before I build this, please clarify these points:\n"
+                "1. What is the exact primary user workflow?\n"
+                "2. Do you need UI only, API only, or full-stack?\n"
+                "3. Any required integrations/auth/storage constraints?"
+            )
+            return clarification, {"phase": "clarification"}
+
+        initial_prompt = self._build_tool_initial_prompt(user_content)
+        job = self._tool_builder_service.start_generation(prompt=initial_prompt, name=None)
+        next_context = {"requestId": job["id"], "phase": "building"}
+        message = (
+            "Great, I’ve started building this tool.\n\n"
+            f"- Request ID: `{job['id']}`\n"
+            "- I will generate, test, and deploy it automatically.\n"
+            "- Once deployed, ask `status` in this chat to get the live port and runtime state.\n"
+            "- You can keep chatting here to request further changes; I’ll rebuild from the last successful version."
+        )
+        return message, next_context
+
+    def _resolve_tool_builder_context(self, session_id: str) -> dict[str, Any] | None:
+        recent = self._message_repository.list_recent_for_session(session_id=session_id, limit=36)
+        for message in reversed(recent):
+            metadata = message.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            candidate = metadata.get("toolBuilder")
+            if isinstance(candidate, dict):
+                return dict(candidate)
+        return None
+
+    @staticmethod
+    def _extract_tool_id(text: str) -> str | None:
+        match = re.search(r"\b([a-f0-9]{32})\b", text.lower())
+        if match:
+            return match.group(1)
+        return None
+
+    @staticmethod
+    def _needs_tool_builder_clarification(user_content: str) -> bool:
+        cleaned = re.sub(r"\s+", " ", user_content).strip().lower()
+        token_count = len(re.findall(r"\w+", cleaned))
+        if token_count < 6:
+            return True
+        vague_markers = (
+            "build a tool",
+            "build tool",
+            "make a tool",
+            "create a tool",
+            "something like",
+            "not sure",
+            "whatever works",
+        )
+        return any(marker in cleaned for marker in vague_markers) and token_count < 20
+
+    @staticmethod
+    def _is_tool_builder_status_query(user_content: str) -> bool:
+        lowered = user_content.lower()
+        return any(
+            marker in lowered
+            for marker in ("status", "running", "port", "url", "link", "health", "deployed", "deployment")
+        )
+
+    def _tool_builder_status_message(self, context: dict[str, Any]) -> str:
+        request_id = str(context.get("requestId") or "").strip()
+        tool_id = str(context.get("toolId") or "").strip() or None
+
+        job = self._tool_builder_service.get_job_state(request_id) if request_id else None
+        tool = self._tool_builder_service.get_tool(tool_id) if tool_id else None
+        if tool is None and request_id:
+            tool = self._tool_builder_service.get_tool_for_request(request_id=request_id)
+
+        lines = ["Tool Builder status:"]
+        if request_id:
+            job_status = job["status"] if job else "UNKNOWN"
+            lines.append(f"- Latest request: `{request_id}` ({job_status})")
+            if job and job.get("error"):
+                lines.append(f"- Last error: {job['error']}")
+        else:
+            lines.append("- Latest request: unknown")
+
+        if tool:
+            ui_port = tool.get("uiPort") or tool.get("port")
+            lines.append(f"- Tool ID: `{tool['toolId']}`")
+            lines.append(f"- Tool status: {tool['status']}")
+            if ui_port:
+                lines.append(f"- UI: http://localhost:{ui_port}")
+            ports = tool.get("ports") or {}
+            if isinstance(ports, dict) and ports:
+                mapped = " | ".join(f"{name}:{port}" for name, port in ports.items())
+                lines.append(f"- Service ports: {mapped}")
+        else:
+            lines.append("- Tool record: not created yet (build may still be running)")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_tool_initial_prompt(user_content: str) -> str:
+        return (
+            "Build a production-ready tool based on this request:\n"
+            f"{user_content}\n\n"
+            "Requirements:\n"
+            "- Include a usable UI unless explicitly backend-only.\n"
+            "- Include tests and runnable docker artifacts.\n"
+            "- Keep implementation practical and maintainable."
+        )
+
+    @staticmethod
+    def _build_tool_modification_prompt(user_content: str) -> str:
+        return (
+            "Apply the requested change to the existing tool codebase.\n"
+            f"Change request:\n{user_content}\n\n"
+            "Requirements:\n"
+            "- Preserve existing working behavior unless the request changes it.\n"
+            "- Update tests for changed behavior.\n"
+            "- Keep docker/runtime compatibility intact."
+        )
+
+    def _recent_operator_session_context(
+        self,
+        current_session_id: str,
+        current_session_messages: list[dict[str, Any]],
+    ) -> str:
+        # Same-session context is primary; cross-session context is only for fresh chats.
+        if len(current_session_messages) > 4:
+            return ""
+
+        sessions = self._session_repository.list_recent(limit=16)
+        for session in sessions:
+            if session.get("id") == current_session_id:
+                continue
+            if self._normalize_mode(session.get("mode")) != "operator":
+                continue
+
+            messages = self._message_repository.list_recent_for_session(session_id=session["id"], limit=8)
+            formatted = self._format_operator_conversation_context(messages)
+            if not formatted or formatted == "(no prior conversation context)":
+                continue
+            return f"Session `{session.get('title', 'Operator Session')}`:\n{formatted}"
+
+        return ""
+
+    @staticmethod
+    def _format_operator_conversation_context(messages: list[dict[str, Any]]) -> str:
+        if not messages:
+            return "(no prior conversation context)"
+
+        # Keep context bounded so operator prompts remain fast and focused.
+        selected = messages[-18:]
+        lines: list[str] = []
+        for message in selected:
+            role = str(message.get("role", "user")).upper()
+            content = str(message.get("content", "")).strip()
+            if not content:
+                continue
+
+            normalized = re.sub(r"\s+", " ", content)
+            if len(normalized) > 900:
+                normalized = f"{normalized[:900].rstrip()}..."
+            lines.append(f"{role}: {normalized}")
+
+        return "\n".join(lines) if lines else "(no prior conversation context)"
+
+    def _auto_name_session(self, session: dict, user_content: str) -> dict:
+        if session.get("title") and session["title"].strip().lower() != "new chat":
+            return session
+        generated_title = self._generate_session_title(user_content)
+        updated = self._session_repository.update(session_id=session["id"], title=generated_title)
+        return updated if updated is not None else session
+
+    @staticmethod
+    def _generate_session_title(user_content: str) -> str:
+        cleaned = re.sub(r"\s+", " ", user_content).strip()
+        cleaned = re.sub(r"[`*_#>\[\]\(\)]", "", cleaned)
+        if not cleaned:
+            return "General Chat"
+
+        words = cleaned.split(" ")
+        title = " ".join(words[:7]).strip(" .,:;!?-")
+        if not title:
+            return "General Chat"
+        if len(title) > 56:
+            title = f"{title[:53].rstrip()}..."
+        return title
+
+    @staticmethod
+    def _chunk_text(text: str, size: int = 64) -> Iterable[str]:
+        if not text:
+            return []
+        return [text[index:index + size] for index in range(0, len(text), size)]
+
+    @staticmethod
+    def _incremental_delta(previous: str, current: str) -> str:
+        if not current or current == previous:
+            return ""
+        if previous and not current.startswith(previous):
+            return ""
+        return current[len(previous) :]
+
+    @staticmethod
+    def _detect_stream_status(log_chunk: str) -> str | None:
+        lowered = log_chunk.lower()
+        if (
+            "searching the web" in lowered
+            or "searched:" in lowered
+            or "web search" in lowered
+            or "🌐" in log_chunk
+        ):
+            return "web_search"
+        return None
+
+    @staticmethod
+    def _normalize_mode(mode: str | None) -> str:
+        if mode == "pi_operator":
+            return "operator"
+        if mode in {"general", "tool_builder", "operator"}:
+            return mode
+        return "general"
+
+    @staticmethod
+    def _extract_project_hint(user_content: str) -> str | None:
+        path_match = re.search(r"(/[\w.\-~/]+(?:/[\w.\-~]+)*)", user_content)
+        if path_match:
+            return path_match.group(1)
+
+        name_match = re.search(
+            r"(?:for|of|in)\s+([a-zA-Z0-9._-]+)",
+            user_content,
+            flags=re.IGNORECASE,
+        )
+        if name_match:
+            return name_match.group(1)
+        return None
+
+    @staticmethod
+    def _bytes_to_gb(value: int) -> str:
+        return f"{(value / (1024 ** 3)):.2f}"
+
+    @staticmethod
+    def _format_uptime(seconds: int) -> str:
+        days, rem = divmod(seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m"
+        return f"{hours}h {minutes}m"
+
+    def _extract_assistant_text(self, raw_logs: str) -> str:
+        normalized = raw_logs.replace("\r\n", "\n").replace("\r", "\n")
+        normalized = re.sub(r"\x1b\[[0-9;]*m", "", normalized)
+        lines = [line.rstrip() for line in normalized.split("\n")]
+
+        json_extracted = self._extract_from_json_events(lines)
+        if json_extracted:
+            return json_extracted
+
+        codex_index = self._find_codex_marker(lines)
+        if codex_index is not None:
+            extracted = self._extract_after_codex(lines[codex_index + 1 :])
+            if extracted:
+                return extracted
+
+        filtered_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                if filtered_lines and filtered_lines[-1] != "":
+                    filtered_lines.append("")
+                continue
+            if self._is_noise_line(stripped):
+                continue
+            if re.fullmatch(r"[\d,]+", stripped):
+                continue
+            filtered_lines.append(stripped)
+
+        text = "\n".join(filtered_lines).strip()
+        return text
+
+    @staticmethod
+    def _extract_from_json_events(lines: list[str]) -> str | None:
+        latest_text: str | None = None
+        for line in lines:
+            stripped = line.strip()
+            if not stripped.startswith("{") or not stripped.endswith("}"):
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") != "item.completed":
+                continue
+            item = payload.get("item")
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "agent_message":
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                latest_text = text.strip()
+        return latest_text
+
+    @staticmethod
+    def _is_noise_line(stripped: str) -> bool:
+        lowered = stripped.lower()
+        return (
+            lowered == "codex"
+            or lowered.startswith("openai codex")
+            or stripped == "--------"
+            or lowered.startswith("workdir:")
+            or lowered.startswith("model:")
+            or lowered.startswith("provider:")
+            or lowered.startswith("approval:")
+            or lowered.startswith("sandbox:")
+            or lowered.startswith("reasoning effort:")
+            or lowered.startswith("reasoning summaries:")
+            or lowered.startswith("session id:")
+            or lowered == "user"
+            or lowered.startswith("user:")
+            or lowered.startswith("warning:")
+            or lowered.startswith("mcp startup:")
+            or lowered == "tokens used"
+            or lowered.startswith("tokens used")
+            or stripped.startswith("🌐")
+            or lowered.startswith("searching the web")
+            or lowered.startswith("searched:")
+            or lowered.startswith("conversation:")
+            or lowered.startswith("respond as assistant")
+        )
+
+    @staticmethod
+    def _find_codex_marker(lines: list[str]) -> int | None:
+        for index in range(len(lines) - 1, -1, -1):
+            if lines[index].strip().lower() == "codex":
+                return index
+        return None
+
+    def _extract_after_codex(self, lines: list[str]) -> str:
+        captured: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and self._is_noise_line(stripped):
+                if stripped.lower().startswith("tokens used"):
+                    break
+                continue
+            lowered = stripped.lower()
+            if lowered == "tokens used":
+                break
+            if lowered.startswith("tokens used"):
+                break
+            if not stripped:
+                if captured and captured[-1] != "":
+                    captured.append("")
+                continue
+            captured.append(line.rstrip())
+
+        return "\n".join(captured).strip()
+
+    @staticmethod
+    def _system_prompt_for_mode(mode: str) -> str:
+        if mode == "operator":
+            return (
+                "You are an expert host operations assistant. "
+                "Give accurate diagnostics guidance, be explicit about assumptions, "
+                "and never claim actions were executed unless results are provided."
+            )
+        if mode == "tool_builder":
+            return (
+                "You are an expert software tool builder. "
+                "Provide implementation-focused guidance, testing steps, and practical tradeoffs."
+            )
+        return (
+            "You are a helpful engineering assistant for a self-hosted AI tool platform. "
+            "Be precise, practical, and honest about uncertainty. "
+            "Answer directly with final results and avoid narrating intermediate checks."
+        )
