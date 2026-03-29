@@ -1,0 +1,21 @@
+from enum import Enum
+
+
+class BuildStatus(str, Enum):
+    PENDING = "PENDING"
+    REFINING_PROMPT = "REFINING_PROMPT"
+    GENERATING_CODE = "GENERATING_CODE"
+    TESTING = "TESTING"
+    FIXING_ERRORS = "FIXING_ERRORS"
+    BUILDING_IMAGE = "BUILDING_IMAGE"
+    DEPLOYING = "DEPLOYING"
+    RUNNING = "RUNNING"
+    FAILED = "FAILED"
+
+
+class ToolStatus(str, Enum):
+    DEPLOYING = "DEPLOYING"
+    RUNNING = "RUNNING"
+    FAILED = "FAILED"
+    STOPPED = "STOPPED"
+
