@@ -1,0 +1,50 @@
+services:
+  codex:
+    image: ${CODEX_IMAGE_NAME:-tool-builder-codex:latest}
+    build:
+      context: .
+      dockerfile: docker/Codex.Dockerfile
+    container_name: tool-builder-codex
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    environment:
+      HOME: ${CODEX_WORKSPACE_CONTAINER}
+      XDG_CONFIG_HOME: ${CODEX_WORKSPACE_CONTAINER}/.config
+    command: ["/bin/sh", "-lc", "sleep infinity"]
+    volumes:
+      - ${CODEX_WORKSPACE_HOST}:${CODEX_WORKSPACE_CONTAINER}
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: tool-builder-backend
+    restart: unless-stopped
+    depends_on:
+      - codex
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CODEX_WORKSPACE_HOST}:${CODEX_WORKSPACE_HOST}
+
+  ui:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+    container_name: tool-builder-ui
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${UI_PORT:-3000}:3000"

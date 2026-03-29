@@ -1,0 +1,88 @@
+from functools import lru_cache
+
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    app_name: str = Field(default="AI Tool Builder Backend", alias="APP_NAME")
+    app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
+    app_port: int = Field(default=8000, alias="APP_PORT")
+    app_log_level: str = Field(default="INFO", alias="APP_LOG_LEVEL")
+    cors_allowed_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        alias="CORS_ALLOWED_ORIGINS",
+    )
+
+    mongo_uri: str = Field(validation_alias=AliasChoices("MONGO_URI", "DB_URL"))
+    mongo_db_name: str = Field(alias="MONGO_DB_NAME")
+    mongo_collection_prefix: str = Field(default="tool_builder_v2", alias="MONGO_COLLECTION_PREFIX")
+
+    codex_workspace_host: str = Field(alias="CODEX_WORKSPACE_HOST")
+    codex_workspace_container: str = Field(alias="CODEX_WORKSPACE_CONTAINER")
+    codex_image_name: str = Field(alias="CODEX_IMAGE_NAME")
+    codex_command_template: str = Field(
+        default=(
+            "cd {job_dir} && codex exec --skip-git-repo-check "
+            "--dangerously-bypass-approvals-and-sandbox \"$(cat {prompt_file})\""
+        ),
+        alias="CODEX_COMMAND_TEMPLATE",
+    )
+
+    port_range_start: int = Field(default=3001, alias="PORT_RANGE_START")
+    port_range_end: int = Field(default=3999, alias="PORT_RANGE_END")
+
+    builder_cpu_limit: float = Field(default=1.0, alias="BUILDER_CPU_LIMIT")
+    builder_memory_limit: str = Field(default="512m", alias="BUILDER_MEMORY_LIMIT")
+    builder_pids_limit: int = Field(default=100, alias="BUILDER_PIDS_LIMIT")
+
+    tool_cpu_limit: float = Field(default=0.5, alias="TOOL_CPU_LIMIT")
+    tool_memory_limit: str = Field(default="256m", alias="TOOL_MEMORY_LIMIT")
+    tool_internal_port: int = Field(default=3000, alias="TOOL_INTERNAL_PORT")
+
+    brevo_api_key: str | None = Field(default=None, alias="BREVO_API_KEY")
+    brevo_sender_email: str | None = Field(default=None, alias="BREVO_SENDER_EMAIL")
+    alert_recipient_email: str | None = Field(default=None, alias="ALERT_RECIPIENT_EMAIL")
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+
+    max_build_attempts: int = Field(default=3, alias="MAX_BUILD_ATTEMPTS")
+    build_timeout_seconds: int = Field(default=900, alias="BUILD_TIMEOUT_SECONDS")
+    tool_test_command: str = Field(default="python -m pytest -q", alias="TOOL_TEST_COMMAND")
+
+    smoke_test_path: str = Field(default="/status", alias="SMOKE_TEST_PATH")
+    smoke_test_host: str = Field(default="host.docker.internal", alias="SMOKE_TEST_HOST")
+    smoke_test_timeout_seconds: int = Field(default=5, alias="SMOKE_TEST_TIMEOUT_SECONDS")
+    smoke_test_retries: int = Field(default=20, alias="SMOKE_TEST_RETRIES")
+    smoke_test_retry_interval_seconds: int = Field(default=2, alias="SMOKE_TEST_RETRY_INTERVAL_SECONDS")
+
+    monitor_poll_interval_seconds: int = Field(default=20, alias="MONITOR_POLL_INTERVAL_SECONDS")
+
+    operator_denied_paths: str = Field(default="", alias="OPERATOR_DENIED_PATHS")
+    operator_allowed_paths: str = Field(default="", alias="OPERATOR_ALLOWED_PATHS")
+    operator_project_paths: str = Field(default="", alias="OPERATOR_PROJECT_PATHS")
+    operator_timeout_seconds: int = Field(default=1800, alias="OPERATOR_TIMEOUT_SECONDS")
+    operator_github_token: str | None = Field(default=None, alias="OPERATOR_GITHUB_TOKEN")
+    operator_github_username: str = Field(default="x-access-token", alias="OPERATOR_GITHUB_USERNAME")
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
+    @property
+    def denied_paths(self) -> list[str]:
+        return [path.strip() for path in self.operator_denied_paths.split(",") if path.strip()]
+
+    @property
+    def allowed_paths(self) -> list[str]:
+        return [path.strip() for path in self.operator_allowed_paths.split(",") if path.strip()]
+
+    @property
+    def project_paths(self) -> list[str]:
+        return [path.strip() for path in self.operator_project_paths.split(",") if path.strip()]
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

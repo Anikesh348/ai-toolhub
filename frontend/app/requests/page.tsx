@@ -1,0 +1,309 @@
+"use client";
+
+import { startTransition, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+
+import {
+  JobSummary,
+  ToolRecord,
+  createToolBuilderSessionForTool,
+  deleteJob,
+  fetchJobs,
+  fetchTools,
+  formatDate,
+  startTool,
+  stopTool,
+  trimPrompt
+} from "@/lib/api";
+import { ACTIVE_STATUSES, STATUS_COLORS } from "@/lib/status";
+
+export default function RequestsPage() {
+  const router = useRouter();
+  const [jobs, setJobs] = useState<JobSummary[]>([]);
+  const [toolsById, setToolsById] = useState<Record<string, ToolRecord>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [chatLoadingToolId, setChatLoadingToolId] = useState<string | null>(null);
+  const [deleteLoadingJobId, setDeleteLoadingJobId] = useState<string | null>(null);
+
+  const visibleJobs = useMemo(() => {
+    const ordered = [...jobs].sort((lhs, rhs) => rhs.updatedAt.localeCompare(lhs.updatedAt));
+    const seenToolIds = new Set<string>();
+    const rows: JobSummary[] = [];
+
+    for (const job of ordered) {
+      if (job.toolId) {
+        if (seenToolIds.has(job.toolId)) {
+          continue;
+        }
+        seenToolIds.add(job.toolId);
+        rows.push(job);
+        continue;
+      }
+
+      if (ACTIVE_STATUSES.includes(job.status)) {
+        rows.push(job);
+      }
+    }
+
+    return rows;
+  }, [jobs]);
+
+  const runningCount = useMemo(() => visibleJobs.filter((job) => job.toolStatus === "RUNNING").length, [visibleJobs]);
+
+  async function load(): Promise<void> {
+    try {
+      const [jobData, toolData] = await Promise.all([fetchJobs(), fetchTools()]);
+      startTransition(() => {
+        setJobs(jobData);
+        setToolsById(
+          toolData.reduce<Record<string, ToolRecord>>((acc, tool) => {
+            acc[tool.toolId] = tool;
+            return acc;
+          }, {})
+        );
+      });
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load requests");
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    const intervalId = setInterval(() => {
+      void load();
+    }, 4000);
+    return () => clearInterval(intervalId);
+  }, []);
+
+  async function handleStart(toolId: string): Promise<void> {
+    setError(null);
+    setActionLoadingId(toolId);
+    try {
+      await startTool(toolId);
+      await load();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to start tool");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }
+
+  async function handleStop(toolId: string): Promise<void> {
+    setError(null);
+    setActionLoadingId(toolId);
+    try {
+      await stopTool(toolId);
+      await load();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to stop tool");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }
+
+  async function handleOpenToolChat(toolId: string): Promise<void> {
+    if (chatLoadingToolId) {
+      return;
+    }
+    const tool = toolsById[toolId];
+    if (!tool) {
+      setError("Unable to open chat for this tool");
+      return;
+    }
+
+    setError(null);
+    setChatLoadingToolId(toolId);
+    try {
+      const chat = await createToolBuilderSessionForTool(tool);
+      router.push(`/chat?chatId=${chat.id}`);
+    } catch (chatError) {
+      setError(chatError instanceof Error ? chatError.message : "Unable to open modify chat");
+    } finally {
+      setChatLoadingToolId(null);
+    }
+  }
+
+  async function handleDeleteJob(job: JobSummary): Promise<void> {
+    if (deleteLoadingJobId) {
+      return;
+    }
+    const label = job.toolName || trimPrompt(job.prompt, 60);
+    const confirmed = window.confirm(
+      `Delete "${label}"?\n\nThis will remove the generated tool/job and stop associated containers.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setError(null);
+    setDeleteLoadingJobId(job.id);
+    try {
+      await deleteJob(job.id);
+      await load();
+    } catch (deleteJobError) {
+      setError(deleteJobError instanceof Error ? deleteJobError.message : "Unable to delete tool/job");
+    } finally {
+      setDeleteLoadingJobId(null);
+    }
+  }
+
+  function toolDisplayName(job: JobSummary): string {
+    if (job.toolName) {
+      return job.toolName;
+    }
+    return trimPrompt(job.prompt, 52);
+  }
+
+  return (
+    <main className="flex flex-col gap-4 overflow-x-clip lg:h-full lg:min-h-0 lg:overflow-hidden">
+      <header className="glass-strong rounded-[1.8rem] px-6 py-6 lg:shrink-0">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="max-w-2xl">
+            <p className="badge">Runtime Console</p>
+            <h1 className="panel-title mt-2 text-3xl font-semibold md:text-4xl">Tools Generated</h1>
+            <p className="mt-2 text-sm text-muted">Track generated tools, manage lifecycle, and open chat-driven modify chats.</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span className="stat-pill">
+              Tool Jobs <strong>{visibleJobs.length}</strong>
+            </span>
+            <span className="stat-pill">
+              Running <strong className="text-mint">{runningCount}</strong>
+            </span>
+            <span className="stat-pill">
+              Polling <strong>4s</strong>
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <section className="glass rounded-[1.65rem] p-4 md:p-6 lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="panel-title text-xl font-semibold">All Generated Tools</h2>
+          <p className="font-[var(--font-mono)] text-xs text-muted">{visibleJobs.length} rows</p>
+        </div>
+        {error && <div className="mt-4 rounded-xl border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</div>}
+
+        <div className="mt-4 overflow-x-auto rounded-2xl border border-amber/20 bg-black/40 lg:min-h-0 lg:flex-1 lg:overflow-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-[0.16em] text-muted">
+                <th className="px-3 py-3">Tool Name</th>
+                <th className="px-3 py-3">Status</th>
+                <th className="px-3 py-3">Ports</th>
+                <th className="px-3 py-3">Actions</th>
+                <th className="px-3 py-3">Last Update</th>
+                <th className="px-3 py-3">Delete</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleJobs.map((job) => (
+                <tr key={job.id} className="border-t border-amber/15 align-top">
+                  <td className="px-3 py-3">
+                    <p className="text-sm font-semibold text-[color:var(--text-main)]">{toolDisplayName(job)}</p>
+                    <p className="mt-1 font-[var(--font-mono)] text-[11px] text-muted">Req: {job.id.slice(0, 8)}</p>
+                  </td>
+                  <td className="px-3 py-3">
+                    <p className={`font-[var(--font-mono)] text-xs ${STATUS_COLORS[job.status]}`}>{job.status}</p>
+                    <p className="mt-1 text-[11px] text-muted">Runtime: {job.toolStatus ?? "-"}</p>
+                  </td>
+                  <td className="px-3 py-3 text-xs text-muted">
+                    {(() => {
+                      const uiPort = job.uiPort ?? job.port;
+                      const servicePorts = job.ports ?? {};
+                      const servicePortPairs = Object.entries(servicePorts);
+
+                      if (!uiPort && servicePortPairs.length === 0) {
+                        return "-";
+                      }
+
+                      return (
+                        <div className="flex flex-col gap-1">
+                          {uiPort && (
+                            <a
+                              href={`http://localhost:${uiPort}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-medium text-skyline underline underline-offset-2"
+                            >
+                              UI: {uiPort}
+                            </a>
+                          )}
+                          {servicePortPairs.length > 0 && (
+                            <p className="text-[11px] text-muted">
+                              {servicePortPairs.map(([serviceName, servicePort]) => `${serviceName}:${servicePort}`).join(" | ")}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-3 py-3">
+                    {!job.toolId && (
+                      <span className="text-xs text-muted">
+                        {job.status === "RUNNING" ? "No runtime action" : "Building..."}
+                      </span>
+                    )}
+                    {job.toolId && (
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenToolChat(job.toolId!)}
+                          disabled={chatLoadingToolId === job.toolId}
+                          className="btn-ghost border-skyline/45 bg-skyline/10 px-2.5 py-1 text-xs text-skyline"
+                        >
+                          {chatLoadingToolId === job.toolId ? "Opening..." : "Modify Chat"}
+                        </button>
+                        {job.toolStatus === "RUNNING" ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleStop(job.toolId!)}
+                            disabled={actionLoadingId === job.toolId}
+                            className="btn-ghost border-coral/35 bg-coral/10 px-2.5 py-1 text-xs text-coral"
+                          >
+                            {actionLoadingId === job.toolId ? "Stopping..." : "Stop"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void handleStart(job.toolId!)}
+                            disabled={actionLoadingId === job.toolId}
+                            className="btn-ghost border-mint/35 bg-mint/10 px-2.5 py-1 text-xs text-mint"
+                          >
+                            {actionLoadingId === job.toolId ? "Starting..." : "Start"}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-3 py-3">
+                    <p className="text-xs text-muted">{job.lastMessage ?? "-"}</p>
+                    <p className="mt-1 text-[11px] text-muted">{formatDate(job.lastLogAt ?? job.updatedAt)}</p>
+                  </td>
+                  <td className="px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteJob(job)}
+                      disabled={deleteLoadingJobId === job.id}
+                      className="btn-ghost border-amber/30 bg-black/35 px-2.5 py-1 text-xs text-[color:var(--text-main)]"
+                    >
+                      {deleteLoadingJobId === job.id ? "Deleting..." : "Delete"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {visibleJobs.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-sm text-muted">
+                    No generated tools yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  );
+}
