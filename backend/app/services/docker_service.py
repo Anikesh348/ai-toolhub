@@ -429,12 +429,14 @@ class DockerService:
     def build_image(self, request_id: str, image_tag: str) -> CommandResult:
         host_job_path, _ = self.ensure_job_workspace(request_id)
         build_logs: list[str] = []
+        container_limits = self._build_container_limits()
         try:
             _, stream = self._client.images.build(
                 path=str(host_job_path),
                 tag=image_tag,
                 rm=True,
                 pull=False,
+                container_limits=container_limits or None,
             )
             for chunk in stream:
                 line = chunk.get("stream") or chunk.get("error") or ""
@@ -801,6 +803,7 @@ class DockerService:
                     rm=True,
                     pull=False,
                     buildargs=build_args or None,
+                    container_limits=self._build_container_limits() or None,
                 )
                 for _ in stream:
                     # Drain build output to complete the generator and surface failures.
@@ -1141,3 +1144,48 @@ class DockerService:
     @staticmethod
     def _to_nano_cpus(cpu_cores: float) -> int:
         return int(cpu_cores * 1_000_000_000)
+
+    def _build_container_limits(self) -> dict[str, Any]:
+        limits: dict[str, Any] = {}
+        memory_limit = self._parse_memory_limit_bytes(self._settings.builder_memory_limit)
+        if memory_limit is not None:
+            limits["memory"] = memory_limit
+
+        cpu_limit = max(float(self._settings.builder_cpu_limit), 0.0)
+        if cpu_limit <= 0:
+            return limits
+
+        host_cpus = max(1, os.cpu_count() or 1)
+        allowed_cpus = min(host_cpus, max(1, int(cpu_limit)))
+        limits["cpusetcpus"] = "0" if allowed_cpus == 1 else f"0-{allowed_cpus - 1}"
+        limits["cpushares"] = max(2, int(cpu_limit * 1024))
+        return limits
+
+    @staticmethod
+    def _parse_memory_limit_bytes(value: str | int | float | None) -> int | None:
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            numeric = int(value)
+            return numeric if numeric > 0 else None
+
+        candidate = str(value).strip().lower()
+        if not candidate:
+            return None
+
+        match = re.fullmatch(r"(\d+)([kmgt]?)(i?b)?", candidate)
+        if not match:
+            return None
+
+        amount = int(match.group(1))
+        unit = match.group(2)
+        is_binary = (match.group(3) or "").startswith("i")
+        multipliers = {
+            "": 1,
+            "k": 1024 if is_binary else 1000,
+            "m": (1024 ** 2) if is_binary else (1000 ** 2),
+            "g": (1024 ** 3) if is_binary else (1000 ** 3),
+            "t": (1024 ** 4) if is_binary else (1000 ** 4),
+        }
+        return amount * multipliers[unit]

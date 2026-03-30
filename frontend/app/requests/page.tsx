@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import {
@@ -25,6 +25,7 @@ export default function RequestsPage() {
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [chatLoadingToolId, setChatLoadingToolId] = useState<string | null>(null);
   const [deleteLoadingJobId, setDeleteLoadingJobId] = useState<string | null>(null);
+  const pollingRef = useRef(false);
 
   const visibleJobs = useMemo(() => {
     const ordered = [...jobs].sort((lhs, rhs) => rhs.updatedAt.localeCompare(lhs.updatedAt));
@@ -50,6 +51,8 @@ export default function RequestsPage() {
   }, [jobs]);
 
   const runningCount = useMemo(() => visibleJobs.filter((job) => job.toolStatus === "RUNNING").length, [visibleJobs]);
+  const hasActiveBuilds = useMemo(() => jobs.some((job) => ACTIVE_STATUSES.includes(job.status)), [jobs]);
+  const pollIntervalMs = hasActiveBuilds ? 6000 : 12000;
 
   async function load(): Promise<void> {
     try {
@@ -69,12 +72,41 @@ export default function RequestsPage() {
   }
 
   useEffect(() => {
-    void load();
-    const intervalId = setInterval(() => {
-      void load();
-    }, 4000);
-    return () => clearInterval(intervalId);
-  }, []);
+    let mounted = true;
+
+    const runPoll = async (): Promise<void> => {
+      if (!mounted || pollingRef.current) {
+        return;
+      }
+      pollingRef.current = true;
+      try {
+        await load();
+      } finally {
+        pollingRef.current = false;
+      }
+    };
+
+    void runPoll();
+    const intervalId = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
+      void runPoll();
+    }, pollIntervalMs);
+
+    const handleVisibilityChange = (): void => {
+      if (!document.hidden) {
+        void runPoll();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [pollIntervalMs]);
 
   async function handleStart(toolId: string): Promise<void> {
     setError(null);
@@ -172,7 +204,7 @@ export default function RequestsPage() {
               Running <strong className="text-mint">{runningCount}</strong>
             </span>
             <span className="stat-pill">
-              Polling <strong>4s</strong>
+              Polling <strong>{`${pollIntervalMs / 1000}s`}</strong>
             </span>
           </div>
         </div>

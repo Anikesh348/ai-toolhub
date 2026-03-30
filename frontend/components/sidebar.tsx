@@ -47,8 +47,13 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
 
   useEffect(() => {
     let mounted = true;
+    let inFlight = false;
 
     async function loadChats(showSpinner = false): Promise<void> {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
       if (showSpinner) {
         setLoadingChats(true);
       }
@@ -59,6 +64,7 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
         }
         setChats(data.slice(0, 35));
       } finally {
+        inFlight = false;
         if (mounted) {
           setLoadingChats(false);
         }
@@ -66,13 +72,24 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
     }
 
     void loadChats(true);
-    const intervalId = setInterval(() => {
+    const intervalId = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
       void loadChats();
-    }, 5000);
+    }, 15000);
+
+    const handleVisibilityChange = (): void => {
+      if (!document.hidden) {
+        void loadChats();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       mounted = false;
-      clearInterval(intervalId);
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 

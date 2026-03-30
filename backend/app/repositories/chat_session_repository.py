@@ -10,13 +10,14 @@ class ChatSessionRepository:
     def __init__(self, collection: Collection[Any]) -> None:
         self._collection = collection
 
-    def create(self, title: str, mode: str) -> dict:
+    def create(self, title: str, mode: str, model: str | None = None) -> dict:
         session_id = uuid4().hex
         now = datetime.now(tz=timezone.utc)
         document = {
             "_id": session_id,
             "title": title,
             "mode": mode,
+            "model": model,
             "archived": False,
             "createdAt": now,
             "updatedAt": now,
@@ -40,6 +41,7 @@ class ChatSessionRepository:
         session_id: str,
         title: str | None = None,
         mode: str | None = None,
+        model: str | None = None,
         archived: bool | None = None,
     ) -> Optional[dict]:
         update_fields: dict[str, Any] = {"updatedAt": datetime.now(tz=timezone.utc)}
@@ -47,6 +49,8 @@ class ChatSessionRepository:
             update_fields["title"] = title
         if mode is not None:
             update_fields["mode"] = mode
+        if model is not None:
+            update_fields["model"] = model
         if archived is not None:
             update_fields["archived"] = archived
 
@@ -73,6 +77,7 @@ class ChatSessionRepository:
             "id": document["_id"],
             "title": document["title"],
             "mode": document["mode"],
+            "model": document.get("model"),
             "archived": document.get("archived", False),
             "createdAt": document["createdAt"],
             "updatedAt": document["updatedAt"],

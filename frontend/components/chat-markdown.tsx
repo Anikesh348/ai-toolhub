@@ -44,6 +44,13 @@ export default function ChatMarkdown({ content, isUser = false }: ChatMarkdownPr
               <code className="rounded bg-black/50 px-1.5 py-0.5 font-[var(--font-mono)] text-[13px] text-skyline">{children}</code>
             );
           },
+          img: ({ src, alt }) => (
+            <img
+              src={src ?? ""}
+              alt={alt ?? "image"}
+              className="max-h-96 w-full max-w-2xl rounded-xl border border-amber/25 object-contain"
+            />
+          ),
           blockquote: ({ children }) => <blockquote className="border-l-2 border-amber/40 pl-3 text-muted">{children}</blockquote>
         }}
       >

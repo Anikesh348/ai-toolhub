@@ -18,6 +18,8 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 ## Key Features
 
 - Persistent chat sessions with Codex-backed responses (`/chat/*` APIs + `/chat` UI page).
+- Chat model selection with configurable available-model dropdown (`CODEX_CHAT_MODELS`, `CODEX_DEFAULT_CHAT_MODEL`).
+- Chat image attachments (upload image in composer, pass to Codex via `codex exec --image`).
 - Operator mode supports host operations tasks (project edits, Docker summaries, health checks/restarts).
 - Prompt refinement with system constraints for generated tools.
 - Prompt refinement defaults generated apps/tools to include a Next.js (React) UI unless prompt explicitly asks for backend/API/CLI only.
@@ -107,6 +109,7 @@ scripts/
    docker-compose up --build
    ```
 8. Open UI at `http://localhost:${UI_PORT}` (default `http://localhost:3000`).
+9. For lower Pi build CPU, keep `UI_NEXT_DISABLE_SWC_WORKER=1` and tune `BUILDER_CPU_LIMIT` in `.env` (for tool image builds).
 
 ## Codex Authentication (Docker)
 
@@ -125,12 +128,18 @@ scripts/
   - creates a persistent chat session (`general`, `tool_builder`, `operator`; `pi_operator` accepted as alias)
 - `GET /chat/sessions`
   - lists chat sessions ordered by latest activity
+- `GET /chat/models`
+  - returns available Codex chat models and default selection for the UI dropdown
 - `GET /chat/sessions/{sessionId}/messages`
   - returns session message history
 - `POST /chat/sessions/{sessionId}/messages`
   - appends user message and returns assistant response
 - `POST /chat/sessions/{sessionId}/messages/stream`
   - streams chat events over SSE (`user_message`, `assistant_delta`, `assistant_message`, `done`)
+- `POST /chat/sessions/{sessionId}/attachments`
+  - uploads an image attachment for chat and returns attachment metadata/id
+- `GET /chat/sessions/{sessionId}/attachments/{attachmentId}`
+  - serves an uploaded chat attachment
 - `POST /tools/generate`
   - body: `{"prompt":"...", "name":"optional-name"}`
   - returns: `jobId`, initial status
@@ -181,3 +190,5 @@ scripts/
 - Build/test tasks run in background threads, reducing API latency.
 - Builder containers are ephemeral and removed after each attempt.
 - Tight default CPU/memory limits avoid saturation on 8GB systems.
+- Docker image builds inherit builder CPU/memory limits to avoid host-wide spikes during tool builds.
+- UI polling auto-throttles when idle/backgrounded to reduce dashboard-side CPU churn during long builds.

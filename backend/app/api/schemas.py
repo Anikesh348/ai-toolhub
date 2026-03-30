@@ -115,11 +115,13 @@ ChatRole = Literal["user", "assistant", "system", "tool"]
 class CreateChatSessionRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=140)
     mode: ChatMode = "general"
+    model: Optional[str] = Field(default=None, max_length=120)
 
 
 class UpdateChatSessionRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=140)
     mode: Optional[ChatMode] = None
+    model: Optional[str] = Field(default=None, max_length=120)
     archived: Optional[bool] = None
 
 
@@ -127,6 +129,7 @@ class ChatSessionResponse(BaseModel):
     id: str
     title: str
     mode: ChatMode
+    model: Optional[str] = None
     archived: bool
     createdAt: datetime
     updatedAt: datetime
@@ -134,6 +137,8 @@ class ChatSessionResponse(BaseModel):
 
 class CreateChatMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=16000)
+    model: Optional[str] = Field(default=None, max_length=120)
+    attachmentIds: list[str] = Field(default_factory=list, max_length=4)
 
 
 class ChatMessageResponse(BaseModel):
@@ -154,3 +159,17 @@ class SendChatMessageResponse(BaseModel):
 class DeleteChatSessionResponse(BaseModel):
     sessionId: str
     deleted: bool
+
+
+class ChatModelsResponse(BaseModel):
+    models: list[str]
+    defaultModel: Optional[str] = None
+
+
+class ChatAttachmentResponse(BaseModel):
+    id: str
+    fileName: str
+    contentType: str
+    size: int
+    containerPath: str
+    url: str

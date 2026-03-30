@@ -1,4 +1,5 @@
 import json
+import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,8 @@ from app.services.tool_builder_service import ToolBuilderService
 from app.utils.logger import get_logger
 
 CHAT_MODES = {"general", "tool_builder", "operator", "pi_operator"}
+MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_MESSAGE_ATTACHMENTS = 4
 
 
 class ChatService:
@@ -36,11 +39,16 @@ class ChatService:
         self._tool_builder_service = tool_builder_service
         self._logger = get_logger(__name__)
 
-    def create_session(self, title: str | None, mode: str) -> dict:
+    def create_session(self, title: str | None, mode: str, model: str | None = None) -> dict:
         normalized_mode = self._normalize_mode(mode)
+        normalized_model = self._resolve_model(model=model, fallback_to_default=True)
         cleaned_title = (title or "").strip()
         session_title = cleaned_title if cleaned_title else "New Chat"
-        return self._session_repository.create(title=session_title, mode=normalized_mode)
+        return self._session_repository.create(
+            title=session_title,
+            mode=normalized_mode,
+            model=normalized_model,
+        )
 
     def list_sessions(self, limit: int = 100) -> list[dict]:
         return self._session_repository.list_recent(limit=limit)
@@ -51,21 +59,44 @@ class ChatService:
     def list_messages(self, session_id: str, limit: int = 500) -> list[dict]:
         return self._message_repository.list_for_session(session_id=session_id, limit=limit)
 
-    def send_message(self, session_id: str, content: str) -> tuple[dict | None, dict | None, str | None]:
+    def send_message(
+        self,
+        session_id: str,
+        content: str,
+        model: str | None = None,
+        attachment_ids: list[str] | None = None,
+    ) -> tuple[dict | None, dict | None, str | None]:
         session = self._session_repository.get_by_id(session_id)
         if session is None:
             return None, None, "Session not found"
 
+        attachments, attachment_error = self._resolve_message_attachments(
+            session_id=session_id,
+            attachment_ids=attachment_ids or [],
+        )
+        if attachment_error:
+            return None, None, attachment_error
+
         existing_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=1)
+        user_metadata: dict[str, Any] = {}
+        if attachments:
+            user_metadata["attachments"] = attachments
         user_message = self._message_repository.create(
             session_id=session_id,
             role="user",
             content=content.strip(),
+            metadata=user_metadata if user_metadata else None,
         )
         if not existing_messages:
             session = self._auto_name_session(session, content)
 
         recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=18)
+        selected_model = (
+            self._resolve_model(model=model, fallback_to_default=False)
+            or self._resolve_model(model=session.get("model"), fallback_to_default=False)
+            or self._resolve_model(model=None, fallback_to_default=True)
+        )
+        image_paths = [str(item.get("containerPath")) for item in attachments if item.get("containerPath")]
         prompt = self._build_chat_prompt(
             mode=self._normalize_mode(session["mode"]),
             messages=recent_messages,
@@ -90,7 +121,12 @@ class ChatService:
             if tool_builder_context:
                 assistant_metadata["toolBuilder"] = tool_builder_context
         else:
-            completion = self._codex_service.run_chat(session_id=session_id, prompt=prompt)
+            completion = self._codex_service.run_chat(
+                session_id=session_id,
+                prompt=prompt,
+                model=selected_model,
+                image_paths=image_paths,
+            )
             assistant_text = self._build_assistant_text(completion.logs, completion.success)
             success = completion.success
             exit_code = completion.exit_code
@@ -112,7 +148,13 @@ class ChatService:
         self._session_repository.touch(session_id)
         return user_message, assistant_message, None
 
-    def stream_message(self, session_id: str, content: str) -> Iterable[dict[str, Any]]:
+    def stream_message(
+        self,
+        session_id: str,
+        content: str,
+        model: str | None = None,
+        attachment_ids: list[str] | None = None,
+    ) -> Iterable[dict[str, Any]]:
         session = self._session_repository.get_by_id(session_id)
         if session is None:
             yield {"type": "error", "error": "Session not found"}
@@ -123,11 +165,23 @@ class ChatService:
             yield {"type": "error", "error": "Message content cannot be empty"}
             return
 
+        attachments, attachment_error = self._resolve_message_attachments(
+            session_id=session_id,
+            attachment_ids=attachment_ids or [],
+        )
+        if attachment_error:
+            yield {"type": "error", "error": attachment_error}
+            return
+
         existing_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=1)
+        user_metadata: dict[str, Any] = {}
+        if attachments:
+            user_metadata["attachments"] = attachments
         user_message = self._message_repository.create(
             session_id=session_id,
             role="user",
             content=user_content,
+            metadata=user_metadata if user_metadata else None,
         )
         if not existing_messages:
             session = self._auto_name_session(session, user_content)
@@ -136,6 +190,12 @@ class ChatService:
         yield {"type": "status", "status": "thinking"}
 
         recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=18)
+        selected_model = (
+            self._resolve_model(model=model, fallback_to_default=False)
+            or self._resolve_model(model=session.get("model"), fallback_to_default=False)
+            or self._resolve_model(model=None, fallback_to_default=True)
+        )
+        image_paths = [str(item.get("containerPath")) for item in attachments if item.get("containerPath")]
         prompt = self._build_chat_prompt(
             mode=self._normalize_mode(session["mode"]),
             messages=recent_messages,
@@ -164,7 +224,12 @@ class ChatService:
         else:
             completion = None
             raw_logs = ""
-            for stream_event in self._codex_service.stream_chat(session_id=session_id, prompt=prompt):
+            for stream_event in self._codex_service.stream_chat(
+                session_id=session_id,
+                prompt=prompt,
+                model=selected_model,
+                image_paths=image_paths,
+            ):
                 if stream_event.type == "log" and stream_event.chunk:
                     raw_logs = f"{raw_logs}{stream_event.chunk}"
                     if len(raw_logs) > 24000:
@@ -227,16 +292,72 @@ class ChatService:
         session_id: str,
         title: str | None = None,
         mode: str | None = None,
+        model: str | None = None,
+        update_model: bool = False,
         archived: bool | None = None,
     ) -> dict | None:
         normalized_mode = self._normalize_mode(mode) if mode is not None else None
         normalized_title = title.strip() if isinstance(title, str) else None
+        normalized_model = self._resolve_model(model=model, fallback_to_default=True) if update_model else None
         return self._session_repository.update(
             session_id=session_id,
             title=normalized_title if normalized_title else None,
             mode=normalized_mode,
+            model=normalized_model if update_model else None,
             archived=archived,
         )
+
+    def list_models(self) -> dict[str, Any]:
+        return {
+            "models": self._codex_service.list_chat_models(),
+            "defaultModel": self._codex_service.default_chat_model(),
+        }
+
+    def create_image_attachment(
+        self,
+        session_id: str,
+        file_name: str,
+        content_type: str | None,
+        data: bytes,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        session = self._session_repository.get_by_id(session_id)
+        if session is None:
+            return None, "Session not found"
+
+        if not data:
+            return None, "Attachment is empty."
+        if len(data) > MAX_IMAGE_ATTACHMENT_BYTES:
+            return None, f"Image is too large. Maximum size is {MAX_IMAGE_ATTACHMENT_BYTES // (1024 * 1024)}MB."
+        normalized_type = (content_type or "").lower()
+        if not normalized_type.startswith("image/"):
+            guessed_type = (mimetypes.guess_type(file_name)[0] or "").lower()
+            if not guessed_type.startswith("image/"):
+                return None, "Only image attachments are supported."
+            content_type = guessed_type
+
+        try:
+            saved = self._codex_service.save_chat_attachment(
+                session_id=session_id,
+                file_name=file_name,
+                content_type=content_type,
+                data=data,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.exception("Unable to save chat attachment for session %s", session_id)
+            return None, str(exc)
+        if not saved:
+            return None, "Unable to save attachment."
+        attachment = dict(saved)
+        attachment["url"] = f"/chat/sessions/{session_id}/attachments/{attachment['id']}"
+        return attachment, None
+
+    def get_image_attachment(self, session_id: str, attachment_id: str) -> dict[str, Any] | None:
+        attachment = self._codex_service.get_chat_attachment(session_id=session_id, attachment_id=attachment_id)
+        if not attachment:
+            return None
+        enriched = dict(attachment)
+        enriched["url"] = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
+        return enriched
 
     def delete_session(self, session_id: str) -> bool:
         session = self._session_repository.get_by_id(session_id)
@@ -261,7 +382,16 @@ class ChatService:
             role = message["role"].upper()
             # Keep history entries on one serialized line so echoed prompts
             # do not inject multiline prior responses into incremental parsing.
-            content = re.sub(r"\s+", " ", message["content"]).strip()
+            content_with_context = str(message["content"])
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if isinstance(metadata, dict):
+                attachment_context = self._attachment_prompt_context(metadata)
+                if attachment_context:
+                    if content_with_context:
+                        content_with_context = f"{content_with_context}\n\n{attachment_context}"
+                    else:
+                        content_with_context = attachment_context
+            content = re.sub(r"\s+", " ", content_with_context).strip()
             serialized_content = json.dumps(content, ensure_ascii=False)
             lines.append(f"{role}: {serialized_content}")
         lines.append("")
@@ -844,6 +974,66 @@ class ChatService:
         if mode in {"general", "tool_builder", "operator"}:
             return mode
         return "general"
+
+    def _resolve_model(self, model: str | None, fallback_to_default: bool) -> str | None:
+        cleaned = (model or "").strip()
+        if cleaned and self._codex_service.is_supported_chat_model(cleaned):
+            return cleaned
+        if fallback_to_default:
+            return self._codex_service.default_chat_model()
+        return None
+
+    def _resolve_message_attachments(
+        self,
+        session_id: str,
+        attachment_ids: list[str],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        if not attachment_ids:
+            return [], None
+        if len(attachment_ids) > MAX_MESSAGE_ATTACHMENTS:
+            return [], f"You can attach up to {MAX_MESSAGE_ATTACHMENTS} images per message."
+
+        attachments: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for attachment_id in attachment_ids:
+            cleaned = (attachment_id or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            resolved = self.get_image_attachment(session_id=session_id, attachment_id=cleaned)
+            if not resolved:
+                return [], f"Attachment `{cleaned}` was not found."
+            attachments.append(
+                {
+                    "id": resolved["id"],
+                    "fileName": resolved["fileName"],
+                    "contentType": resolved["contentType"],
+                    "size": resolved["size"],
+                    "containerPath": resolved["containerPath"],
+                    "url": resolved["url"],
+                }
+            )
+        return attachments, None
+
+    @staticmethod
+    def _attachment_prompt_context(metadata: dict[str, Any]) -> str:
+        raw_attachments = metadata.get("attachments")
+        if not isinstance(raw_attachments, list) or not raw_attachments:
+            return ""
+
+        details: list[str] = []
+        for item in raw_attachments:
+            if not isinstance(item, dict):
+                continue
+            file_name = str(item.get("fileName") or "image")
+            container_path = str(item.get("containerPath") or "")
+            if container_path:
+                details.append(f"{file_name} ({container_path})")
+            else:
+                details.append(file_name)
+        if not details:
+            return ""
+        return "Attached image files: " + "; ".join(details)
 
     @staticmethod
     def _extract_project_hint(user_content: str) -> str | None:
