@@ -1,7 +1,6 @@
 import json
 import mimetypes
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -600,7 +599,7 @@ class ChatService:
                 "bind": "/var/run/docker.sock",
                 "mode": "rw",
             }
-        branch_name = f"codex/operator-{datetime.now(tz=timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+        branch_instruction = self._operator_branch_instruction(user_content=user_content)
         recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=24)
         conversation_context = self._format_operator_conversation_context(recent_messages)
         cross_session_context = self._recent_operator_session_context(
@@ -625,10 +624,8 @@ class ChatService:
             f"Current user task:\n{user_content}\n\n"
             "Execution requirements:\n"
             f"- Work under: {container_cwd}\n"
-            "- If this is a code-change task in a git repository, identify the target repository and execute:\n"
-            f"  1) `git checkout -b {branch_name}` (or a close unique variant if it already exists)\n"
-            "  2) implement the requested change\n"
-            "  3) run relevant tests/lint/build checks only when needed for confidence\n"
+            f"{branch_instruction}\n"
+            "- For code changes, implement the requested update and run tests/lint/build checks only when needed for confidence.\n"
             "- If this is non-code ops query, provide concise factual summary.\n"
             "- For container operations, try `docker compose` first and fall back to `docker-compose` if needed.\n"
             "- Keep response crisp and readable (3-6 short lines by default).\n"
@@ -689,6 +686,59 @@ class ChatService:
         normalized = "\n".join(filtered_lines).strip()
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
         return normalized
+
+    @staticmethod
+    def _operator_branch_instruction(user_content: str) -> str:
+        requested_branch = ChatService._extract_requested_branch_name(user_content=user_content)
+        if requested_branch:
+            return (
+                "- For code-change tasks in a git repository, the user explicitly requested branch work: "
+                f"switch to `{requested_branch}` (create it only if it does not exist), then implement the change."
+            )
+
+        if ChatService._user_requested_new_branch(user_content=user_content):
+            return (
+                "- For code-change tasks in a git repository, the user explicitly requested a new branch: "
+                "create a sensible branch name, switch to it, then implement the change."
+            )
+
+        return (
+            "- For code-change tasks in a git repository, stay on the current branch by default. "
+            "Create or switch branches only when the user explicitly asks."
+        )
+
+    @staticmethod
+    def _user_requested_new_branch(user_content: str) -> bool:
+        lowered = user_content.lower()
+        branch_request_patterns = (
+            r"\bnew branch\b",
+            r"\bseparate branch\b",
+            r"\bcreate (?:a )?(?:new )?branch\b",
+            r"\bcheckout\s+-b\b",
+            r"\bcheck out (?:a )?(?:new )?branch\b",
+            r"\bswitch to (?:a )?(?:new )?branch\b",
+            r"\bwork on (?:a )?(?:new|separate) branch\b",
+            r"\buse (?:a )?(?:new|separate) branch\b",
+        )
+        return any(re.search(pattern, lowered) for pattern in branch_request_patterns)
+
+    @staticmethod
+    def _extract_requested_branch_name(user_content: str) -> str | None:
+        branch_name_patterns = (
+            r"\bgit checkout -b\s+([A-Za-z0-9._/-]+)",
+            r"\bcheckout -b\s+([A-Za-z0-9._/-]+)",
+            r"\b(?:create|use|switch to|checkout)\s+(?:the\s+)?branch\s+([A-Za-z0-9._/-]+)",
+            r"\bon\s+branch\s+([A-Za-z0-9._/-]+)",
+            r"\bbranch\s+(?:named|called)\s+([A-Za-z0-9._/-]+)",
+        )
+        for pattern in branch_name_patterns:
+            match = re.search(pattern, user_content, flags=re.IGNORECASE)
+            if not match:
+                continue
+            branch_name = match.group(1).strip().strip("`'\".,;:()[]{}")
+            if branch_name:
+                return branch_name
+        return None
 
     def _run_tool_builder_task(self, session_id: str, user_content: str) -> tuple[str, dict[str, Any] | None]:
         if self._tool_builder_service is None:
