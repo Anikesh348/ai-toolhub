@@ -1,7 +1,36 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_cors_allowed_origins(value: str) -> list[str]:
+    origins: list[str] = []
+    seen: set[str] = set()
+
+    for raw_origin in value.split(","):
+        candidate = raw_origin.strip()
+        if not candidate:
+            continue
+
+        # Accept "host:port" entries by expanding them to both common schemes.
+        candidates = [candidate]
+        if "://" not in candidate:
+            candidates = [f"http://{candidate}", f"https://{candidate}"]
+
+        for candidate_with_scheme in candidates:
+            parsed = urlsplit(candidate_with_scheme)
+            if not parsed.scheme or not parsed.netloc:
+                continue
+
+            normalized_origin = f"{parsed.scheme}://{parsed.netloc}"
+            if normalized_origin in seen:
+                continue
+            seen.add(normalized_origin)
+            origins.append(normalized_origin)
+
+    return origins
 
 
 class Settings(BaseSettings):
@@ -68,7 +97,7 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+        return parse_cors_allowed_origins(self.cors_allowed_origins)
 
     @property
     def denied_paths(self) -> list[str]:
