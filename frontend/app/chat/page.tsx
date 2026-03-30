@@ -380,8 +380,8 @@ function ChatPageContent() {
   const showCenteredWelcome = !loadingMessages && messages.length === 0 && !streamingAssistant && streamActivity === "ready";
 
   return (
-    <main className="flex h-full min-h-0 flex-col">
-      <header className="shrink-0 flex items-center justify-between gap-3 border-b border-amber/15 px-2 pb-3 lg:px-4">
+    <main className="chat-page-root flex h-full min-h-0 flex-col">
+      <header className="chat-page-header shrink-0 flex items-center justify-between gap-3 border-b border-amber/15 px-2 pb-3 lg:px-4">
         <div>
           <p className="text-[11px] uppercase tracking-[0.18em] text-muted">Chat</p>
           <h1 className="mt-1 text-xl font-medium text-[color:var(--text-main)]">{activeChat?.title ?? "New chat"}</h1>
@@ -446,9 +446,9 @@ function ChatPageContent() {
           </div>
         </div>
 
-        <form className="shrink-0 border-t border-amber/15 bg-[#0e0d0b]/88 px-2 pb-3 pt-3 backdrop-blur lg:px-4 lg:pb-4" onSubmit={handleSend}>
+        <form className="chat-page-composer shrink-0 border-t border-amber/15 bg-[#0e0d0b]/88 px-2 pb-3 pt-3 backdrop-blur lg:px-4 lg:pb-4" onSubmit={handleSend}>
           <div className="mx-auto w-full max-w-4xl">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
+            <div className="chat-page-modes mb-2 flex flex-wrap items-center gap-2">
               {MODE_OPTIONS.map((option) => {
                 const active = composerMode === option.value;
                 return (

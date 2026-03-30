@@ -1,0 +1,38 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024' role='img' aria-label='AI ToolHub icon'>
+  <defs>
+    <linearGradient id='bg' x1='0%' y1='0%' x2='100%' y2='100%'>
+      <stop offset='0%' stop-color='#11100d'/>
+      <stop offset='55%' stop-color='#1a1308'/>
+      <stop offset='100%' stop-color='#090807'/>
+    </linearGradient>
+    <radialGradient id='halo' cx='32%' cy='24%' r='82%'>
+      <stop offset='0%' stop-color='#f6d58e' stop-opacity='0.9'/>
+      <stop offset='36%' stop-color='#e6b565' stop-opacity='0.62'/>
+      <stop offset='100%' stop-color='#8b5f21' stop-opacity='0.1'/>
+    </radialGradient>
+    <linearGradient id='core' x1='12%' y1='16%' x2='88%' y2='92%'>
+      <stop offset='0%' stop-color='#ffe7ad'/>
+      <stop offset='58%' stop-color='#f0c36f'/>
+      <stop offset='100%' stop-color='#c6882f'/>
+    </linearGradient>
+  </defs>
+
+  <rect x='36' y='36' width='952' height='952' rx='220' fill='url(#bg)' />
+  <rect x='36' y='36' width='952' height='952' rx='220' fill='url(#halo)' />
+
+  <g opacity='0.86' stroke='#f6d58e' fill='none' stroke-linecap='round'>
+    <path d='M290 512c0-123 99-222 222-222h44c123 0 222 99 222 222' stroke-width='30' opacity='0.45'/>
+    <path d='M246 512c0-147 119-266 266-266h44c147 0 266 119 266 266' stroke-width='15' opacity='0.28'/>
+  </g>
+
+  <circle cx='512' cy='560' r='184' fill='url(#core)' />
+  <circle cx='512' cy='560' r='112' fill='#241607' opacity='0.96' />
+
+  <g fill='#f9d48a'>
+    <path d='M725 287l17 41 41 17-41 17-17 41-17-41-41-17 41-17z' opacity='0.95'/>
+    <path d='M318 264l10 24 24 10-24 10-10 24-10-24-24-10 24-10z' opacity='0.7'/>
+    <path d='M770 670l11 26 26 11-26 11-11 26-11-26-26-11 26-11z' opacity='0.74'/>
+  </g>
+
+  <rect x='36' y='36' width='952' height='952' rx='220' fill='none' stroke='rgba(255,227,169,0.34)' stroke-width='6'/>
+</svg>
