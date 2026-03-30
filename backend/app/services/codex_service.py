@@ -1,7 +1,11 @@
 import base64
+import json
+import mimetypes
 from pathlib import Path
 import re
+import shlex
 from typing import Iterable
+from uuid import uuid4
 
 from app.services.docker_service import CommandResult, CommandStreamEvent, DockerService
 from app.utils.config import Settings
@@ -13,6 +17,7 @@ class CodexService:
     _LOGGED_OUT_RE = re.compile(r"\b(?:not logged in|logged out)\b", flags=re.IGNORECASE)
     _PROVIDER_RE = re.compile(r"\b(?:using|with)\s+(.+)$", flags=re.IGNORECASE)
     _SSH_TARGET_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+    _CHAT_ATTACHMENT_ID_RE = re.compile(r"^[a-f0-9]{32}-[A-Za-z0-9._-]{1,180}$")
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
         self._settings = settings
@@ -40,7 +45,14 @@ class CodexService:
         host_job_path = Path(self._settings.codex_workspace_host) / request_id
         return (host_job_path / "README.md").exists()
 
-    def run_chat(self, session_id: str, prompt: str, timeout_seconds: int | None = None) -> CommandResult:
+    def run_chat(
+        self,
+        session_id: str,
+        prompt: str,
+        model: str | None = None,
+        image_paths: list[str] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> CommandResult:
         request_id = f"chat-{session_id}"
         host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
         prompt_file_host = host_job_path / "chat_prompt.txt"
@@ -53,6 +65,8 @@ class CodexService:
             workspace=self._settings.codex_workspace_container,
             request_id=request_id,
         )
+        shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
+        shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
         return self._docker_service.run_builder_container(
             request_id=request_id,
             shell_command=shell_command,
@@ -63,6 +77,8 @@ class CodexService:
         self,
         session_id: str,
         prompt: str,
+        model: str | None = None,
+        image_paths: list[str] | None = None,
         timeout_seconds: int | None = None,
     ) -> Iterable[CommandStreamEvent]:
         request_id = f"chat-{session_id}"
@@ -77,11 +93,88 @@ class CodexService:
             workspace=self._settings.codex_workspace_container,
             request_id=request_id,
         )
+        shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
+        shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
         return self._docker_service.run_builder_container_stream_with_options(
             request_id=request_id,
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.build_timeout_seconds,
         )
+
+    def list_chat_models(self) -> list[str]:
+        return self._settings.available_chat_models
+
+    def default_chat_model(self) -> str | None:
+        return self._settings.default_chat_model
+
+    def is_supported_chat_model(self, model: str) -> bool:
+        return model in self.list_chat_models()
+
+    def save_chat_attachment(
+        self,
+        session_id: str,
+        file_name: str,
+        content_type: str | None,
+        data: bytes,
+    ) -> dict[str, object]:
+        request_id = f"chat-{session_id}"
+        host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
+        attachment_dir = host_job_path / "attachments"
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_name = self._sanitize_attachment_filename(file_name)
+        attachment_id = f"{uuid4().hex}-{safe_name}"
+        attachment_host_path = attachment_dir / attachment_id
+        attachment_host_path.write_bytes(data)
+
+        metadata_path = attachment_dir / f"{attachment_id}.json"
+        metadata = {
+            "fileName": file_name,
+            "contentType": content_type or "",
+            "size": len(data),
+        }
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        resolved = self.get_chat_attachment(session_id=session_id, attachment_id=attachment_id)
+        if not resolved:
+            raise RuntimeError("Attachment write succeeded but attachment metadata could not be resolved.")
+        return resolved
+
+    def get_chat_attachment(self, session_id: str, attachment_id: str) -> dict[str, object] | None:
+        if not self._CHAT_ATTACHMENT_ID_RE.fullmatch((attachment_id or "").strip()):
+            return None
+
+        request_id = f"chat-{session_id}"
+        host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
+        attachment_dir = (host_job_path / "attachments").resolve()
+        attachment_host_path = (attachment_dir / attachment_id).resolve()
+        if attachment_host_path.parent != attachment_dir:
+            return None
+        if not attachment_host_path.exists() or not attachment_host_path.is_file():
+            return None
+
+        metadata_path = attachment_dir / f"{attachment_id}.json"
+        metadata: dict[str, object] = {}
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                metadata = {}
+
+        guessed_type = mimetypes.guess_type(str(attachment_host_path))[0]
+        content_type = str(metadata.get("contentType") or guessed_type or "application/octet-stream")
+        file_name = str(metadata.get("fileName") or attachment_id.split("-", 1)[-1] or attachment_id)
+        size = int(metadata.get("size") or attachment_host_path.stat().st_size)
+        container_path = f"{container_job_path}/attachments/{attachment_id}"
+
+        return {
+            "id": attachment_id,
+            "fileName": file_name,
+            "contentType": content_type,
+            "size": size,
+            "containerPath": container_path,
+            "hostPath": str(attachment_host_path),
+        }
 
     def run_operator(
         self,
@@ -257,6 +350,37 @@ class CodexService:
                 environment[f"GIT_CONFIG_VALUE_{index}"] = value
 
         return environment
+
+    @staticmethod
+    def _apply_chat_model(shell_command: str, model: str | None) -> str:
+        cleaned = (model or "").strip()
+        if not cleaned:
+            return shell_command
+        if "--model" in shell_command:
+            return shell_command
+
+        model_flag = f" --model {shlex.quote(cleaned)}"
+        return re.sub(r"\bcodex\s+exec\b", lambda match: f"{match.group(0)}{model_flag}", shell_command, count=1)
+
+    @staticmethod
+    def _apply_chat_images(shell_command: str, image_paths: list[str] | None) -> str:
+        if not image_paths:
+            return shell_command
+        cleaned = [path.strip() for path in image_paths if path and path.strip()]
+        if not cleaned:
+            return shell_command
+        image_flags = "".join(f" --image {shlex.quote(path)}" for path in cleaned)
+        return re.sub(r"\bcodex\s+exec\b", lambda match: f"{match.group(0)}{image_flags}", shell_command, count=1)
+
+    @staticmethod
+    def _sanitize_attachment_filename(file_name: str) -> str:
+        candidate = Path(file_name or "image").name
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", candidate).strip("-.")
+        if not cleaned:
+            cleaned = "image"
+        if len(cleaned) > 180:
+            cleaned = cleaned[:180]
+        return cleaned
 
     @classmethod
     def clean_cli_output(cls, value: str) -> str:

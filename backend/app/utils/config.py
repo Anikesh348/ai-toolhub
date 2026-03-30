@@ -59,6 +59,8 @@ class Settings(BaseSettings):
         ),
         alias="CODEX_COMMAND_TEMPLATE",
     )
+    codex_chat_models: str = Field(default="gpt-5-codex,gpt-5,o4-mini,o3", alias="CODEX_CHAT_MODELS")
+    codex_default_chat_model: str | None = Field(default=None, alias="CODEX_DEFAULT_CHAT_MODEL")
 
     port_range_start: int = Field(default=3001, alias="PORT_RANGE_START")
     port_range_end: int = Field(default=3999, alias="PORT_RANGE_END")
@@ -110,6 +112,28 @@ class Settings(BaseSettings):
     @property
     def project_paths(self) -> list[str]:
         return [path.strip() for path in self.operator_project_paths.split(",") if path.strip()]
+
+    @property
+    def available_chat_models(self) -> list[str]:
+        models: list[str] = []
+        seen: set[str] = set()
+        for raw in self.codex_chat_models.split(","):
+            candidate = raw.strip()
+            if not candidate:
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            models.append(candidate)
+        return models
+
+    @property
+    def default_chat_model(self) -> str | None:
+        configured = (self.codex_default_chat_model or "").strip()
+        if configured and configured in self.available_chat_models:
+            return configured
+        available = self.available_chat_models
+        return available[0] if available else None
 
 
 @lru_cache(maxsize=1)

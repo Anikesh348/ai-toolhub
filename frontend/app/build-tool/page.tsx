@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, startTransition, useEffect, useMemo, useState } from "react";
+import { FormEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   API_BASE_URL,
@@ -24,6 +24,7 @@ export default function BuildToolPage() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<JobDetail | null>(null);
+  const jobsPollingRef = useRef(false);
 
   const activeJobs = useMemo(() => jobs.filter((job) => !isTerminalStatus(job.status)), [jobs]);
   const activeSummary = useMemo(() => activeJobs.find((job) => job.id === activeJobId) ?? null, [activeJobs, activeJobId]);
@@ -64,12 +65,43 @@ export default function BuildToolPage() {
   }
 
   useEffect(() => {
-    void loadJobs();
-    const intervalId = setInterval(() => {
-      void loadJobs();
-    }, 4000);
-    return () => clearInterval(intervalId);
-  }, []);
+    let mounted = true;
+    const pollIntervalMs = activeJobId ? 5000 : 12000;
+
+    const runPoll = async (): Promise<void> => {
+      if (!mounted || jobsPollingRef.current) {
+        return;
+      }
+
+      jobsPollingRef.current = true;
+      try {
+        await loadJobs();
+      } finally {
+        jobsPollingRef.current = false;
+      }
+    };
+
+    void runPoll();
+    const intervalId = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
+      void runPoll();
+    }, pollIntervalMs);
+
+    const handleVisibilityChange = (): void => {
+      if (!document.hidden) {
+        void runPoll();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activeJobId]);
 
   useEffect(() => {
     if (!activeJobId) {
@@ -98,12 +130,23 @@ export default function BuildToolPage() {
             if (!current || current.id !== payload.jobId) {
               return current;
             }
+
+            const mergedLogs = mergeLogs(current.logs, payload.logs);
+            if (
+              current.status === payload.status
+              && current.error === payload.error
+              && current.updatedAt === payload.updatedAt
+              && mergedLogs === current.logs
+            ) {
+              return current;
+            }
+
             return {
               ...current,
               status: payload.status,
               error: payload.error,
               updatedAt: payload.updatedAt,
-              logs: mergeLogs(current.logs, payload.logs)
+              logs: mergedLogs
             };
           });
         });

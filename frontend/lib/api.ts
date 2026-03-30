@@ -66,6 +66,7 @@ export type ChatSession = {
   id: string;
   title: string;
   mode: ChatMode;
+  model: string | null;
   archived: boolean;
   createdAt: string;
   updatedAt: string;
@@ -94,6 +95,7 @@ export type DeleteChatSessionResponse = {
 export type UpdateChatSessionPayload = {
   title?: string | null;
   mode?: ChatMode;
+  model?: string | null;
   archived?: boolean;
 };
 
@@ -142,6 +144,20 @@ export type ChatStreamEvent =
   | { type: "assistant_message"; session: ChatSession; message: ChatMessage }
   | { type: "done" }
   | { type: "error"; error: string };
+
+export type ChatModelsResponse = {
+  models: string[];
+  defaultModel: string | null;
+};
+
+export type ChatAttachment = {
+  id: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  containerPath: string;
+  url: string;
+};
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -285,16 +301,41 @@ export function mergeLogs(existing: JobLog[], incoming: JobLog[]): JobLog[] {
   if (incoming.length === 0) {
     return existing;
   }
-  const map = new Map<string, JobLog>();
+
+  const toKey = (log: JobLog): string => `${log.id}:${log.timestamp}:${log.step}`;
+  const seen = new Set<string>();
   for (const log of existing) {
-    map.set(`${log.id}:${log.timestamp}:${log.step}`, log);
+    seen.add(toKey(log));
   }
+
+  const merged = [...existing];
+  let changed = false;
+  let outOfOrder = false;
+  let lastTimestamp = existing.length > 0 ? existing[existing.length - 1].timestamp : "";
+
   for (const log of incoming) {
-    map.set(`${log.id}:${log.timestamp}:${log.step}`, log);
+    const key = toKey(log);
+    if (seen.has(key)) {
+      continue;
+    }
+    if (lastTimestamp && log.timestamp < lastTimestamp) {
+      outOfOrder = true;
+    }
+    merged.push(log);
+    seen.add(key);
+    lastTimestamp = log.timestamp;
+    changed = true;
   }
-  return Array.from(map.values())
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-    .slice(-250);
+
+  if (!changed) {
+    return existing;
+  }
+
+  if (outOfOrder) {
+    merged.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }
+
+  return merged.slice(-250);
 }
 
 export async function fetchChatSessions(): Promise<ChatSession[]> {
@@ -305,11 +346,20 @@ export async function fetchChatSessions(): Promise<ChatSession[]> {
   return (await response.json()) as ChatSession[];
 }
 
-export async function createChatSession(title?: string, mode: ChatMode = "general"): Promise<ChatSession> {
+export async function fetchChatModels(): Promise<ChatModelsResponse> {
+  const response = await fetch(`${API_BASE_URL}/chat/models`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch chat models: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ChatModelsResponse;
+}
+
+export async function createChatSession(title?: string, mode: ChatMode = "general", model?: string | null): Promise<ChatSession> {
   const response = await fetch(`${API_BASE_URL}/chat/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: title || null, mode })
+    body: JSON.stringify({ title: title || null, mode, model: model || null })
   });
   if (!response.ok) {
     const text = await response.text();
@@ -350,11 +400,16 @@ export async function fetchChatMessages(sessionId: string): Promise<ChatMessage[
   return (await response.json()) as ChatMessage[];
 }
 
-export async function sendChatMessage(sessionId: string, content: string): Promise<SendChatMessageResponse> {
+export async function sendChatMessage(
+  sessionId: string,
+  content: string,
+  model?: string | null,
+  attachmentIds: string[] = []
+): Promise<SendChatMessageResponse> {
   const response = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content, model: model || null, attachmentIds })
   });
   if (!response.ok) {
     const text = await response.text();
@@ -378,12 +433,14 @@ export async function createToolBuilderSessionForTool(tool: ToolRecord): Promise
 export async function streamChatMessage(
   sessionId: string,
   content: string,
+  model: string | null | undefined,
+  attachmentIds: string[] | undefined,
   onEvent: (event: ChatStreamEvent) => void
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}/messages/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content, model: model || null, attachmentIds: attachmentIds || [] })
   });
   if (!response.ok) {
     const text = await response.text();
@@ -471,6 +528,21 @@ export async function streamChatMessage(
       // Ignore partial trailing payloads.
     }
   }
+}
+
+export async function uploadChatAttachment(sessionId: string, file: File): Promise<ChatAttachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}/attachments`, {
+    method: "POST",
+    body: formData
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to upload attachment: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ChatAttachment;
 }
 
 export async function streamCodexLogin(

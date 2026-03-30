@@ -1,11 +1,13 @@
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.schemas import (
+    ChatAttachmentResponse,
     ChatMessageResponse,
+    ChatModelsResponse,
     ChatSessionResponse,
     CreateChatMessageRequest,
     CreateChatSessionRequest,
@@ -32,7 +34,7 @@ def create_chat_session(
     payload: CreateChatSessionRequest,
     service: ChatService = Depends(get_chat_service),
 ) -> ChatSessionResponse:
-    session = service.create_session(title=payload.title, mode=payload.mode)
+    session = service.create_session(title=payload.title, mode=payload.mode, model=payload.model)
     return ChatSessionResponse(**session)
 
 
@@ -51,10 +53,13 @@ def update_chat_session(
     payload: UpdateChatSessionRequest,
     service: ChatService = Depends(get_chat_service),
 ) -> ChatSessionResponse:
+    update_model = "model" in payload.model_fields_set
     session = service.update_session(
         session_id=session_id,
         title=payload.title,
         mode=payload.mode,
+        model=payload.model,
+        update_model=update_model,
         archived=payload.archived,
     )
     if session is None:
@@ -86,6 +91,51 @@ def list_chat_messages(
     return [ChatMessageResponse(**message) for message in messages]
 
 
+@router.get("/models", response_model=ChatModelsResponse)
+def list_chat_models(
+    service: ChatService = Depends(get_chat_service),
+) -> ChatModelsResponse:
+    models = service.list_models()
+    return ChatModelsResponse(**models)
+
+
+@router.post("/sessions/{session_id}/attachments", response_model=ChatAttachmentResponse, status_code=status.HTTP_201_CREATED)
+async def upload_chat_attachment(
+    session_id: str,
+    file: UploadFile = File(...),
+    service: ChatService = Depends(get_chat_service),
+) -> ChatAttachmentResponse:
+    raw_data = await file.read()
+    attachment, error = service.create_image_attachment(
+        session_id=session_id,
+        file_name=file.filename or "image",
+        content_type=file.content_type,
+        data=raw_data,
+    )
+    if error:
+        error_status = status.HTTP_404_NOT_FOUND if error == "Session not found" else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=error_status, detail=error)
+    if not attachment:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Unable to save attachment")
+    return ChatAttachmentResponse(**attachment)
+
+
+@router.get("/sessions/{session_id}/attachments/{attachment_id}")
+def get_chat_attachment(
+    session_id: str,
+    attachment_id: str,
+    service: ChatService = Depends(get_chat_service),
+) -> FileResponse:
+    attachment = service.get_image_attachment(session_id=session_id, attachment_id=attachment_id)
+    if not attachment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+    return FileResponse(
+        path=str(attachment["hostPath"]),
+        media_type=str(attachment["contentType"]),
+        filename=str(attachment["fileName"]),
+    )
+
+
 @router.post("/sessions/{session_id}/messages", response_model=SendChatMessageResponse)
 def create_chat_message(
     session_id: str,
@@ -95,6 +145,8 @@ def create_chat_message(
     user_message, assistant_message, error = service.send_message(
         session_id=session_id,
         content=payload.content,
+        model=payload.model,
+        attachment_ids=payload.attachmentIds,
     )
     if error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error)
@@ -117,7 +169,12 @@ def stream_chat_message(
     service: ChatService = Depends(get_chat_service),
 ) -> StreamingResponse:
     def event_generator():
-        for event in service.stream_message(session_id=session_id, content=payload.content):
+        for event in service.stream_message(
+            session_id=session_id,
+            content=payload.content,
+            model=payload.model,
+            attachment_ids=payload.attachmentIds,
+        ):
             payload_json = json.dumps(jsonable_encoder(event))
             yield f"data: {payload_json}\n\n"
 
