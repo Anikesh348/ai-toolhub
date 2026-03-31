@@ -105,3 +105,70 @@ def test_builder_mounts_include_operator_allowed_paths(tmp_path) -> None:
         "bind": str(allowed_path),
         "mode": "rw",
     }
+
+
+def test_rebuild_tool_starts_redeploy_workflow() -> None:
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "request-1",
+        "prompt": "Build a lightweight dashboard tool.",
+        "status": "RUNNING",
+    }
+    build_log_repository = Mock()
+    tool_repository = Mock()
+    tool_repository.get_by_id.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Demo Tool",
+    }
+
+    service = ToolBuilderService(
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        tool_repository=tool_repository,  # type: ignore[arg-type]
+        docker_service=Mock(),
+        testing_service=Mock(),
+        port_allocator_service=Mock(),
+        workflow=Mock(),
+    )
+
+    with patch.object(service, "start_generation", return_value={"id": "request-1", "status": "PENDING"}) as starter:
+        job, error = service.rebuild_tool("tool-1")
+
+    assert error is None
+    assert job == {"id": "request-1", "status": "PENDING"}
+    starter.assert_called_once()
+    called_kwargs = starter.call_args.kwargs
+    assert called_kwargs["name"] == "Demo Tool"
+    assert called_kwargs["base_request_id"] == "request-1"
+    assert called_kwargs["rebuild_tool_id"] == "tool-1"
+    assert "No feature changes are requested." in called_kwargs["prompt"]
+    build_log_repository.add_log.assert_called_once()
+
+
+def test_rebuild_tool_rejects_when_build_already_running() -> None:
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "request-1",
+        "prompt": "Build a lightweight dashboard tool.",
+        "status": "TESTING",
+    }
+    tool_repository = Mock()
+    tool_repository.get_by_id.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Demo Tool",
+    }
+    service = ToolBuilderService(
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=Mock(),
+        tool_repository=tool_repository,  # type: ignore[arg-type]
+        docker_service=Mock(),
+        testing_service=Mock(),
+        port_allocator_service=Mock(),
+        workflow=Mock(),
+    )
+
+    job, error = service.rebuild_tool("tool-1")
+    assert job is None
+    assert error == "A build is already running for this tool"

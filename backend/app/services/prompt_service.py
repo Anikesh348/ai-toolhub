@@ -19,29 +19,27 @@ Mandatory requirements:
 - Avoid writing outside the current project directory.
 """.strip()
         if self._should_require_web_ui(prompt):
-            if self._should_use_lightweight_ui(prompt):
+            if self._should_use_node_frontend(prompt):
                 requirements = (
                     f"{requirements}\n"
                     "UI requirements:\n"
                     "- Build a user-facing web UI.\n"
-                    "- Use a lightweight frontend approach (static HTML/CSS/vanilla JS) without Node build tooling.\n"
-                    "- Serve UI from the Python app (or equivalent lightweight setup) while keeping `GET /status` on port 3000.\n"
-                    "- Include docker-compose with required service ports and valid YAML structure.\n"
-                    "- UI should call backend APIs and render meaningful output for the requested tool.\n"
+                    "- User explicitly asked for a JS framework; honor that request.\n"
+                    "- Keep Docker build/runtime lightweight with multi-stage builds and minimal production dependencies.\n"
+                    "- Keep backend service in root and preserve `GET /status` on port 3000 for platform smoke tests.\n"
+                    "- In `docker-compose.yml`, include required service ports and valid YAML structure.\n"
+                    "- Frontend should call backend APIs and render meaningful UI for the requested tool.\n"
                 )
             else:
                 requirements = (
                     f"{requirements}\n"
                     "UI requirements:\n"
-                    "- Build a user-facing web UI by default.\n"
-                    "- Use Next.js (React + TypeScript) for the frontend.\n"
-                    "- Put UI code in `frontend/` and include `frontend/package.json`.\n"
-                    "- Include `frontend/Dockerfile`.\n"
-                    "- Keep backend service in root and preserve `GET /status` on port 3000 for platform smoke tests.\n"
-                    "- In `docker-compose.yml`, include at least `backend` and `frontend` services.\n"
-                    "- Expose backend and frontend on separate ports in docker-compose.\n"
-                    "- Ensure docker-compose YAML is syntactically valid and has a top-level `services` mapping.\n"
-                    "- Frontend should call backend APIs and render meaningful UI for the requested tool.\n"
+                    "- Build a user-facing web UI.\n"
+                    "- Use a lightweight frontend approach (static HTML/CSS/vanilla JS) without Node build tooling.\n"
+                    "- Default to a single Python service for UI + API when practical to reduce Docker build time.\n"
+                    "- Serve UI from the Python app (or equivalent lightweight setup) while keeping `GET /status` on port 3000.\n"
+                    "- Include docker-compose with required service ports and valid YAML structure.\n"
+                    "- UI should call backend APIs and render meaningful output for the requested tool.\n"
                 )
 
         return f"{requirements}\n\nUser request:\n{prompt.strip()}"
@@ -62,7 +60,27 @@ Mandatory requirements:
         return not any(term in lowered for term in ui_opt_out_terms)
 
     @staticmethod
-    def _should_use_lightweight_ui(prompt: str) -> bool:
+    def _should_use_node_frontend(prompt: str) -> bool:
+        if PromptService._should_force_lightweight_ui(prompt):
+            return False
+
+        lowered = prompt.lower()
+        explicit_framework_terms = (
+            "next.js",
+            "nextjs",
+            "react",
+            "vite",
+            "vue",
+            "nuxt",
+            "svelte",
+            "angular",
+            "frontend framework",
+            "spa",
+        )
+        return any(term in lowered for term in explicit_framework_terms)
+
+    @staticmethod
+    def _should_force_lightweight_ui(prompt: str) -> bool:
         lowered = prompt.lower()
         lightweight_terms = (
             "no node",

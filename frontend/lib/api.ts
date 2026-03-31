@@ -281,6 +281,18 @@ export async function startTool(toolId: string): Promise<ToolRecord> {
   return (await response.json()) as ToolRecord;
 }
 
+export async function rebuildTool(toolId: string): Promise<{ jobId: string; status: BuildStatus }> {
+  const response = await fetch(`${API_BASE_URL}/tools/${toolId}/rebuild`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to rebuild tool: ${response.status} ${text}`);
+  }
+  return (await response.json()) as { jobId: string; status: BuildStatus };
+}
+
 export async function stopTool(toolId: string): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/tools/${toolId}/stop`, {
     method: "POST",

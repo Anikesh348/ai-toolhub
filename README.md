@@ -22,7 +22,7 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 - Chat image attachments (upload image in composer, pass to Codex via `codex exec --image`).
 - Operator mode supports host operations tasks (project edits, Docker summaries, health checks/restarts).
 - Prompt refinement with system constraints for generated tools.
-- Prompt refinement defaults generated apps/tools to include a Next.js (React) UI unless prompt explicitly asks for backend/API/CLI only.
+- Prompt refinement defaults generated apps/tools to a lightweight UI stack (server-rendered/static HTML + JS) unless prompt explicitly requests a heavier frontend framework.
 - Retry loop for generate -> test -> fix (up to `MAX_BUILD_ATTEMPTS`).
 - Generated tool contract enforces `Dockerfile`, `docker-compose.yml`/`docker-compose.yaml`, `requirements.txt`, and pytest tests.
 - Preflight validates docker-compose YAML syntax and requires a top-level non-empty `services` mapping.
@@ -162,6 +162,8 @@ scripts/
   - stops and removes the running tool container
 - `POST /tools/{toolId}/start`
   - starts (or restarts) an existing generated tool container and runs smoke validation
+- `POST /tools/{toolId}/rebuild`
+  - triggers a rebuild + redeploy workflow for an existing generated tool from its current workspace
 - `GET /integrations/git/ssh/public-key`
   - ensures an operator SSH key exists and returns the public key for manual Git provider setup
 - `POST /integrations/git/ssh/verify`

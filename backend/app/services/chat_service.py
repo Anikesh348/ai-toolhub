@@ -925,6 +925,7 @@ class ChatService:
             f"{user_content}\n\n"
             "Requirements:\n"
             "- Include a usable UI unless explicitly backend-only.\n"
+            "- Prefer a lightweight UI stack (server-rendered/static HTML + JS) unless a heavier frontend framework is explicitly requested.\n"
             "- Include tests and runnable docker artifacts.\n"
             "- Keep implementation practical and maintainable."
         )
@@ -936,6 +937,7 @@ class ChatService:
             f"Change request:\n{user_content}\n\n"
             "Requirements:\n"
             "- Preserve existing working behavior unless the request changes it.\n"
+            "- Keep the UI/runtime stack lightweight unless the request explicitly requires a heavier frontend framework.\n"
             "- Update tests for changed behavior.\n"
             "- Keep docker/runtime compatibility intact."
         )

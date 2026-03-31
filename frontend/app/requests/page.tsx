@@ -13,6 +13,7 @@ import {
   fetchJobs,
   fetchTools,
   formatDate,
+  rebuildTool,
   startTool,
   stopTool,
   trimPrompt
@@ -21,6 +22,7 @@ import { ACTIVE_STATUSES, STATUS_COLORS } from "@/lib/status";
 
 const FRONTEND_SERVICE_HINTS = ["frontend", "web", "ui", "client", "dashboard", "site", "next", "vite"];
 const BACKEND_SERVICE_HINTS = ["backend", "api", "server", "worker", "gateway", "graphql", "rest"];
+const TERMINAL_REQUEST_STATUSES = new Set(["RUNNING", "FAILED"]);
 
 function buildRuntimeUrl(baseUrl: string, port: number): string {
   return `${baseUrl}:${port}`;
@@ -56,7 +58,9 @@ export default function RequestsPage() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [toolsById, setToolsById] = useState<Record<string, ToolRecord>>({});
   const [error, setError] = useState<string | null>(null);
-  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState<{ toolId: string; action: "start" | "stop" | "rebuild" } | null>(
+    null
+  );
   const [chatLoadingToolId, setChatLoadingToolId] = useState<string | null>(null);
   const [deleteLoadingJobId, setDeleteLoadingJobId] = useState<string | null>(null);
   const pollingRef = useRef(false);
@@ -144,27 +148,40 @@ export default function RequestsPage() {
 
   async function handleStart(toolId: string): Promise<void> {
     setError(null);
-    setActionLoadingId(toolId);
+    setActionLoading({ toolId, action: "start" });
     try {
       await startTool(toolId);
       await load();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Unable to start tool");
     } finally {
-      setActionLoadingId(null);
+      setActionLoading(null);
     }
   }
 
   async function handleStop(toolId: string): Promise<void> {
     setError(null);
-    setActionLoadingId(toolId);
+    setActionLoading({ toolId, action: "stop" });
     try {
       await stopTool(toolId);
       await load();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Unable to stop tool");
     } finally {
-      setActionLoadingId(null);
+      setActionLoading(null);
+    }
+  }
+
+  async function handleRebuild(toolId: string): Promise<void> {
+    setError(null);
+    setActionLoading({ toolId, action: "rebuild" });
+    try {
+      await rebuildTool(toolId);
+      await load();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to rebuild tool");
+    } finally {
+      setActionLoading(null);
     }
   }
 
@@ -331,25 +348,46 @@ export default function RequestsPage() {
                         >
                           {chatLoadingToolId === job.toolId ? "Opening..." : "Modify Chat"}
                         </button>
-                        {job.toolStatus === "RUNNING" ? (
-                          <button
-                            type="button"
-                            onClick={() => void handleStop(job.toolId!)}
-                            disabled={actionLoadingId === job.toolId}
-                            className="btn-ghost border-coral/35 bg-coral/10 px-2.5 py-1 text-xs text-coral"
-                          >
-                            {actionLoadingId === job.toolId ? "Stopping..." : "Stop"}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => void handleStart(job.toolId!)}
-                            disabled={actionLoadingId === job.toolId}
-                            className="btn-ghost border-mint/35 bg-mint/10 px-2.5 py-1 text-xs text-mint"
-                          >
-                            {actionLoadingId === job.toolId ? "Starting..." : "Start"}
-                          </button>
-                        )}
+                        {(() => {
+                          const buildInProgress = !TERMINAL_REQUEST_STATUSES.has(job.status);
+                          const toolActionBusy = actionLoading?.toolId === job.toolId;
+                          const stopBusy = toolActionBusy && actionLoading?.action === "stop";
+                          const startBusy = toolActionBusy && actionLoading?.action === "start";
+                          const rebuildBusy = toolActionBusy && actionLoading?.action === "rebuild";
+
+                          return (
+                            <>
+                              {job.toolStatus === "RUNNING" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleStop(job.toolId!)}
+                                  disabled={toolActionBusy || buildInProgress}
+                                  className="btn-ghost border-coral/35 bg-coral/10 px-2.5 py-1 text-xs text-coral disabled:opacity-50"
+                                >
+                                  {stopBusy ? "Stopping..." : "Stop"}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleStart(job.toolId!)}
+                                  disabled={toolActionBusy || buildInProgress}
+                                  className="btn-ghost border-mint/35 bg-mint/10 px-2.5 py-1 text-xs text-mint disabled:opacity-50"
+                                >
+                                  {startBusy ? "Starting..." : "Start"}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => void handleRebuild(job.toolId!)}
+                                disabled={toolActionBusy || buildInProgress}
+                                className="btn-ghost border-amber/35 bg-amber/10 px-2.5 py-1 text-xs text-amber disabled:opacity-50"
+                                title={buildInProgress ? "A build is already in progress for this tool" : undefined}
+                              >
+                                {rebuildBusy ? "Rebuilding..." : "Rebuild + Start"}
+                              </button>
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </td>

@@ -103,6 +103,16 @@ def start_tool(tool_id: str, service: ToolBuilderService = Depends(get_tool_buil
     return ToolResponse(**tool)
 
 
+@router.post("/tools/{tool_id}/rebuild", response_model=GenerateToolResponse, status_code=status.HTTP_202_ACCEPTED)
+def rebuild_tool(tool_id: str, service: ToolBuilderService = Depends(get_tool_builder_service)) -> GenerateToolResponse:
+    job, error = service.rebuild_tool(tool_id)
+    if job is None and error == "Tool not found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error or "Unable to rebuild tool")
+    return GenerateToolResponse(jobId=job["id"], status=job["status"])
+
+
 @router.get("/codex/auth/status", response_model=CodexAuthStatusResponse)
 def get_codex_auth_status(service: CodexService = Depends(get_codex_service)) -> CodexAuthStatusResponse:
     return CodexAuthStatusResponse(**service.get_login_status())

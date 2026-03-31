@@ -1,7 +1,7 @@
 import threading
 from datetime import datetime
 
-from app.models.status import ToolStatus
+from app.models.status import BuildStatus, ToolStatus
 from app.repositories.build_log_repository import BuildLogRepository
 from app.repositories.request_repository import RequestRepository
 from app.repositories.tool_repository import ToolRepository
@@ -12,6 +12,8 @@ from app.workflows.tool_build_workflow import ToolBuildWorkflow
 
 
 class ToolBuilderService:
+    _TERMINAL_BUILD_STATUSES = {BuildStatus.RUNNING.value, BuildStatus.FAILED.value}
+
     def __init__(
         self,
         request_repository: RequestRepository,
@@ -217,6 +219,37 @@ class ToolBuilderService:
             f"Tool started manually. UI port {ui_port}. Service ports [{mapped_ports}]",
         )
         return self._tool_repository.get_by_id(tool_id), None
+
+    def rebuild_tool(self, tool_id: str) -> tuple[dict | None, str | None]:
+        tool = self._tool_repository.get_by_id(tool_id)
+        if tool is None:
+            return None, "Tool not found"
+
+        request = self._request_repository.get_by_id(tool["requestId"])
+        if request is None:
+            return None, "Associated build request not found"
+        if request["status"] not in self._TERMINAL_BUILD_STATUSES:
+            return None, "A build is already running for this tool"
+
+        current_prompt = str(request.get("prompt") or "").strip()
+        rebuild_prompt = (
+            "Rebuild and redeploy the existing tool from the current workspace.\n"
+            "No feature changes are requested.\n"
+            "Only make minimal fixes if required to pass tests, build, and runtime smoke checks.\n\n"
+            f"Current tool context:\n{current_prompt}"
+        )
+        job = self.start_generation(
+            prompt=rebuild_prompt,
+            name=tool["name"],
+            base_request_id=tool["requestId"],
+            rebuild_tool_id=tool_id,
+        )
+        self._build_log_repository.add_log(
+            tool["requestId"],
+            "manual_rebuild",
+            "Manual rebuild requested. Rebuilding image and redeploying runtime.",
+        )
+        return job, None
 
     def get_job(self, request_id: str) -> dict | None:
         request = self._request_repository.get_by_id(request_id)
