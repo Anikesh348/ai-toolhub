@@ -273,12 +273,6 @@ class ChatService:
 
         assistant_metadata["success"] = success
         assistant_metadata["exitCode"] = exit_code
-        remaining = assistant_text
-        if streamed_assistant and assistant_text.startswith(streamed_assistant):
-            remaining = assistant_text[len(streamed_assistant) :]
-        for chunk in self._chunk_text(remaining):
-            yield {"type": "assistant_delta", "delta": chunk}
-
         assistant_message = self._message_repository.create(
             session_id=session_id,
             role="assistant",
@@ -289,6 +283,12 @@ class ChatService:
         updated_session = self._session_repository.get_by_id(session_id)
         if updated_session is not None:
             session = updated_session
+
+        remaining = assistant_text
+        if streamed_assistant and assistant_text.startswith(streamed_assistant):
+            remaining = assistant_text[len(streamed_assistant) :]
+        for chunk in self._chunk_text(remaining):
+            yield {"type": "assistant_delta", "delta": chunk}
 
         yield {"type": "assistant_message", "session": session, "message": assistant_message}
         yield {"type": "done"}
