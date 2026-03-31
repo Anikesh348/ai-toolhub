@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import time
 from typing import Any, Iterable, Optional
 import re
@@ -99,6 +99,7 @@ class DockerService:
                 "mode": "rw",
             }
         }
+        volumes.update(self._builder_allowed_path_mounts())
         if extra_volumes:
             volumes.update(extra_volumes)
         builder_name = self._builder_container_name(request_id)
@@ -179,6 +180,7 @@ class DockerService:
                 "mode": "rw",
             }
         }
+        volumes.update(self._builder_allowed_path_mounts())
         if extra_volumes:
             volumes.update(extra_volumes)
         builder_name = self._builder_container_name(request_id)
@@ -1123,6 +1125,103 @@ class DockerService:
     def _builder_container_name(self, request_id: str) -> str:
         request_token = self._safe_name_token(request_id, default="request", max_length=24)
         return f"builder-{request_token}"
+
+    def _builder_allowed_path_mounts(self) -> dict[str, dict[str, str]]:
+        mounts: dict[str, dict[str, str]] = {}
+        workspace_host = self._normalize_host_path(self._settings.codex_workspace_host)
+        allowed_paths = [self._normalize_host_path(path) for path in self._settings.allowed_paths]
+
+        for allowed_path in allowed_paths:
+            if allowed_path == "/":
+                for supplemental_path in self._root_supplemental_mounts():
+                    self._add_builder_mount(
+                        mounts=mounts,
+                        host_path=supplemental_path,
+                        workspace_host=workspace_host,
+                        require_exists=True,
+                    )
+                continue
+            self._add_builder_mount(
+                mounts=mounts,
+                host_path=allowed_path,
+                workspace_host=workspace_host,
+                require_exists=False,
+            )
+        return mounts
+
+    def _add_builder_mount(
+        self,
+        mounts: dict[str, dict[str, str]],
+        host_path: str,
+        workspace_host: str,
+        require_exists: bool,
+    ) -> None:
+        normalized = self._normalize_host_path(host_path)
+        if normalized == workspace_host:
+            return
+        if normalized in mounts:
+            return
+        if require_exists and not Path(normalized).exists():
+            return
+        mounts[normalized] = {
+            "bind": normalized,
+            "mode": "rw",
+        }
+
+    def _root_supplemental_mounts(self) -> list[str]:
+        derived_roots: set[str] = set()
+        candidates_for_roots = [
+            self._settings.codex_workspace_host,
+            *self._settings.project_paths,
+        ]
+        for candidate in candidates_for_roots:
+            derived = self._top_level_root(candidate)
+            if derived:
+                derived_roots.add(derived)
+
+        if self._is_macos_host():
+            candidates = set(derived_roots)
+            if not candidates:
+                candidates.add("/Users")
+        else:
+            candidates = {"/Users", "/home", "/Volumes", "/private", "/tmp", "/var", "/etc"}
+            candidates.update(derived_roots)
+
+        return sorted(candidate for candidate in candidates if Path(candidate).exists())
+
+    def _is_macos_host(self) -> bool:
+        probe_paths = [
+            self._settings.codex_workspace_host,
+            *self._settings.allowed_paths,
+            *self._settings.project_paths,
+        ]
+        normalized_paths = [self._normalize_host_path(path) for path in probe_paths if path and path.strip()]
+        for normalized in normalized_paths:
+            if normalized == "/Users" or normalized.startswith("/Users/"):
+                return True
+            if normalized == "/Volumes" or normalized.startswith("/Volumes/"):
+                return True
+            if normalized == "/private" or normalized.startswith("/private/"):
+                return True
+        return False
+
+    @staticmethod
+    def _top_level_root(path: str) -> str | None:
+        normalized = DockerService._normalize_host_path(path)
+        parts = PurePosixPath(normalized).parts
+        if len(parts) < 2:
+            return None
+        return f"/{parts[1]}"
+
+    @staticmethod
+    def _normalize_host_path(path: str) -> str:
+        raw = path.strip()
+        if not raw:
+            return "/"
+        pure = PurePosixPath(raw)
+        if not pure.is_absolute():
+            pure = PurePosixPath("/") / pure
+        return str(pure)
 
     def _select_unique_container_name(self, base_name: str, tool_id: str) -> str:
         try:

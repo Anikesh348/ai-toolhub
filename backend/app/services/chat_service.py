@@ -19,6 +19,9 @@ MAX_MESSAGE_ATTACHMENTS = 4
 
 
 class ChatService:
+    _FRONTEND_SERVICE_HINTS = ("frontend", "web", "ui", "client", "dashboard", "site", "next", "vite")
+    _BACKEND_SERVICE_HINTS = ("backend", "api", "server", "worker", "gateway", "graphql", "rest")
+
     def __init__(
         self,
         session_repository: ChatSessionRepository,
@@ -28,6 +31,8 @@ class ChatService:
         operator_access_service: OperatorAccessService | None = None,
         system_context_service: SystemContextService | None = None,
         tool_builder_service: ToolBuilderService | None = None,
+        tool_frontend_base_url: str = "http://localhost",
+        tool_backend_base_url: str = "http://localhost",
     ) -> None:
         self._session_repository = session_repository
         self._message_repository = message_repository
@@ -36,6 +41,8 @@ class ChatService:
         self._operator_access_service = operator_access_service
         self._system_context_service = system_context_service
         self._tool_builder_service = tool_builder_service
+        self._tool_frontend_base_url = self._normalize_runtime_base_url(tool_frontend_base_url)
+        self._tool_backend_base_url = self._normalize_runtime_base_url(tool_backend_base_url)
         self._logger = get_logger(__name__)
 
     def create_session(self, title: str | None, mode: str, model: str | None = None) -> dict:
@@ -888,15 +895,24 @@ class ChatService:
             lines.append("- Latest request: unknown")
 
         if tool:
-            ui_port = tool.get("uiPort") or tool.get("port")
+            raw_ui_port = tool.get("uiPort") or tool.get("port")
+            ui_port = self._as_int_port(raw_ui_port)
             lines.append(f"- Tool ID: `{tool['toolId']}`")
             lines.append(f"- Tool status: {tool['status']}")
             if ui_port:
-                lines.append(f"- UI: http://localhost:{ui_port}")
+                lines.append(f"- UI: {self._build_runtime_url(self._tool_frontend_base_url, ui_port)}")
             ports = tool.get("ports") or {}
             if isinstance(ports, dict) and ports:
-                mapped = " | ".join(f"{name}:{port}" for name, port in ports.items())
-                lines.append(f"- Service ports: {mapped}")
+                mapped_items: list[str] = []
+                for name, port in ports.items():
+                    resolved_port = self._as_int_port(port)
+                    if resolved_port is None:
+                        continue
+                    mapped_items.append(
+                        f"{name}:{resolved_port} ({self._build_service_runtime_url(name, resolved_port, ui_port)})"
+                    )
+                if mapped_items:
+                    lines.append(f"- Service ports: {' | '.join(mapped_items)}")
         else:
             lines.append("- Tool record: not created yet (build may still be running)")
 
@@ -1112,6 +1128,48 @@ class ChatService:
         if days > 0:
             return f"{days}d {hours}h {minutes}m"
         return f"{hours}h {minutes}m"
+
+    @staticmethod
+    def _normalize_runtime_base_url(value: str | None) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return "http://localhost"
+        if "://" not in cleaned:
+            cleaned = f"http://{cleaned}"
+        return cleaned.rstrip("/")
+
+    @staticmethod
+    def _build_runtime_url(base_url: str, port: int) -> str:
+        return f"{base_url}:{port}"
+
+    @staticmethod
+    def _as_int_port(value: Any) -> int | None:
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved > 0 else None
+
+    @classmethod
+    def _service_prefers_frontend(cls, service_name: str) -> bool | None:
+        lowered = service_name.lower()
+        if any(token in lowered for token in cls._BACKEND_SERVICE_HINTS):
+            return False
+        if any(token in lowered for token in cls._FRONTEND_SERVICE_HINTS):
+            return True
+        return None
+
+    def _build_service_runtime_url(self, service_name: str, port: int, ui_port: int | None) -> str:
+        preferred = self._service_prefers_frontend(service_name)
+        if preferred is True:
+            base_url = self._tool_frontend_base_url
+        elif preferred is False:
+            base_url = self._tool_backend_base_url
+        elif ui_port is not None and port == ui_port:
+            base_url = self._tool_frontend_base_url
+        else:
+            base_url = self._tool_backend_base_url
+        return self._build_runtime_url(base_url=base_url, port=port)
 
     def _extract_assistant_text(self, raw_logs: str) -> str:
         normalized = raw_logs.replace("\r\n", "\n").replace("\r", "\n")

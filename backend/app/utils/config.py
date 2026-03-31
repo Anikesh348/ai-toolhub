@@ -90,6 +90,9 @@ class Settings(BaseSettings):
 
     monitor_poll_interval_seconds: int = Field(default=20, alias="MONITOR_POLL_INTERVAL_SECONDS")
 
+    tool_frontend_base_url: str = Field(default="http://localhost", alias="TOOL_FRONTEND_BASE_URL")
+    tool_backend_base_url: str = Field(default="http://localhost", alias="TOOL_BACKEND_BASE_URL")
+
     operator_denied_paths: str = Field(default="", alias="OPERATOR_DENIED_PATHS")
     operator_allowed_paths: str = Field(default="", alias="OPERATOR_ALLOWED_PATHS")
     operator_project_paths: str = Field(default="", alias="OPERATOR_PROJECT_PATHS")

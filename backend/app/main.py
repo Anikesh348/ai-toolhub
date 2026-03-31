@@ -142,6 +142,8 @@ def create_app() -> FastAPI:
             operator_access_service=operator_access_service,
             system_context_service=system_context_service,
             tool_builder_service=tool_builder_service,
+            tool_frontend_base_url=settings.tool_frontend_base_url,
+            tool_backend_base_url=settings.tool_backend_base_url,
         )
 
         app_state.mongo_client = mongo_client

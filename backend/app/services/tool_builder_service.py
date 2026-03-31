@@ -37,14 +37,29 @@ class ToolBuilderService:
         base_request_id: str | None = None,
         rebuild_tool_id: str | None = None,
     ) -> dict:
-        request = self._request_repository.create(prompt=prompt)
+        workflow_base_request_id = base_request_id
+        request = None
+
+        # Rebuilds should continue in the existing tool workspace (same request id)
+        # so modify-chat iterations do not fan out into new workspace directories.
+        if rebuild_tool_id and base_request_id:
+            request = self._request_repository.prepare_for_rebuild(
+                request_id=base_request_id,
+                prompt=prompt,
+            )
+            if request is not None:
+                workflow_base_request_id = None
+
+        if request is None:
+            request = self._request_repository.create(prompt=prompt)
+
         request_id = request["id"]
         thread = threading.Thread(
             target=self._workflow.run,
             kwargs={
                 "request_id": request_id,
                 "tool_name_hint": name,
-                "base_request_id": base_request_id,
+                "base_request_id": workflow_base_request_id,
                 "rebuild_tool_id": rebuild_tool_id,
             },
             daemon=True,

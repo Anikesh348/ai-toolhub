@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 
 import {
   JobSummary,
+  TOOL_BACKEND_BASE_URL,
+  TOOL_FRONTEND_BASE_URL,
   ToolRecord,
   createToolBuilderSessionForTool,
   deleteJob,
@@ -16,6 +18,38 @@ import {
   trimPrompt
 } from "@/lib/api";
 import { ACTIVE_STATUSES, STATUS_COLORS } from "@/lib/status";
+
+const FRONTEND_SERVICE_HINTS = ["frontend", "web", "ui", "client", "dashboard", "site", "next", "vite"];
+const BACKEND_SERVICE_HINTS = ["backend", "api", "server", "worker", "gateway", "graphql", "rest"];
+
+function buildRuntimeUrl(baseUrl: string, port: number): string {
+  return `${baseUrl}:${port}`;
+}
+
+function prefersFrontendService(serviceName: string): boolean | undefined {
+  const lowered = serviceName.toLowerCase();
+  if (BACKEND_SERVICE_HINTS.some((token) => lowered.includes(token))) {
+    return false;
+  }
+  if (FRONTEND_SERVICE_HINTS.some((token) => lowered.includes(token))) {
+    return true;
+  }
+  return undefined;
+}
+
+function buildServiceUrl(serviceName: string, port: number, uiPort: number | null): string {
+  const preferred = prefersFrontendService(serviceName);
+  if (preferred === true) {
+    return buildRuntimeUrl(TOOL_FRONTEND_BASE_URL, port);
+  }
+  if (preferred === false) {
+    return buildRuntimeUrl(TOOL_BACKEND_BASE_URL, port);
+  }
+  if (uiPort !== null && port === uiPort) {
+    return buildRuntimeUrl(TOOL_FRONTEND_BASE_URL, port);
+  }
+  return buildRuntimeUrl(TOOL_BACKEND_BASE_URL, port);
+}
 
 export default function RequestsPage() {
   const router = useRouter();
@@ -254,7 +288,7 @@ export default function RequestsPage() {
                         <div className="flex flex-col gap-1">
                           {uiPort && (
                             <a
-                              href={`http://localhost:${uiPort}`}
+                              href={buildRuntimeUrl(TOOL_FRONTEND_BASE_URL, uiPort)}
                               target="_blank"
                               rel="noreferrer"
                               className="font-medium text-skyline underline underline-offset-2"
@@ -263,9 +297,19 @@ export default function RequestsPage() {
                             </a>
                           )}
                           {servicePortPairs.length > 0 && (
-                            <p className="text-[11px] text-muted">
-                              {servicePortPairs.map(([serviceName, servicePort]) => `${serviceName}:${servicePort}`).join(" | ")}
-                            </p>
+                            <div className="flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-muted">
+                              {servicePortPairs.map(([serviceName, servicePort]) => (
+                                <a
+                                  key={`${job.id}-${serviceName}-${servicePort}`}
+                                  href={buildServiceUrl(serviceName, servicePort, uiPort ?? null)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-muted underline underline-offset-2 hover:text-skyline"
+                                >
+                                  {serviceName}:{servicePort}
+                                </a>
+                              ))}
+                            </div>
                           )}
                         </div>
                       );

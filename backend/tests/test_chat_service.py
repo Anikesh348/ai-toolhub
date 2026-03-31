@@ -39,3 +39,20 @@ def test_extract_requested_branch_name_from_checkout_command() -> None:
 def test_extract_requested_branch_name_returns_none_when_not_requested() -> None:
     branch_name = ChatService._extract_requested_branch_name("Fix the flaky tests in the auth module.")
     assert branch_name is None
+
+
+def test_normalize_runtime_base_url_defaults_to_localhost() -> None:
+    assert ChatService._normalize_runtime_base_url(None) == "http://localhost"
+    assert ChatService._normalize_runtime_base_url("") == "http://localhost"
+
+
+def test_normalize_runtime_base_url_adds_scheme_and_trims_slash() -> None:
+    assert ChatService._normalize_runtime_base_url("example.com/") == "http://example.com"
+    assert ChatService._normalize_runtime_base_url("https://tool.example.com/") == "https://tool.example.com"
+
+
+def test_service_prefers_frontend_detection() -> None:
+    assert ChatService._service_prefers_frontend("frontend") is True
+    assert ChatService._service_prefers_frontend("backend-api") is False
+    assert ChatService._service_prefers_frontend("worker") is False
+    assert ChatService._service_prefers_frontend("redis") is None

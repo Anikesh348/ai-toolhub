@@ -99,17 +99,22 @@ scripts/
    sudo chown -R "$USER":"$USER" /srv/codex
    ```
 3. Set your MongoDB Atlas URL (`DB_URL`) and choose a new `MONGO_COLLECTION_PREFIX`.
-4. Codex image is built locally by Compose from `docker/Codex.Dockerfile`.
-5. Configure Google sign-in by setting `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` in `.env`.
-6. Authenticate Codex (choose one, from Profile after Google sign-in):
+4. Configure runtime URL bases used when opening generated tools:
+   - `NEXT_PUBLIC_TOOL_FRONTEND_BASE_URL` (UI links in dashboard, fallback `http://localhost`)
+   - `NEXT_PUBLIC_TOOL_BACKEND_BASE_URL` (service/backend links in dashboard, fallback `http://localhost`)
+   - `TOOL_FRONTEND_BASE_URL` (tool-builder chat status UI URL, fallback `http://localhost`)
+   - `TOOL_BACKEND_BASE_URL` (tool-builder chat status backend/service URLs, fallback `http://localhost`)
+5. Codex image is built locally by Compose from `docker/Codex.Dockerfile`.
+6. Configure Google sign-in by setting `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` in `.env`.
+7. Authenticate Codex (choose one, from Profile after Google sign-in):
    - ChatGPT Pro login (no API key): run login command below once.
    - API key auth: set `OPENAI_API_KEY` in `.env`.
-7. Start the stack:
+8. Start the stack:
    ```bash
    docker-compose up --build
    ```
-8. Open UI at `http://localhost:${UI_PORT}` (default `http://localhost:3000`).
-9. For lower Pi build CPU, keep `UI_NEXT_DISABLE_SWC_WORKER=1` and tune `BUILDER_CPU_LIMIT` in `.env` (for tool image builds).
+9. Open UI at `http://localhost:${UI_PORT}` (default `http://localhost:3000`).
+10. For lower Pi build CPU, keep `UI_NEXT_DISABLE_SWC_WORKER=1` and tune `BUILDER_CPU_LIMIT` in `.env` (for tool image builds).
 
 ## Codex Authentication (Docker)
 
@@ -167,7 +172,8 @@ scripts/
 
 ## Security Notes
 
-- Builder containers only mount `${CODEX_WORKSPACE_HOST}` to `${CODEX_WORKSPACE_CONTAINER}`.
+- Builder containers always mount `${CODEX_WORKSPACE_HOST}` to `${CODEX_WORKSPACE_CONTAINER}`.
+- Builder containers also mount paths from `OPERATOR_ALLOWED_PATHS` (when configured) so tool-builder and operator workflows can access the same host roots.
 - The dedicated `codex` service also mounts only `${CODEX_WORKSPACE_HOST}` to `${CODEX_WORKSPACE_CONTAINER}`.
 - No mount is created for `/srv/data`, so Codex cannot read it.
 - Generated tools run in separate containers with hard resource limits.

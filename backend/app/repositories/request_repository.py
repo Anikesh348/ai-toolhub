@@ -3,6 +3,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from pymongo.collection import Collection
+from pymongo import ReturnDocument
 
 from app.models.status import BuildStatus
 
@@ -44,6 +45,23 @@ class RequestRepository:
                 }
             },
         )
+
+    def prepare_for_rebuild(self, request_id: str, prompt: str) -> Optional[dict]:
+        now = datetime.now(tz=timezone.utc)
+        updated = self._collection.find_one_and_update(
+            {"_id": request_id},
+            {
+                "$set": {
+                    "prompt": prompt,
+                    "refinedPrompt": None,
+                    "status": BuildStatus.PENDING.value,
+                    "error": None,
+                    "updatedAt": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return self._to_model(updated) if updated else None
 
     def update_status(self, request_id: str, status: BuildStatus, error: Optional[str] = None) -> None:
         update_fields: dict[str, Any] = {

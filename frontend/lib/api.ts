@@ -159,7 +159,24 @@ export type ChatAttachment = {
   url: string;
 };
 
+function normalizePublicBaseUrl(value: string | undefined, fallback: string): string {
+  const cleaned = (value || "").trim();
+  if (!cleaned) {
+    return fallback;
+  }
+  const withScheme = cleaned.includes("://") ? cleaned : `http://${cleaned}`;
+  return withScheme.replace(/\/+$/, "");
+}
+
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+export const TOOL_FRONTEND_BASE_URL = normalizePublicBaseUrl(
+  process.env.NEXT_PUBLIC_TOOL_FRONTEND_BASE_URL,
+  "http://localhost"
+);
+export const TOOL_BACKEND_BASE_URL = normalizePublicBaseUrl(
+  process.env.NEXT_PUBLIC_TOOL_BACKEND_BASE_URL,
+  "http://localhost"
+);
 
 export async function fetchJobs(): Promise<JobSummary[]> {
   const response = await fetch(`${API_BASE_URL}/jobs`, { cache: "no-store" });
