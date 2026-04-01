@@ -10,7 +10,7 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 
 - `backend` container: FastAPI API + workflow orchestrator.
 - `codex` container: long-running Codex runtime container with workspace-only mount.
-- `ui` container: Next.js + Tailwind dashboard for request submission and live tracking.
+- `ui` container: Vite + React + Tailwind dashboard for request submission and live tracking.
 - external MongoDB Atlas: persistent storage for jobs, logs, and deployed tools.
 - ephemeral builder container: started per build attempt using `CODEX_IMAGE_NAME`.
 - generated tool containers: one per successful build, isolated with CPU/memory limits.
@@ -76,9 +76,9 @@ docker/
   Codex.Dockerfile
   docker-compose.yml
 frontend/
-  app/
-    page.tsx
-    layout.tsx
+  src/
+    main.tsx
+    App.tsx
     globals.css
   Dockerfile
   package.json
@@ -114,7 +114,7 @@ scripts/
    docker-compose up --build
    ```
 9. Open UI at `http://localhost:${UI_PORT}` (default `http://localhost:3000`).
-10. For lower Pi build CPU, keep `UI_NEXT_DISABLE_SWC_WORKER=1` and tune `BUILDER_CPU_LIMIT` in `.env` (for tool image builds).
+10. For lower Pi build CPU, tune `BUILDER_CPU_LIMIT` in `.env` (for tool image builds).
 
 ## Codex Authentication (Docker)
 

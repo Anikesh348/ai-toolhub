@@ -1,7 +1,5 @@
-"use client";
-
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 
 import {
   JobSummary,
@@ -54,7 +52,7 @@ function buildServiceUrl(serviceName: string, port: number, uiPort: number | nul
 }
 
 export default function RequestsPage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [toolsById, setToolsById] = useState<Record<string, ToolRecord>>({});
   const [error, setError] = useState<string | null>(null);
@@ -199,7 +197,7 @@ export default function RequestsPage() {
     setChatLoadingToolId(toolId);
     try {
       const chat = await createToolBuilderSessionForTool(tool);
-      router.push(`/chat?chatId=${chat.id}`);
+      navigate(`/chat?chatId=${chat.id}`);
     } catch (chatError) {
       setError(chatError instanceof Error ? chatError.message : "Unable to open modify chat");
     } finally {

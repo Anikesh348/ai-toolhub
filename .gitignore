@@ -15,10 +15,11 @@ htmlcov/
 .venv/
 venv/
 
-# Node / Next.js
+# Node / Frontend
 node_modules/
 .next/
 out/
+dist/
 *.tsbuildinfo
 
 # Logs

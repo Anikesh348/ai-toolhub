@@ -1,11 +1,9 @@
-"use client";
-
-import { useAuth, useSignIn } from "@clerk/nextjs";
-import { usePathname } from "next/navigation";
-import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import { useAuth, useSignIn } from "@clerk/clerk-react";
+import { Outlet, useLocation } from "react-router-dom";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 
-import { Sidebar } from "@/components/sidebar";
+import { Sidebar } from "@/components/Sidebar";
 
 const DEFAULT_SIDEBAR_WIDTH = 268;
 const MIN_SIDEBAR_WIDTH = 236;
@@ -96,9 +94,9 @@ function GoogleSignInLayer() {
   );
 }
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell() {
   const { isLoaded, isSignedIn } = useAuth();
-  const pathname = usePathname();
+  const { pathname } = useLocation();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [isPhoneView, setIsPhoneView] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -234,7 +232,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   if (!isEffectivelySignedIn) {
     if (pathname.startsWith("/sso-callback")) {
-      return <>{children}</>;
+      return <Outlet />;
     }
 
     if (!isLoaded || !allowSignedOutUi) {
@@ -279,7 +277,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         </header>
 
         <main className="fade-in pwa-mobile-content">
-          <div className="h-full px-3 py-3">{children}</div>
+          <div className="h-full px-3 py-3">
+            <Outlet />
+          </div>
         </main>
       </div>
     );
@@ -289,7 +289,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen w-full flex-col lg:h-screen lg:flex-row lg:overflow-hidden">
       <Sidebar sidebarWidth={sidebarWidth} onResizeStart={handleSidebarResizeStart} />
       <div className="fade-in min-h-0 flex-1 overflow-auto lg:h-full lg:overflow-hidden">
-        <div className="h-full px-3 py-3 lg:px-6 lg:py-5">{children}</div>
+        <div className="h-full px-3 py-3 lg:px-6 lg:py-5">
+          <Outlet />
+        </div>
       </div>
     </div>
   );

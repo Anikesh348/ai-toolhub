@@ -1,9 +1,6 @@
-"use client";
-
 import type { MouseEvent } from "react";
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
 import { ChatSession, deleteChatSession, fetchChatSessions } from "@/lib/api";
 
@@ -34,9 +31,9 @@ function sortChatsForSidebar(list: ChatSession[]): ChatSession[] {
 }
 
 export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigate, chatOnly = false }: SidebarProps) {
-  const pathname = usePathname();
-  const router = useRouter();
-  const searchParams = useSearchParams();
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const [searchParams] = useSearchParams();
   const activeChatId = searchParams.get("chatId") ?? searchParams.get("sessionId");
 
   const [chats, setChats] = useState<ChatSession[]>([]);
@@ -95,12 +92,12 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
 
   function openNewChat(): void {
     onNavigate?.();
-    router.push(`/chat?new=${Date.now()}`);
+    navigate(`/chat?new=${Date.now()}`);
   }
 
   function openChat(chatId: string): void {
     onNavigate?.();
-    router.push(`/chat?chatId=${chatId}`);
+    navigate(`/chat?chatId=${chatId}`);
   }
 
   function handleDeleteClick(event: MouseEvent<HTMLButtonElement>, chat: ChatSession): void {
@@ -127,9 +124,9 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
 
       if (pathname === "/chat" && activeChatId === pendingDeleteChat.id) {
         if (remaining.length > 0) {
-          router.push(`/chat?chatId=${remaining[0].id}`);
+          navigate(`/chat?chatId=${remaining[0].id}`);
         } else {
-          router.push(`/chat?new=${Date.now()}`);
+          navigate(`/chat?new=${Date.now()}`);
         }
       }
       setPendingDeleteChat(null);
@@ -170,7 +167,7 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
             return (
               <Link
                 key={item.href}
-                href={item.href}
+                to={item.href}
                 onClick={() => onNavigate?.()}
                 className={`block rounded-xl px-3 py-2.5 transition ${
                   active
@@ -244,7 +241,7 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
       {!chatOnly && (
         <div className="mt-3 border-t border-amber/20 pt-3">
           <Link
-            href="/account"
+            to="/account"
             onClick={() => onNavigate?.()}
             className={`flex items-center gap-3 rounded-xl px-2.5 py-2 transition ${
               pathname === "/account"

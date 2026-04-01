@@ -1,5 +1,3 @@
-"use client";
-
 import { FormEvent, startTransition, useEffect, useMemo, useRef, useState } from "react";
 
 import {

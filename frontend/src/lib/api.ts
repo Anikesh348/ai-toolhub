@@ -168,13 +168,15 @@ function normalizePublicBaseUrl(value: string | undefined, fallback: string): st
   return withScheme.replace(/\/+$/, "");
 }
 
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const ENV = import.meta.env;
+
+export const API_BASE_URL = ENV.NEXT_PUBLIC_API_BASE_URL ?? ENV.VITE_API_BASE_URL ?? "http://localhost:8000";
 export const TOOL_FRONTEND_BASE_URL = normalizePublicBaseUrl(
-  process.env.NEXT_PUBLIC_TOOL_FRONTEND_BASE_URL,
+  ENV.NEXT_PUBLIC_TOOL_FRONTEND_BASE_URL ?? ENV.VITE_TOOL_FRONTEND_BASE_URL,
   "http://localhost"
 );
 export const TOOL_BACKEND_BASE_URL = normalizePublicBaseUrl(
-  process.env.NEXT_PUBLIC_TOOL_BACKEND_BASE_URL,
+  ENV.NEXT_PUBLIC_TOOL_BACKEND_BASE_URL ?? ENV.VITE_TOOL_BACKEND_BASE_URL,
   "http://localhost"
 );
 

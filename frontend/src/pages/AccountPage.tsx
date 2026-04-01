@@ -1,7 +1,5 @@
-"use client";
-
 import { useEffect, useMemo, useState } from "react";
-import { useAuth, useClerk, useUser } from "@clerk/nextjs";
+import { useAuth, useClerk, useUser } from "@clerk/clerk-react";
 
 import {
   CodexAuthStatus,

@@ -1,7 +1,5 @@
-"use client";
-
-import { ChangeEvent, FormEvent, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import {
   API_BASE_URL,
@@ -18,7 +16,7 @@ import {
   uploadChatAttachment,
   updateChatSession
 } from "@/lib/api";
-import ChatMarkdown from "@/components/chat-markdown";
+import ChatMarkdown from "@/components/ChatMarkdown";
 
 const MODE_LABELS: Record<ChatMode, string> = {
   general: "General",
@@ -97,8 +95,8 @@ function sortChatsForSidebar(list: ChatSession[]): ChatSession[] {
 }
 
 function ChatPageContent() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [chats, setChats] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -174,7 +172,7 @@ function ChatPageContent() {
         selectedChatId = target.id;
       }
       if (!requestedChatId && selectedChatId) {
-        router.replace(`/chat?chatId=${selectedChatId}`, { scroll: false });
+        navigate(`/chat?chatId=${selectedChatId}`, { replace: true });
       }
       if (selectedChatId) {
         return;
@@ -187,7 +185,7 @@ function ChatPageContent() {
         setChats(list);
         setActiveChatId(reusableNewChat.id);
         selectedChatId = reusableNewChat.id;
-        router.replace(`/chat?chatId=${reusableNewChat.id}`, { scroll: false });
+        navigate(`/chat?chatId=${reusableNewChat.id}`, { replace: true });
         return;
       }
 
@@ -195,7 +193,7 @@ function ChatPageContent() {
       setChats(sortChatsForSidebar([created, ...list]));
       setActiveChatId(created.id);
       selectedChatId = created.id;
-      router.replace(`/chat?chatId=${created.id}`, { scroll: false });
+      navigate(`/chat?chatId=${created.id}`, { replace: true });
       return;
     }
 
@@ -203,7 +201,7 @@ function ChatPageContent() {
     selectedChatId = list[0]?.id ?? null;
     setActiveChatId(selectedChatId);
     if (selectedChatId && !requestedChatId) {
-      router.replace(`/chat?chatId=${selectedChatId}`, { scroll: false });
+      navigate(`/chat?chatId=${selectedChatId}`, { replace: true });
     }
   }
 
@@ -396,7 +394,7 @@ function ChatPageContent() {
       setComposerModel(created.model ?? selectedModel);
       setMessages([]);
       setPrompt("");
-      router.push(`/chat?chatId=${created.id}`, { scroll: false });
+      navigate(`/chat?chatId=${created.id}`);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Unable to create chat");
     } finally {
@@ -735,15 +733,5 @@ function ChatPageContent() {
 }
 
 export default function ChatPage() {
-  return (
-    <Suspense
-      fallback={
-        <main className="flex items-center justify-center lg:h-full lg:min-h-0">
-          <p className="text-sm text-muted">Loading chat...</p>
-        </main>
-      }
-    >
-      <ChatPageContent />
-    </Suspense>
-  );
+  return <ChatPageContent />;
 }
