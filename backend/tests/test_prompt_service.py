@@ -5,6 +5,8 @@ def test_refine_prompt_defaults_to_lightweight_ui() -> None:
     refined = PromptService().refine_prompt("Build a task tracker with a dashboard.")
     assert "Use a lightweight frontend approach" in refined
     assert "Use Next.js (React + TypeScript) for the frontend." not in refined
+    assert "Derive clear acceptance criteria from the user request" in refined
+    assert "validates core requested behavior beyond `/status`" in refined
 
 
 def test_refine_prompt_skips_ui_for_backend_only_prompt() -> None:

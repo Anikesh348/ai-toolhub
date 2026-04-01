@@ -4,6 +4,8 @@ class PromptService:
 You are generating a production-ready Python tool for container deployment.
 Mandatory requirements:
 - Use Python 3.11.
+- Implement the user's requested workflow directly; avoid unrelated placeholder features.
+- Derive clear acceptance criteria from the user request and satisfy each in the implementation.
 - Expose an HTTP endpoint `GET /status` returning JSON: {"status":"ok"}.
 - Listen on port 3000 inside the container.
 - Include complete source code, tests, a Dockerfile, and docker-compose file (`docker-compose.yml` or `docker-compose.yaml`).
@@ -14,6 +16,7 @@ Mandatory requirements:
 - Add automated tests runnable with `pytest -q`.
 - Place tests in `tests/` with discoverable names like `test_status.py`.
 - Include at least one passing test that validates `GET /status` returns `{"status":"ok"}`.
+- Include at least one additional passing test that validates core requested behavior beyond `/status`.
 - Keep dependencies minimal and CPU/memory efficient.
 - Ensure logs are meaningful and non-verbose.
 - Avoid writing outside the current project directory.

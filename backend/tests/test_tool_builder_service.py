@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from app.models.status import BuildStatus, ToolStatus
 from app.services.docker_service import DockerService
 from app.services.tool_builder_service import ToolBuilderService
 
@@ -172,3 +173,232 @@ def test_rebuild_tool_rejects_when_build_already_running() -> None:
     job, error = service.rebuild_tool("tool-1")
     assert job is None
     assert error == "A build is already running for this tool"
+
+
+def test_list_jobs_recovers_running_state_when_container_is_alive() -> None:
+    request_repository = Mock()
+    request_repository.list_recent.return_value = [
+        {
+            "id": "request-1",
+            "prompt": "Build dashboard",
+            "status": BuildStatus.FAILED.value,
+            "error": "Smoke test failed",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+    ]
+    build_log_repository = Mock()
+    build_log_repository.get_latest_logs_for_requests.return_value = {}
+    tool_repository = Mock()
+    tool_repository.get_by_request_ids.return_value = {
+        "request-1": {
+            "toolId": "tool-1",
+            "requestId": "request-1",
+            "name": "Demo Dashboard",
+            "status": ToolStatus.FAILED.value,
+            "containerId": "container-1",
+            "port": 3010,
+            "uiPort": 3010,
+            "ports": {"app": 3010},
+            "dockerImage": "generated-tool:test",
+            "runtimeName": "demo-dashboard",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+    }
+    tool_repository.get_by_id.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Demo Dashboard",
+        "status": ToolStatus.RUNNING.value,
+        "containerId": "container-1",
+        "port": 3010,
+        "uiPort": 3010,
+        "ports": {"app": 3010},
+        "dockerImage": "generated-tool:test",
+        "runtimeName": "demo-dashboard",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+    }
+    docker_service = Mock()
+    docker_service.container_running.return_value = True
+
+    service = ToolBuilderService(
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        tool_repository=tool_repository,  # type: ignore[arg-type]
+        docker_service=docker_service,  # type: ignore[arg-type]
+        testing_service=Mock(),
+        port_allocator_service=Mock(),
+        workflow=Mock(),
+    )
+
+    jobs = service.list_jobs()
+
+    assert jobs[0]["status"] == BuildStatus.RUNNING.value
+    assert jobs[0]["toolStatus"] == ToolStatus.RUNNING.value
+    assert jobs[0]["error"] is None
+    tool_repository.update_status.assert_called_once_with(
+        "tool-1",
+        ToolStatus.RUNNING,
+        crash_alert_sent=False,
+    )
+    request_repository.update_status.assert_called_once_with(
+        request_id="request-1",
+        status=BuildStatus.RUNNING,
+        error=None,
+    )
+
+
+def test_list_jobs_marks_running_tool_failed_when_container_stops() -> None:
+    request_repository = Mock()
+    request_repository.list_recent.return_value = [
+        {
+            "id": "request-1",
+            "prompt": "Build dashboard",
+            "status": BuildStatus.RUNNING.value,
+            "error": None,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+    ]
+    build_log_repository = Mock()
+    build_log_repository.get_latest_logs_for_requests.return_value = {}
+    tool_repository = Mock()
+    tool_repository.get_by_request_ids.return_value = {
+        "request-1": {
+            "toolId": "tool-1",
+            "requestId": "request-1",
+            "name": "Demo Dashboard",
+            "status": ToolStatus.RUNNING.value,
+            "containerId": "container-1",
+            "port": 3010,
+            "uiPort": 3010,
+            "ports": {"app": 3010},
+            "dockerImage": "generated-tool:test",
+            "runtimeName": "demo-dashboard",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+    }
+    tool_repository.get_by_id.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Demo Dashboard",
+        "status": ToolStatus.FAILED.value,
+        "containerId": None,
+        "port": 3010,
+        "uiPort": 3010,
+        "ports": {"app": 3010},
+        "dockerImage": "generated-tool:test",
+        "runtimeName": "demo-dashboard",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+    }
+    docker_service = Mock()
+    docker_service.container_running.return_value = False
+
+    service = ToolBuilderService(
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        tool_repository=tool_repository,  # type: ignore[arg-type]
+        docker_service=docker_service,  # type: ignore[arg-type]
+        testing_service=Mock(),
+        port_allocator_service=Mock(),
+        workflow=Mock(),
+    )
+
+    jobs = service.list_jobs()
+
+    assert jobs[0]["status"] == BuildStatus.FAILED.value
+    assert jobs[0]["toolStatus"] == ToolStatus.FAILED.value
+    tool_repository.update_status.assert_called_once_with(
+        "tool-1",
+        ToolStatus.FAILED,
+        crash_alert_sent=False,
+        clear_runtime=True,
+    )
+    request_repository.update_status.assert_called_once_with(
+        request_id="request-1",
+        status=BuildStatus.FAILED,
+        error="Tool container is not running",
+    )
+
+
+def test_list_jobs_recovers_when_container_id_missing_but_runtime_is_alive() -> None:
+    request_repository = Mock()
+    request_repository.list_recent.return_value = [
+        {
+            "id": "request-1",
+            "prompt": "Build dashboard",
+            "status": BuildStatus.FAILED.value,
+            "error": "Tool container exited unexpectedly",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+    ]
+    build_log_repository = Mock()
+    build_log_repository.get_latest_logs_for_requests.return_value = {}
+    tool_repository = Mock()
+    tool_repository.get_by_request_ids.return_value = {
+        "request-1": {
+            "toolId": "tool-1",
+            "requestId": "request-1",
+            "name": "Demo Dashboard",
+            "runtimeName": "demo-dashboard",
+            "status": ToolStatus.FAILED.value,
+            "containerId": None,
+            "port": 3010,
+            "uiPort": 3010,
+            "ports": {"app": 3010},
+            "dockerImage": "generated-tool:test",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+    }
+    tool_repository.get_by_id.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Demo Dashboard",
+        "runtimeName": "demo-dashboard",
+        "status": ToolStatus.RUNNING.value,
+        "containerId": "compose:tool-demo-dashboard",
+        "port": 3010,
+        "uiPort": 3010,
+        "ports": {"app": 3010},
+        "dockerImage": "generated-tool:test",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+    }
+    docker_service = Mock()
+    docker_service.resolve_running_container_id_for_tool.return_value = "compose:tool-demo-dashboard"
+    docker_service.container_running.return_value = True
+
+    service = ToolBuilderService(
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        tool_repository=tool_repository,  # type: ignore[arg-type]
+        docker_service=docker_service,  # type: ignore[arg-type]
+        testing_service=Mock(),
+        port_allocator_service=Mock(),
+        workflow=Mock(),
+    )
+
+    jobs = service.list_jobs()
+
+    assert jobs[0]["status"] == BuildStatus.RUNNING.value
+    assert jobs[0]["toolStatus"] == ToolStatus.RUNNING.value
+    assert jobs[0]["error"] is None
+    tool_repository.update_deployment.assert_called_once_with(
+        tool_id="tool-1",
+        container_id="compose:tool-demo-dashboard",
+        port=3010,
+        ports={"app": 3010},
+        ui_port=3010,
+        status=ToolStatus.RUNNING,
+    )
+    request_repository.update_status.assert_called_once_with(
+        request_id="request-1",
+        status=BuildStatus.RUNNING,
+        error=None,
+    )

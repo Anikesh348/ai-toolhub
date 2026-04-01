@@ -655,6 +655,36 @@ class DockerService:
         except DockerException:
             return False
 
+    def resolve_running_container_id_for_tool(self, tool_id: str, runtime_name: str | None = None) -> str | None:
+        try:
+            containers = self._client.containers.list(all=True, filters={"label": f"tool.id={tool_id}"})
+        except DockerException:
+            containers = []
+
+        if not containers and runtime_name:
+            project_name = self._compose_project_name(runtime_name)
+            containers = self._list_compose_project_containers(project_name)
+
+        running_containers: list[Any] = []
+        for container in containers:
+            try:
+                container.reload()
+            except DockerException:
+                continue
+            if container.status == "running":
+                running_containers.append(container)
+
+        if not running_containers:
+            return None
+
+        for container in running_containers:
+            labels = ((container.attrs.get("Config", {}) or {}).get("Labels", {}) or {})
+            project_name = str(labels.get("tool.project") or "").strip()
+            if project_name:
+                return f"compose:{project_name}"
+
+        return running_containers[0].id
+
     def _run_compose_runtime(
         self,
         request_id: str,

@@ -70,13 +70,28 @@ class ToolBuilderService:
         return request
 
     def list_tools(self) -> list[dict]:
-        return self._tool_repository.list_all()
+        tools = self._tool_repository.list_all()
+        refreshed: list[dict] = []
+        for tool in tools:
+            updated_tool, _ = self._reconcile_tool_and_request_state(tool=tool, request_status=None)
+            refreshed.append(updated_tool)
+        return refreshed
 
     def get_tool(self, tool_id: str) -> dict | None:
-        return self._tool_repository.get_by_id(tool_id)
+        tool = self._tool_repository.get_by_id(tool_id)
+        if tool is None:
+            return None
+        refreshed_tool, _ = self._reconcile_tool_and_request_state(tool=tool, request_status=None)
+        return refreshed_tool
 
     def get_tool_for_request(self, request_id: str) -> dict | None:
-        return self._tool_repository.get_by_request_ids([request_id]).get(request_id)
+        tool = self._tool_repository.get_by_request_ids([request_id]).get(request_id)
+        if tool is None:
+            return None
+        request = self._request_repository.get_by_id(request_id)
+        request_status = request["status"] if request else None
+        refreshed_tool, _ = self._reconcile_tool_and_request_state(tool=tool, request_status=request_status)
+        return refreshed_tool
 
     def stop_tool(self, tool_id: str) -> dict | None:
         tool = self._tool_repository.get_by_id(tool_id)
@@ -188,6 +203,11 @@ class ToolBuilderService:
         )
         if not deploy_ok or not container_id:
             self._tool_repository.update_status(tool_id, ToolStatus.FAILED)
+            self._request_repository.update_status(
+                request_id=tool["requestId"],
+                status=BuildStatus.FAILED,
+                error=deploy_error or "Unable to start tool runtime",
+            )
             return None, f"Unable to start tool runtime: {deploy_error}"
 
         self._tool_repository.update_deployment(
@@ -204,6 +224,11 @@ class ToolBuilderService:
             runtime_logs = self._docker_service.get_container_logs(container_id)
             self._docker_service.stop_container(container_id)
             self._tool_repository.update_status(tool_id, ToolStatus.FAILED, clear_runtime=True)
+            self._request_repository.update_status(
+                request_id=tool["requestId"],
+                status=BuildStatus.FAILED,
+                error=f"Start smoke test failed: {smoke_message}",
+            )
             self._build_log_repository.add_log(
                 tool["requestId"],
                 "manual_start_failed",
@@ -212,6 +237,11 @@ class ToolBuilderService:
             return None, f"Start smoke test failed: {smoke_message}"
 
         self._tool_repository.update_status(tool_id, ToolStatus.RUNNING)
+        self._request_repository.update_status(
+            request_id=tool["requestId"],
+            status=BuildStatus.RUNNING,
+            error=None,
+        )
         mapped_ports = ", ".join(f"{name}:{port}" for name, port in service_ports.items())
         self._build_log_repository.add_log(
             tool["requestId"],
@@ -270,13 +300,22 @@ class ToolBuilderService:
         summaries: list[dict] = []
         for request in requests:
             tool = tools_by_request.get(request["id"])
+            effective_request_status = request["status"]
+            effective_request_error = request.get("error")
+            if tool:
+                tool, effective_request_status = self._reconcile_tool_and_request_state(
+                    tool=tool,
+                    request_status=effective_request_status,
+                )
+                if effective_request_status == BuildStatus.RUNNING.value:
+                    effective_request_error = None
             latest_log = latest_logs.get(request["id"])
             summaries.append(
                 {
                     "id": request["id"],
                     "prompt": request["prompt"],
-                    "status": request["status"],
-                    "error": request.get("error"),
+                    "status": effective_request_status,
+                    "error": effective_request_error,
                     "createdAt": request["createdAt"],
                     "updatedAt": request["updatedAt"],
                     "toolId": tool["toolId"] if tool else None,
@@ -325,6 +364,114 @@ class ToolBuilderService:
         if not existing_ports:
             return {}, "No service ports could be resolved for this tool"
         return existing_ports, None
+
+    def _reconcile_tool_and_request_state(self, tool: dict, request_status: str | None) -> tuple[dict, str]:
+        effective_request_status = request_status
+        if effective_request_status is None:
+            request = self._request_repository.get_by_id(tool["requestId"])
+            effective_request_status = request["status"] if request else BuildStatus.FAILED.value
+
+        container_id = str(tool.get("containerId") or "").strip()
+        if not container_id:
+            recovered_container_id = self._docker_service.resolve_running_container_id_for_tool(
+                tool_id=tool["toolId"],
+                runtime_name=tool.get("runtimeName"),
+            )
+            if recovered_container_id:
+                existing_ports = tool.get("ports") if isinstance(tool.get("ports"), dict) else {}
+                resolved_ui_port = tool.get("uiPort") or tool.get("port")
+                if resolved_ui_port is None and existing_ports:
+                    resolved_ui_port = next(iter(existing_ports.values()))
+                try:
+                    ui_port = int(resolved_ui_port) if resolved_ui_port is not None else None
+                except (TypeError, ValueError):
+                    ui_port = None
+
+                if ui_port is not None and ui_port > 0:
+                    self._tool_repository.update_deployment(
+                        tool_id=tool["toolId"],
+                        container_id=recovered_container_id,
+                        port=ui_port,
+                        ports={name: int(port) for name, port in existing_ports.items()},
+                        ui_port=ui_port,
+                        status=ToolStatus.RUNNING,
+                    )
+                else:
+                    self._tool_repository.update_status(
+                        tool["toolId"],
+                        ToolStatus.RUNNING,
+                        crash_alert_sent=False,
+                    )
+
+                refreshed = self._tool_repository.get_by_id(tool["toolId"])
+                if refreshed:
+                    tool = refreshed
+                    container_id = str(refreshed.get("containerId") or "").strip()
+                else:
+                    tool = {**tool, "status": ToolStatus.RUNNING.value, "containerId": recovered_container_id}
+                    container_id = recovered_container_id
+
+                if effective_request_status == BuildStatus.FAILED.value:
+                    self._request_repository.update_status(
+                        request_id=tool["requestId"],
+                        status=BuildStatus.RUNNING,
+                        error=None,
+                    )
+                    effective_request_status = BuildStatus.RUNNING.value
+
+        if not container_id:
+            return tool, effective_request_status
+
+        tool_status = str(tool.get("status") or "")
+        if tool_status == ToolStatus.DEPLOYING.value and effective_request_status not in self._TERMINAL_BUILD_STATUSES:
+            return tool, effective_request_status
+
+        try:
+            is_running = self._docker_service.container_running(container_id)
+        except Exception:  # pylint: disable=broad-except
+            return tool, effective_request_status
+
+        if is_running:
+            if tool_status != ToolStatus.RUNNING.value:
+                self._tool_repository.update_status(
+                    tool["toolId"],
+                    ToolStatus.RUNNING,
+                    crash_alert_sent=False,
+                )
+                refreshed = self._tool_repository.get_by_id(tool["toolId"])
+                if refreshed:
+                    tool = refreshed
+                else:
+                    tool = {**tool, "status": ToolStatus.RUNNING.value, "crashAlertSent": False}
+            if effective_request_status == BuildStatus.FAILED.value:
+                self._request_repository.update_status(
+                    request_id=tool["requestId"],
+                    status=BuildStatus.RUNNING,
+                    error=None,
+                )
+                effective_request_status = BuildStatus.RUNNING.value
+            return tool, effective_request_status
+
+        if tool_status == ToolStatus.RUNNING.value:
+            self._tool_repository.update_status(
+                tool["toolId"],
+                ToolStatus.FAILED,
+                crash_alert_sent=False,
+                clear_runtime=True,
+            )
+            refreshed = self._tool_repository.get_by_id(tool["toolId"])
+            if refreshed:
+                tool = refreshed
+            else:
+                tool = {**tool, "status": ToolStatus.FAILED.value, "containerId": None}
+            if effective_request_status == BuildStatus.RUNNING.value:
+                self._request_repository.update_status(
+                    request_id=tool["requestId"],
+                    status=BuildStatus.FAILED,
+                    error="Tool container is not running",
+                )
+                effective_request_status = BuildStatus.FAILED.value
+        return tool, effective_request_status
 
     @staticmethod
     def _allocation_order(runtime_plan: RuntimePlan) -> list[str]:

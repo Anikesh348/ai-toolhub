@@ -448,15 +448,92 @@ export async function sendChatMessage(
 }
 
 export async function createToolBuilderSessionForTool(tool: ToolRecord): Promise<ChatSession> {
-  const title = `Modify ${tool.name}`;
+  const existingSession = await findExistingToolBuilderSession(tool);
+  if (existingSession) {
+    return existingSession;
+  }
+
+  const title = `Modify ${tool.name} (${tool.toolId.slice(0, 8)})`;
   const session = await createChatSession(title, "tool_builder");
+  const runtimeHint = tool.uiPort
+    ? `Current UI port is ${tool.uiPort}.`
+    : "Current UI port is unknown; resolve it from status.";
   const seedPrompt = (
-    `Use tool id ${tool.toolId} as active context for this chat. `
+    `Use tool id ${tool.toolId} (name: ${tool.name}, request id: ${tool.requestId}) as active context for this chat. `
     + "I want follow-up changes to modify this tool in place and redeploy it. "
+    + `${runtimeHint} `
     + "First, share current status and port."
   );
   await sendChatMessage(session.id, seedPrompt);
   return session;
+}
+
+function toolBuilderMetadataFromMessage(message: ChatMessage): { toolId?: string; requestId?: string } {
+  const metadata = message.metadata;
+  const rawToolBuilder = metadata?.toolBuilder;
+  if (!rawToolBuilder || typeof rawToolBuilder !== "object") {
+    return {};
+  }
+  const toolBuilder = rawToolBuilder as Record<string, unknown>;
+  return {
+    toolId: typeof toolBuilder.toolId === "string" ? toolBuilder.toolId : undefined,
+    requestId: typeof toolBuilder.requestId === "string" ? toolBuilder.requestId : undefined
+  };
+}
+
+function messageReferencesTool(message: ChatMessage, tool: ToolRecord): boolean {
+  const metadata = toolBuilderMetadataFromMessage(message);
+  if (metadata.toolId === tool.toolId) {
+    return true;
+  }
+  if (metadata.requestId === tool.requestId) {
+    return true;
+  }
+
+  return message.content.toLowerCase().includes(tool.toolId.toLowerCase());
+}
+
+async function findExistingToolBuilderSession(tool: ToolRecord): Promise<ChatSession | null> {
+  const sessions = await fetchChatSessions();
+  const toolBuilderSessions = sessions
+    .filter((session) => session.mode === "tool_builder")
+    .sort((lhs, rhs) => new Date(rhs.updatedAt).getTime() - new Date(lhs.updatedAt).getTime());
+
+  if (toolBuilderSessions.length === 0) {
+    return null;
+  }
+
+  const titledMatch = toolBuilderSessions.find((session) => {
+    const lowered = session.title.toLowerCase();
+    return (
+      lowered.includes(tool.toolId.toLowerCase()) ||
+      lowered === `modify ${tool.name}`.toLowerCase() ||
+      lowered.startsWith(`modify ${tool.name}`.toLowerCase())
+    );
+  });
+  if (titledMatch) {
+    try {
+      const messages = await fetchChatMessages(titledMatch.id);
+      if (messages.length === 0 || messages.some((message) => messageReferencesTool(message, tool))) {
+        return titledMatch;
+      }
+    } catch {
+      return titledMatch;
+    }
+  }
+
+  for (const session of toolBuilderSessions.slice(0, 20)) {
+    try {
+      const messages = await fetchChatMessages(session.id);
+      if (messages.some((message) => messageReferencesTool(message, tool))) {
+        return session;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 export async function streamChatMessage(

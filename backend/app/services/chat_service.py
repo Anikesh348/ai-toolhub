@@ -637,6 +637,7 @@ class ChatService:
             "- For container operations, try `docker compose` first and fall back to `docker-compose` if needed.\n"
             "- Keep response crisp and readable (3-6 short lines by default).\n"
             "- Include verification details, branch names, modified file lists, and environment diagnostics only when the user explicitly asks.\n"
+            "- Do not paste full file contents, full diffs, or long code/config blocks unless the user explicitly asks for code/log output.\n"
             "- Never access denied paths.\n"
             "- Resolve follow-up references (for example: 'that repo', 'continue', 'as discussed') using conversation context.\n"
             "- If context is still ambiguous, state the ambiguity briefly and proceed with the most likely interpretation.\n"
@@ -666,9 +667,8 @@ class ChatService:
             return ""
 
         lowered_request = user_content.lower()
-        requested_details = any(
-            token in lowered_request for token in ("verify", "verification", "logs", "details", "output")
-        )
+        requested_details = ChatService._operator_requested_verbose_output(lowered_request)
+        requested_code = ChatService._operator_requested_code_output(lowered_request)
         if requested_details:
             return cleaned
 
@@ -691,8 +691,72 @@ class ChatService:
             filtered_lines.append(line.rstrip())
 
         normalized = "\n".join(filtered_lines).strip()
+        if not requested_code:
+            normalized = ChatService._strip_fenced_code_blocks(normalized)
+            normalized = ChatService._strip_diff_noise_lines(normalized)
+            if not normalized:
+                return "I omitted verbose code output. Ask for `diff` or `logs` if you want full details."
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
         return normalized
+
+    @staticmethod
+    def _operator_requested_verbose_output(lowered_request: str) -> bool:
+        verbose_markers = (
+            "verify",
+            "verification",
+            "logs",
+            "log output",
+            "details",
+            "full output",
+            "raw output",
+            "command output",
+            "debug output",
+        )
+        return any(token in lowered_request for token in verbose_markers)
+
+    @staticmethod
+    def _operator_requested_code_output(lowered_request: str) -> bool:
+        code_markers = (
+            "code",
+            "snippet",
+            "diff",
+            "patch",
+            "file contents",
+            "show file",
+            "show the file",
+            "source",
+            "implementation",
+        )
+        return any(token in lowered_request for token in code_markers)
+
+    @staticmethod
+    def _strip_fenced_code_blocks(value: str) -> str:
+        if "```" not in value:
+            return value.strip()
+
+        lines = value.split("\n")
+        kept: list[str] = []
+        in_fence = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            kept.append(line)
+        return "\n".join(kept).strip()
+
+    @staticmethod
+    def _strip_diff_noise_lines(value: str) -> str:
+        lines: list[str] = []
+        for raw_line in value.split("\n"):
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if re.match(r"^(diff --git|index [0-9a-f]+\.\.[0-9a-f]+|--- |\+\+\+ |@@ )", stripped):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _operator_branch_instruction(user_content: str) -> str:
@@ -790,7 +854,12 @@ class ChatService:
 
             rebuild_tool_id = str(context.get("toolId") or "").strip() or None
             tool_name = str(context.get("toolName") or "").strip() or None
-            modification_prompt = self._build_tool_modification_prompt(user_content)
+            request_state = self._tool_builder_service.get_job_state(base_request_id)
+            modification_prompt = self._build_tool_modification_prompt(
+                user_content=user_content,
+                tool=tool,
+                request_state=request_state,
+            )
             job = self._tool_builder_service.start_generation(
                 prompt=modification_prompt,
                 name=tool_name,
@@ -956,23 +1025,68 @@ class ChatService:
             "Build a production-ready tool based on this request:\n"
             f"{user_content}\n\n"
             "Requirements:\n"
+            "- Implement the exact requested workflow; avoid unrelated extra features.\n"
+            "- Convert the request into concrete acceptance criteria and satisfy each criterion in code/tests.\n"
             "- Include a usable UI unless explicitly backend-only.\n"
             "- Prefer a lightweight UI stack (server-rendered/static HTML + JS) unless a heavier frontend framework is explicitly requested.\n"
+            "- Include tests for the core requested behavior (not only health/status endpoints).\n"
             "- Include tests and runnable docker artifacts.\n"
             "- Keep implementation practical and maintainable."
         )
 
-    @staticmethod
-    def _build_tool_modification_prompt(user_content: str) -> str:
+    def _build_tool_modification_prompt(
+        self,
+        user_content: str,
+        tool: dict[str, Any] | None,
+        request_state: dict[str, Any] | None,
+    ) -> str:
+        tool_lines: list[str] = ["Existing tool context:"]
+        if tool:
+            tool_lines.append(f"- Tool ID: {tool.get('toolId')}")
+            tool_lines.append(f"- Tool name: {tool.get('name')}")
+            tool_lines.append(f"- Runtime status: {tool.get('status')}")
+            if tool.get("uiPort"):
+                tool_lines.append(f"- Current UI port: {tool.get('uiPort')}")
+            ports = tool.get("ports")
+            if isinstance(ports, dict) and ports:
+                serialized_ports = ", ".join(f"{name}:{port}" for name, port in ports.items())
+                tool_lines.append(f"- Current service ports: {serialized_ports}")
+        else:
+            tool_lines.append("- Tool metadata unavailable in chat context; infer from repository workspace.")
+
+        if request_state:
+            prior_prompt = self._truncate_prompt_for_context(str(request_state.get("prompt") or ""), limit=5000)
+            refined_prompt = self._truncate_prompt_for_context(str(request_state.get("refinedPrompt") or ""), limit=5000)
+            status = str(request_state.get("status") or "UNKNOWN")
+            tool_lines.append(f"- Latest build status: {status}")
+            if prior_prompt:
+                tool_lines.append(f"\nPrevious tool request:\n{prior_prompt}")
+            if refined_prompt:
+                tool_lines.append(f"\nLatest refined requirements:\n{refined_prompt}")
+            if request_state.get("error"):
+                error_summary = self._truncate_prompt_for_context(str(request_state["error"]), limit=2000)
+                tool_lines.append(f"\nLatest build/runtime error:\n{error_summary}")
+
+        context_block = "\n".join(tool_lines)
         return (
             "Apply the requested change to the existing tool codebase.\n"
+            "Inspect the current workspace first, then make targeted updates.\n\n"
+            f"{context_block}\n\n"
             f"Change request:\n{user_content}\n\n"
             "Requirements:\n"
-            "- Preserve existing working behavior unless the request changes it.\n"
+            "- Implement exactly what the user asked in this change request.\n"
+            "- Preserve existing working behavior unless this request explicitly changes it.\n"
             "- Keep the UI/runtime stack lightweight unless the request explicitly requires a heavier frontend framework.\n"
-            "- Update tests for changed behavior.\n"
-            "- Keep docker/runtime compatibility intact."
+            "- Update or add tests for the changed behavior and likely regressions.\n"
+            "- Keep Docker/runtime compatibility intact, including required health/status checks."
         )
+
+    @staticmethod
+    def _truncate_prompt_for_context(value: str, limit: int = 5000) -> str:
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[:limit].rstrip()}\n... [truncated]"
 
     def _recent_operator_session_context(
         self,

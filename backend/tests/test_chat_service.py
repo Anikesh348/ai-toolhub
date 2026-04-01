@@ -90,6 +90,65 @@ def test_tool_builder_status_query_ignores_modification_prompt_that_mentions_url
     assert ChatService._is_tool_builder_status_query(prompt) is False
 
 
+def test_sanitize_operator_output_removes_fenced_code_by_default() -> None:
+    output = (
+        "Completed the fix.\n\n"
+        "```python\n"
+        "def noisy_dump():\n"
+        "    return 'too much code'\n"
+        "```\n\n"
+        "Service is healthy."
+    )
+    sanitized = ChatService._sanitize_operator_output("Fix it and summarize", output)
+    assert "noisy_dump" not in sanitized
+    assert "Completed the fix." in sanitized
+    assert "Service is healthy." in sanitized
+
+
+def test_sanitize_operator_output_keeps_code_when_diff_requested() -> None:
+    output = (
+        "Applied patch.\n\n"
+        "```diff\n"
+        "+ print('hello')\n"
+        "```\n"
+    )
+    sanitized = ChatService._sanitize_operator_output("Show me the diff", output)
+    assert "+ print('hello')" in sanitized
+
+
+def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+    tool = {
+        "toolId": "tool-1",
+        "name": "Demo Tool",
+        "status": "RUNNING",
+        "uiPort": 3010,
+        "ports": {"app": 3010},
+    }
+    request_state = {
+        "prompt": "Build a dashboard for monitoring background jobs.",
+        "refinedPrompt": "Include status board and retry controls.",
+        "status": "RUNNING",
+        "error": None,
+    }
+
+    prompt = service._build_tool_modification_prompt(
+        user_content="Add CSV export for job history.",
+        tool=tool,
+        request_state=request_state,
+    )
+
+    assert "Existing tool context:" in prompt
+    assert "Tool ID: tool-1" in prompt
+    assert "Previous tool request:" in prompt
+    assert "Latest refined requirements:" in prompt
+    assert "Add CSV export for job history." in prompt
+
+
 class _StubSessionRepository:
     def __init__(self) -> None:
         now = datetime.now(tz=timezone.utc)

@@ -387,6 +387,28 @@ class ToolBuildWorkflow:
                 text = match.group(1).strip()
                 break
 
+        phrase_patterns = (
+            r"\b(?:build|create|make|develop|generate|design)\s+(?:an?|the)?\s+(.+?)(?:[.!?]|$)",
+            r"\b(?:need|want)\s+(?:an?|the)?\s+(.+?)(?:[.!?]|$)",
+        )
+        for pattern in phrase_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            text = match.group(1).strip()
+            break
+        tool_clause_match = re.match(
+            r"^(?:an?\s+)?(?:tool|app|application|service)\s+that\s+(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if tool_clause_match:
+            text = tool_clause_match.group(1).strip()
+        else:
+            text = re.split(r"\b(?:with|using|where|including|include)\b", text, maxsplit=1, flags=re.IGNORECASE)[
+                0
+            ].strip()
+
         words = re.findall(r"[a-zA-Z0-9]+", text.lower())
         stopwords = {
             "build",
@@ -413,23 +435,81 @@ class ToolBuildWorkflow:
             "ready",
             "workflow",
             "user",
+            "need",
+            "want",
+            "create",
+            "make",
+            "develop",
+            "generate",
+            "design",
+            "new",
+            "project",
+            "platform",
+            "system",
+            "solution",
+            "into",
+            "from",
+            "in",
+            "on",
+            "at",
+            "by",
+            "is",
+            "are",
+            "be",
+            "it",
+            "we",
+            "our",
+            "your",
         }
-        important = [word for word in words if word not in stopwords]
-        selected = important[:4] if important else []
-        if not selected:
-            return "Generated Tool"
+        selected: list[str] = []
+        for word in words:
+            if word in stopwords or len(word) < 2:
+                continue
+            if word in selected:
+                continue
+            selected.append(word)
+            if len(selected) == 4:
+                break
 
-        if selected[-1] not in {"api", "app", "service", "dashboard", "assistant", "tracker"}:
-            selected.append("tool")
-        return " ".join(selected)
+        if not selected:
+            return "task assistant"
+        if len(selected) == 1:
+            suffix = ToolBuildWorkflow._infer_name_suffix(words)
+            if suffix and suffix != selected[0]:
+                selected.append(suffix)
+        if len(selected) < 2:
+            selected.append("assistant")
+        return " ".join(selected[:4])
+
+    @staticmethod
+    def _infer_name_suffix(words: list[str]) -> str:
+        suffix_priority = (
+            "dashboard",
+            "tracker",
+            "assistant",
+            "scheduler",
+            "manager",
+            "analyzer",
+            "generator",
+            "reporter",
+            "monitor",
+            "notifier",
+            "service",
+            "api",
+        )
+        lowered_words = [word.lower() for word in words]
+        for token in suffix_priority:
+            if token in lowered_words:
+                return token
+        return "assistant"
 
     @staticmethod
     def _to_display_name(base_name: str) -> str:
         words = re.findall(r"[a-zA-Z0-9]+", base_name.lower())
         if not words:
-            return "Generated Tool"
+            return "Task Assistant"
         capped: list[str] = []
-        for word in words[:5]:
+        for word in words[:4]:
             if word in {"api", "ui", "crud"}:
                 capped.append(word.upper())
             else:
