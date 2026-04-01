@@ -61,6 +61,35 @@ def test_service_prefers_frontend_detection() -> None:
     assert ChatService._service_prefers_frontend("redis") is None
 
 
+def test_tool_builder_status_query_matches_status_only_prompt() -> None:
+    prompt = "Share current status and port."
+    assert ChatService._is_tool_builder_status_query(prompt) is True
+
+
+def test_tool_builder_status_query_matches_seed_prompt_with_first_status_clause() -> None:
+    prompt = (
+        "Use tool id 0123456789abcdef0123456789abcdef as active context for this chat. "
+        "I want follow-up changes to modify this tool in place and redeploy it. "
+        "First, share current status and port."
+    )
+    assert ChatService._is_tool_builder_status_query(prompt) is True
+
+
+def test_tool_builder_status_query_matches_polite_status_prompt() -> None:
+    prompt = "Can you check current status and port for this deployed tool?"
+    assert ChatService._is_tool_builder_status_query(prompt) is True
+
+
+def test_tool_builder_status_query_ignores_modification_prompt_with_runtime_terms() -> None:
+    prompt = "Fix the deployed tool login flow and redeploy it; it is not running correctly."
+    assert ChatService._is_tool_builder_status_query(prompt) is False
+
+
+def test_tool_builder_status_query_ignores_modification_prompt_that_mentions_url() -> None:
+    prompt = "Update the navbar contrast and then share the URL."
+    assert ChatService._is_tool_builder_status_query(prompt) is False
+
+
 class _StubSessionRepository:
     def __init__(self) -> None:
         now = datetime.now(tz=timezone.utc)

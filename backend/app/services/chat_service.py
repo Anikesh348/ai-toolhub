@@ -870,11 +870,43 @@ class ChatService:
 
     @staticmethod
     def _is_tool_builder_status_query(user_content: str) -> bool:
-        lowered = user_content.lower()
-        return any(
-            marker in lowered
-            for marker in ("status", "running", "port", "url", "link", "health", "deployed", "deployment")
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return False
+
+        # Keep the modify-chat seed prompt status-only even though it may mention future changes.
+        if re.search(
+            r"\bfirst,?\s*(?:please\s*)?(?:show|share|check|give|tell)\b.*\b(status|state|running|port|url|link|health)\b",
+            lowered,
+        ):
+            return True
+
+        # Do not short-circuit rebuild requests just because they mention runtime words.
+        action_pattern = re.compile(
+            r"\b("
+            r"modify|change|update|fix|add|remove|delete|implement|refactor|improve|"
+            r"optimi[sz]e|rewrite|build|rebuild|redeploy|deploy|create|generate|"
+            r"make|migrate|convert|replace|rename|integrate|configure|setup|set\s+up"
+            r")\b"
         )
+
+        status_patterns = (
+            r"^status\??$",
+            r"^(?:what(?:'s| is)|show|share|check|give|tell)\b.*\b(status|state|running|deployed|deployment|port|url|link|health)\b",
+            r"^(?:can you|could you|please)\s+(?:show|share|check|give|tell)\b.*\b(status|state|running|deployed|deployment|port|url|link|health)\b",
+            r"\bis (?:it|the tool|this) (?:running|deployed|healthy)\b",
+            r"\b(current|latest)\s+(status|state|port|url|link)\b",
+        )
+        explicit_status_intent = any(re.search(pattern, lowered) for pattern in status_patterns)
+        if explicit_status_intent and not action_pattern.search(lowered):
+            return True
+
+        status_markers = ("status", "running", "port", "url", "link", "health", "deployed", "deployment")
+        word_count = len(re.findall(r"\w+", lowered))
+        marker_hits = sum(1 for marker in status_markers if marker in lowered)
+        if action_pattern.search(lowered):
+            return False
+        return marker_hits > 0 and word_count <= 5
 
     def _tool_builder_status_message(self, context: dict[str, Any]) -> str:
         request_id = str(context.get("requestId") or "").strip()
