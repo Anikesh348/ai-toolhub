@@ -1,8 +1,9 @@
 import asyncio
 import json
 from datetime import datetime
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
@@ -12,19 +13,25 @@ from app.api.schemas import (
     GenerateToolRequest,
     GenerateToolResponse,
     GitSshPublicKeyResponse,
+    InstagramReelsControlResponse,
+    InstagramBrowserSessionResponse,
     JobEventResponse,
     JobResponse,
     JobSummaryResponse,
+    StopJobResponse,
     ToolResponse,
+    YouTubeShortFeedResponse,
     VerifyGitSshRequest,
     VerifyGitSshResponse,
 )
 from app.models.status import BuildStatus
 from app.services.codex_service import CodexService
+from app.services.instagram_service import InstagramService
 from app.services.tool_builder_service import ToolBuilderService
+from app.services.youtube_service import YouTubeService
 
 router = APIRouter(tags=["tools"])
-TERMINAL_JOB_STATUSES = {BuildStatus.RUNNING.value, BuildStatus.FAILED.value}
+TERMINAL_JOB_STATUSES = {BuildStatus.RUNNING.value, BuildStatus.STOPPED.value, BuildStatus.FAILED.value}
 JOB_EVENTS_POLL_INTERVAL_SECONDS = 2.5
 JOB_EVENTS_MAX_LOGS_PER_TICK = 200
 
@@ -53,6 +60,60 @@ def get_codex_service() -> CodexService:
     if service is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is initializing")
     return service
+
+
+def get_instagram_service() -> InstagramService:
+    from app.main import app_state
+
+    service = app_state.instagram_service
+    if service is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is initializing")
+    return service
+
+
+def get_youtube_service() -> YouTubeService:
+    from app.main import app_state
+
+    service = app_state.youtube_service
+    if service is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is initializing")
+    return service
+
+
+def _normalized_viewer_origin(raw_value: str) -> str | None:
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+
+    candidate = value if "://" in value else f"http://{value}"
+    parsed = urlsplit(candidate)
+    hostname = (parsed.hostname or "").strip()
+    if not hostname:
+        return None
+
+    scheme = (parsed.scheme or "http").strip().lower()
+    if scheme not in {"http", "https"}:
+        scheme = "http"
+
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
+    host = f"{hostname}:{port}" if port else hostname
+    return f"{scheme}://{host}"
+
+
+def _viewer_base_from_request(request: Request) -> str:
+    viewer_origin = _normalized_viewer_origin(request.headers.get("x-toolhub-viewer-origin", ""))
+    if viewer_origin:
+        return viewer_origin
+
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    scheme = forwarded_proto or request.url.scheme or "http"
+    host = forwarded_host or request.headers.get("host", "").strip() or request.url.hostname or "localhost"
+    return f"{scheme}://{host}"
 
 
 @router.post("/tools/generate", response_model=GenerateToolResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -175,6 +236,79 @@ def verify_git_ssh_connection(
     return VerifyGitSshResponse(**result)
 
 
+@router.get("/integrations/instagram/browser/session", response_model=InstagramBrowserSessionResponse)
+def get_instagram_browser_session(
+    request: Request,
+    service: InstagramService = Depends(get_instagram_service),
+) -> InstagramBrowserSessionResponse:
+    try:
+        session = service.get_browser_session(viewer_base_url=_viewer_base_from_request(request))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return InstagramBrowserSessionResponse(**session)
+
+
+@router.post("/integrations/instagram/browser/session", response_model=InstagramBrowserSessionResponse)
+def start_instagram_browser_session(
+    request: Request,
+    forceRestart: bool = Query(default=False),
+    width: int | None = Query(default=None, ge=640, le=3840),
+    height: int | None = Query(default=None, ge=480, le=3840),
+    service: InstagramService = Depends(get_instagram_service),
+) -> InstagramBrowserSessionResponse:
+    try:
+        session = service.start_browser_session(
+            viewer_base_url=_viewer_base_from_request(request),
+            force_restart=forceRestart,
+            viewport_width=width,
+            viewport_height=height,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return InstagramBrowserSessionResponse(**session)
+
+
+@router.delete("/integrations/instagram/browser/session", response_model=InstagramBrowserSessionResponse)
+def stop_instagram_browser_session(
+    request: Request,
+    service: InstagramService = Depends(get_instagram_service),
+) -> InstagramBrowserSessionResponse:
+    try:
+        session = service.stop_browser_session(viewer_base_url=_viewer_base_from_request(request))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return InstagramBrowserSessionResponse(**session)
+
+
+@router.post("/integrations/instagram/browser/reels/scroll", response_model=InstagramReelsControlResponse)
+def control_instagram_reels_scroll(
+    action: str = Query(..., pattern="^(swipe_up|swipe_down)$"),
+    service: InstagramService = Depends(get_instagram_service),
+) -> InstagramReelsControlResponse:
+    try:
+        result = service.control_reels_scroll(action=action)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return InstagramReelsControlResponse(**result)
+
+
+@router.get("/integrations/youtube/shorts/feed", response_model=YouTubeShortFeedResponse)
+def get_youtube_shorts_feed(
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=24, ge=1, le=40),
+    service: YouTubeService = Depends(get_youtube_service),
+) -> YouTubeShortFeedResponse:
+    try:
+        payload = service.fetch_shorts_feed(cursor=cursor, limit=limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    return YouTubeShortFeedResponse(**payload)
+
+
 @router.get("/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str, service: ToolBuilderService = Depends(get_tool_builder_service)) -> JobResponse:
     job = service.get_job(job_id)
@@ -189,6 +323,16 @@ def delete_job(job_id: str, service: ToolBuilderService = Depends(get_tool_build
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return DeleteJobResponse(jobId=job_id, deleted=True)
+
+
+@router.post("/jobs/{job_id}/stop", response_model=StopJobResponse)
+def stop_job(job_id: str, service: ToolBuilderService = Depends(get_tool_builder_service)) -> StopJobResponse:
+    job, error = service.stop_job(job_id)
+    if job is None and error == "Job not found":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=error or "Unable to stop job")
+    return StopJobResponse(jobId=job_id, stopped=True)
 
 
 @router.get("/jobs", response_model=list[JobSummaryResponse])

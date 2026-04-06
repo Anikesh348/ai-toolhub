@@ -9,7 +9,9 @@ class BuildStatus(str, Enum):
     FIXING_ERRORS = "FIXING_ERRORS"
     BUILDING_IMAGE = "BUILDING_IMAGE"
     DEPLOYING = "DEPLOYING"
+    VERIFYING_APIS = "VERIFYING_APIS"
     RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
     FAILED = "FAILED"
 
 
@@ -18,4 +20,3 @@ class ToolStatus(str, Enum):
     RUNNING = "RUNNING"
     FAILED = "FAILED"
     STOPPED = "STOPPED"
-

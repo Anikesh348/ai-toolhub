@@ -12,10 +12,36 @@ import {
   streamCodexLogin,
   verifyGitSshConnection
 } from "@/lib/api";
+import {
+  loadThinkingPanelMode,
+  saveThinkingPanelMode,
+  ThinkingPanelMode
+} from "@/lib/chat-thinking-panel";
 
 const GIT_SSH_HOST_STORAGE_KEY = "toolhub.git.ssh.host";
 const GIT_SSH_USERNAME_STORAGE_KEY = "toolhub.git.ssh.username";
 const GIT_SSH_VERIFICATION_STORAGE_KEY = "toolhub.git.ssh.verification";
+const THINKING_PANEL_OPTIONS: Array<{
+  value: ThinkingPanelMode;
+  label: string;
+  detail: string;
+}> = [
+  {
+    value: "none",
+    label: "None",
+    detail: "Keep chat full width while the model is thinking."
+  },
+  {
+    value: "insta",
+    label: "YouTube Shorts",
+    detail: "Show public YouTube Shorts in the right companion panel."
+  },
+  {
+    value: "knowledge",
+    label: "System Design Reads",
+    detail: "Show rotating system design article summaries in the right companion panel."
+  }
+];
 
 export default function AccountPage() {
   const { isLoaded: googleLoaded, isSignedIn } = useAuth();
@@ -36,6 +62,7 @@ export default function AccountPage() {
   const [gitVerifying, setGitVerifying] = useState(false);
   const [gitVerification, setGitVerification] = useState<GitSshVerification | null>(null);
   const [gitVerificationCheckedAt, setGitVerificationCheckedAt] = useState<string | null>(null);
+  const [thinkingPanelMode, setThinkingPanelMode] = useState<ThinkingPanelMode>("none");
   const [error, setError] = useState<string | null>(null);
 
   const gitVerificationMatchesTarget = useMemo(() => {
@@ -125,6 +152,7 @@ export default function AccountPage() {
 
   useEffect(() => {
     try {
+      setThinkingPanelMode(loadThinkingPanelMode());
       const storedHost = window.localStorage.getItem(GIT_SSH_HOST_STORAGE_KEY);
       const storedUsername = window.localStorage.getItem(GIT_SSH_USERNAME_STORAGE_KEY);
       const storedVerificationRaw = window.localStorage.getItem(GIT_SSH_VERIFICATION_STORAGE_KEY);
@@ -273,6 +301,12 @@ export default function AccountPage() {
     } finally {
       setGitVerifying(false);
     }
+  }
+
+  function handleThinkingPanelModeChange(mode: ThinkingPanelMode): void {
+    setError(null);
+    setThinkingPanelMode(mode);
+    saveThinkingPanelMode(mode);
   }
 
   return (
@@ -462,6 +496,38 @@ export default function AccountPage() {
       )}
 
       {error && <p className="border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
+
+      <section className="border border-amber/20 bg-black/45 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm font-medium text-[color:var(--text-main)]">Thinking Companion</p>
+          <span className="rounded-full bg-black/35 px-3 py-1 text-xs text-muted">
+            Current: {THINKING_PANEL_OPTIONS.find((option) => option.value === thinkingPanelMode)?.label ?? "None"}
+          </span>
+        </div>
+        <p className="mt-1 text-xs text-muted">
+          Choose what appears in the right companion panel while the model is thinking.
+        </p>
+        <div className="mt-4 grid gap-2 md:grid-cols-3">
+          {THINKING_PANEL_OPTIONS.map((option) => {
+            const active = option.value === thinkingPanelMode;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => handleThinkingPanelModeChange(option.value)}
+                className={`border px-3 py-3 text-left transition ${
+                  active
+                    ? "border-amber/45 bg-amber/12"
+                    : "border-amber/18 bg-black/30 hover:border-amber/35 hover:bg-black/45"
+                }`}
+              >
+                <p className="text-sm font-medium text-[color:var(--text-main)]">{option.label}</p>
+                <p className="mt-1 text-xs text-muted">{option.detail}</p>
+              </button>
+            );
+          })}
+        </div>
+      </section>
     </main>
   );
 }

@@ -13,6 +13,7 @@ from app.api.schemas import (
     CreateChatSessionRequest,
     DeleteChatSessionResponse,
     SendChatMessageResponse,
+    StopChatStreamResponse,
     UpdateChatSessionRequest,
 )
 from app.services.chat_service import ChatService
@@ -180,3 +181,14 @@ def stream_chat_message(
 
     headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
+
+
+@router.post("/sessions/{session_id}/messages/stop", response_model=StopChatStreamResponse)
+def stop_chat_message_stream(
+    session_id: str,
+    service: ChatService = Depends(get_chat_service),
+) -> StopChatStreamResponse:
+    stopped, error = service.stop_active_stream(session_id=session_id)
+    if error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error)
+    return StopChatStreamResponse(sessionId=session_id, stopped=stopped)

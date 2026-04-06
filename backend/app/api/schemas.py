@@ -79,6 +79,11 @@ class DeleteJobResponse(BaseModel):
     deleted: bool
 
 
+class StopJobResponse(BaseModel):
+    jobId: str
+    stopped: bool
+
+
 class CodexAuthStatusResponse(BaseModel):
     loggedIn: bool
     provider: Optional[str] = None
@@ -106,6 +111,40 @@ class VerifyGitSshResponse(BaseModel):
     exitCode: int
     message: str
     logs: str
+
+
+class InstagramBrowserSessionResponse(BaseModel):
+    running: bool
+    authenticated: bool
+    requiresLogin: bool
+    containerName: str
+    containerId: Optional[str] = None
+    hostPort: Optional[int] = None
+    viewerUrl: Optional[str] = None
+    image: str
+    message: str
+
+
+InstagramReelsScrollAction = Literal["swipe_up", "swipe_down"]
+
+
+class InstagramReelsControlResponse(BaseModel):
+    ok: bool
+    action: InstagramReelsScrollAction
+    message: str
+
+
+class YouTubeShortItemResponse(BaseModel):
+    id: str
+    title: str
+    channel: str
+    category: str
+
+
+class YouTubeShortFeedResponse(BaseModel):
+    items: list[YouTubeShortItemResponse]
+    nextCursor: Optional[str] = None
+    source: Literal["youtube", "fallback"]
 
 
 ChatMode = Literal["general", "tool_builder", "operator", "pi_operator"]
@@ -154,6 +193,11 @@ class SendChatMessageResponse(BaseModel):
     session: ChatSessionResponse
     userMessage: ChatMessageResponse
     assistantMessage: ChatMessageResponse
+
+
+class StopChatStreamResponse(BaseModel):
+    sessionId: str
+    stopped: bool
 
 
 class DeleteChatSessionResponse(BaseModel):

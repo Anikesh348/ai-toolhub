@@ -1,8 +1,22 @@
+import json
 from functools import lru_cache
+from pathlib import Path
+import tomllib
 from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DEFAULT_CODEX_CHAT_MODELS = (
+    "gpt-5.4,"
+    "gpt-5.4-mini,"
+    "gpt-5.3-codex,"
+    "gpt-5.2-codex,"
+    "gpt-5.2,"
+    "gpt-5.1-codex-max,"
+    "gpt-5.1-codex-mini"
+)
 
 
 def parse_cors_allowed_origins(value: str) -> list[str]:
@@ -33,6 +47,18 @@ def parse_cors_allowed_origins(value: str) -> list[str]:
     return origins
 
 
+def dedupe_model_slugs(values: list[str]) -> list[str]:
+    models: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        candidate = str(raw).strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        models.append(candidate)
+    return models
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -45,8 +71,11 @@ class Settings(BaseSettings):
         alias="CORS_ALLOWED_ORIGINS",
     )
 
-    mongo_uri: str = Field(validation_alias=AliasChoices("MONGO_URI", "DB_URL"))
-    mongo_db_name: str = Field(alias="MONGO_DB_NAME")
+    mongo_uri: str = Field(
+        default="mongodb://toolhub:toolhub-dev-password@mongo:27017/ai-toolhub?authSource=admin",
+        validation_alias=AliasChoices("MONGO_URI", "DB_URL"),
+    )
+    mongo_db_name: str = Field(default="ai-toolhub", alias="MONGO_DB_NAME")
     mongo_collection_prefix: str = Field(default="tool_builder_v2", alias="MONGO_COLLECTION_PREFIX")
 
     codex_workspace_host: str = Field(alias="CODEX_WORKSPACE_HOST")
@@ -59,8 +88,11 @@ class Settings(BaseSettings):
         ),
         alias="CODEX_COMMAND_TEMPLATE",
     )
-    codex_chat_models: str = Field(default="gpt-5-codex,gpt-5,o4-mini,o3", alias="CODEX_CHAT_MODELS")
+    codex_chat_models: str = Field(default=DEFAULT_CODEX_CHAT_MODELS, alias="CODEX_CHAT_MODELS")
     codex_default_chat_model: str | None = Field(default=None, alias="CODEX_DEFAULT_CHAT_MODEL")
+    codex_tool_builder_model: str | None = Field(default=None, alias="CODEX_TOOL_BUILDER_MODEL")
+    codex_models_cache_path: str | None = Field(default="~/.codex/models_cache.json", alias="CODEX_MODELS_CACHE_PATH")
+    codex_config_path: str | None = Field(default="~/.codex/config.toml", alias="CODEX_CONFIG_PATH")
 
     port_range_start: int = Field(default=3001, alias="PORT_RANGE_START")
     port_range_end: int = Field(default=3999, alias="PORT_RANGE_END")
@@ -87,11 +119,56 @@ class Settings(BaseSettings):
     smoke_test_timeout_seconds: int = Field(default=5, alias="SMOKE_TEST_TIMEOUT_SECONDS")
     smoke_test_retries: int = Field(default=20, alias="SMOKE_TEST_RETRIES")
     smoke_test_retry_interval_seconds: int = Field(default=2, alias="SMOKE_TEST_RETRY_INTERVAL_SECONDS")
+    api_verification_timeout_seconds: int = Field(default=4, alias="API_VERIFICATION_TIMEOUT_SECONDS")
+    api_verification_max_calls: int = Field(default=8, alias="API_VERIFICATION_MAX_CALLS")
+    api_verification_max_samples: int = Field(default=5, alias="API_VERIFICATION_MAX_SAMPLES")
+    scraping_web_verify_timeout_seconds: int = Field(default=120, alias="SCRAPING_WEB_VERIFY_TIMEOUT_SECONDS")
+    scraping_web_verify_enabled: bool = Field(default=True, alias="SCRAPING_WEB_VERIFY_ENABLED")
 
     monitor_poll_interval_seconds: int = Field(default=20, alias="MONITOR_POLL_INTERVAL_SECONDS")
+    monitor_startup_grace_seconds: int = Field(default=90, alias="MONITOR_STARTUP_GRACE_SECONDS")
 
     tool_frontend_base_url: str = Field(default="http://localhost", alias="TOOL_FRONTEND_BASE_URL")
     tool_backend_base_url: str = Field(default="http://localhost", alias="TOOL_BACKEND_BASE_URL")
+    instagram_browser_image: str = Field(
+        default="lscr.io/linuxserver/chromium:latest",
+        alias="INSTAGRAM_BROWSER_IMAGE",
+    )
+    instagram_browser_container_name: str = Field(
+        default="toolhub-instagram-browser",
+        alias="INSTAGRAM_BROWSER_CONTAINER_NAME",
+    )
+    instagram_browser_port_start: int = Field(default=4100, alias="INSTAGRAM_BROWSER_PORT_START")
+    instagram_browser_port_end: int = Field(default=4199, alias="INSTAGRAM_BROWSER_PORT_END")
+    instagram_browser_memory_limit: str = Field(default="768m", alias="INSTAGRAM_BROWSER_MEMORY_LIMIT")
+    instagram_browser_cpu_limit: float = Field(default=1.0, alias="INSTAGRAM_BROWSER_CPU_LIMIT")
+    instagram_browser_timezone: str = Field(default="UTC", alias="INSTAGRAM_BROWSER_TIMEZONE")
+    instagram_browser_profile_host_dir: str | None = Field(default=None, alias="INSTAGRAM_BROWSER_PROFILE_HOST_DIR")
+    youtube_data_api_key: str | None = Field(default=None, alias="YOUTUBE_DATA_API_KEY")
+    youtube_shorts_queries: str = Field(
+        default=(
+            "Nature::breathtaking nature views,"
+            "Travel::hidden travel gems,"
+            "Food::street food shorts,"
+            "Tech::latest tech hacks,"
+            "Science::mind blowing science facts,"
+            "Art::creative art process,"
+            "Animals::cute animals daily,"
+            "Fitness::quick fitness tips,"
+            "Comedy::funny clips compilation,"
+            "Music::music performance clips"
+        ),
+        alias="YOUTUBE_SHORTS_QUERIES",
+    )
+    youtube_shorts_preferred_categories: str = Field(
+        default="Tech,Food,Travel",
+        alias="YOUTUBE_SHORTS_PREFERRED_CATEGORIES",
+    )
+    youtube_shorts_category_boost_factor: int = Field(
+        default=3,
+        alias="YOUTUBE_SHORTS_CATEGORY_BOOST_FACTOR",
+    )
+    youtube_shorts_region_code: str | None = Field(default=None, alias="YOUTUBE_SHORTS_REGION_CODE")
 
     operator_denied_paths: str = Field(default="", alias="OPERATOR_DENIED_PATHS")
     operator_allowed_paths: str = Field(default="", alias="OPERATOR_ALLOWED_PATHS")
@@ -116,27 +193,102 @@ class Settings(BaseSettings):
     def project_paths(self) -> list[str]:
         return [path.strip() for path in self.operator_project_paths.split(",") if path.strip()]
 
+    def _configured_chat_models(self) -> list[str]:
+        return dedupe_model_slugs(self.codex_chat_models.split(","))
+
+    def _desktop_visible_chat_models(self) -> list[str]:
+        raw_path = (self.codex_models_cache_path or "").strip()
+        if not raw_path:
+            return []
+
+        cache_path = Path(raw_path).expanduser()
+        if not cache_path.exists() or not cache_path.is_file():
+            return []
+
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        raw_models = payload.get("models")
+        if not isinstance(raw_models, list):
+            return []
+
+        ordered_slugs: list[tuple[int, str]] = []
+        for item in raw_models:
+            if not isinstance(item, dict):
+                continue
+            slug = str(item.get("slug") or "").strip()
+            visibility = str(item.get("visibility") or "").strip().lower()
+            if not slug or visibility != "list" or item.get("supported_in_api") is False:
+                continue
+            try:
+                priority = int(item.get("priority"))
+            except (TypeError, ValueError):
+                priority = 9999
+            ordered_slugs.append((priority, slug))
+
+        ordered_slugs.sort(key=lambda item: (item[0], item[1]))
+        return dedupe_model_slugs([slug for _, slug in ordered_slugs])
+
+    def _desktop_default_chat_model(self) -> str | None:
+        raw_path = (self.codex_config_path or "").strip()
+        if not raw_path:
+            return None
+
+        config_path = Path(raw_path).expanduser()
+        if not config_path.exists() or not config_path.is_file():
+            return None
+
+        try:
+            with config_path.open("rb") as handle:
+                payload = tomllib.load(handle)
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+
+        candidate = str(payload.get("model") or "").strip()
+        return candidate or None
+
     @property
     def available_chat_models(self) -> list[str]:
-        models: list[str] = []
-        seen: set[str] = set()
-        for raw in self.codex_chat_models.split(","):
-            candidate = raw.strip()
-            if not candidate:
-                continue
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            models.append(candidate)
-        return models
+        return dedupe_model_slugs([
+            *self._desktop_visible_chat_models(),
+            *self._configured_chat_models(),
+        ])
 
     @property
     def default_chat_model(self) -> str | None:
-        configured = (self.codex_default_chat_model or "").strip()
-        if configured and configured in self.available_chat_models:
-            return configured
         available = self.available_chat_models
+        configured = (self.codex_default_chat_model or "").strip()
+        if configured and configured in available:
+            return configured
+        desktop_default = self._desktop_default_chat_model()
+        if desktop_default and desktop_default in available:
+            return desktop_default
         return available[0] if available else None
+
+    @property
+    def tool_builder_model(self) -> str | None:
+        configured = (self.codex_tool_builder_model or "").strip()
+        if configured:
+            return configured
+
+        desktop_codex_models = [model for model in self._desktop_visible_chat_models() if "codex" in model]
+        if desktop_codex_models:
+            return desktop_codex_models[0]
+
+        available_codex_models = [model for model in self.available_chat_models if "codex" in model]
+        if available_codex_models:
+            return available_codex_models[0]
+
+        return self.default_chat_model
+
+    @property
+    def youtube_shorts_region_code_normalized(self) -> str | None:
+        candidate = (self.youtube_shorts_region_code or "").strip().upper()
+        if len(candidate) != 2 or not candidate.isalpha():
+            return None
+        return candidate
 
 
 @lru_cache(maxsize=1)

@@ -3,9 +3,13 @@ class PromptService:
         requirements = """
 You are generating a production-ready Python tool for container deployment.
 Mandatory requirements:
+- Clarify requirements first: restate user requirements as explicit acceptance criteria, identify ambiguities, and resolve them with explicit assumptions before coding.
+- Create a short requirements summary artifact in the project (for example `docs/requirements.md`) with assumptions and acceptance criteria.
+- Create a concrete test cases artifact (for example `docs/test-cases.md`) before implementation so the intended behavior is explicit.
 - Use Python 3.11.
 - Implement the user's requested workflow directly; avoid unrelated placeholder features.
 - Derive clear acceptance criteria from the user request and satisfy each in the implementation.
+- Choose a concise, domain-meaningful tool name; avoid generic names derived from filler prompt text.
 - Expose an HTTP endpoint `GET /status` returning JSON: {"status":"ok"}.
 - Listen on port 3000 inside the container.
 - Include complete source code, tests, a Dockerfile, and docker-compose file (`docker-compose.yml` or `docker-compose.yaml`).
@@ -17,6 +21,14 @@ Mandatory requirements:
 - Place tests in `tests/` with discoverable names like `test_status.py`.
 - Include at least one passing test that validates `GET /status` returns `{"status":"ok"}`.
 - Include at least one additional passing test that validates core requested behavior beyond `/status`.
+- Write tests before backend implementation (TDD): run tests, then implement backend changes until tests pass.
+- Prefer backend integration tests for critical API behavior (not only unit tests/mocks).
+- verify backend endpoints with real API calls before final launch; fail the build if endpoint verification fails.
+- If backend relies on scraping/external extraction, cross-check sampled API results with live web search evidence and fix mismatches before launch.
+- For live-data tools, do not rely on placeholder/static catalogs as the primary data source unless the user explicitly requested mock data.
+- Only publish/deploy after tests, runtime verification, and any required web cross-checks all pass.
+- Include a lightweight mock deployment check (for example docker compose up/down or equivalent scripted verification) so runtime wiring is validated.
+- Keep bounded retries and deterministic control flow to avoid infinite loops.
 - Keep dependencies minimal and CPU/memory efficient.
 - Ensure logs are meaningful and non-verbose.
 - Avoid writing outside the current project directory.

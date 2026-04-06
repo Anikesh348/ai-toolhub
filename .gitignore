@@ -1,8 +1,8 @@
 # Environment overrides
 .env
-.env.example
 .env.local
 .env.*.local
+docker-data/
 
 # Python
 __pycache__/

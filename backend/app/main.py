@@ -17,6 +17,7 @@ from app.services.alert_service import AlertService
 from app.services.chat_service import ChatService
 from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
+from app.services.instagram_service import InstagramService
 from app.services.monitor_service import ToolMonitorService
 from app.services.operator_access_service import OperatorAccessService
 from app.services.port_allocator_service import PortAllocatorService
@@ -24,6 +25,7 @@ from app.services.prompt_service import PromptService
 from app.services.system_context_service import SystemContextService
 from app.services.testing_service import TestingService
 from app.services.tool_builder_service import ToolBuilderService
+from app.services.youtube_service import YouTubeService
 from app.utils.config import get_settings
 from app.utils.logger import configure_logging
 from app.workflows.tool_build_workflow import ToolBuildWorkflow
@@ -36,6 +38,8 @@ class AppState:
     tool_monitor_service: Optional[ToolMonitorService] = None
     chat_service: Optional[ChatService] = None
     codex_service: Optional[CodexService] = None
+    instagram_service: Optional[InstagramService] = None
+    youtube_service: Optional[YouTubeService] = None
 
 
 app_state = AppState()
@@ -62,7 +66,8 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup_event() -> None:
-        mongo_client = MongoClient(settings.mongo_uri)
+        mongo_client = MongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command("ping")
         db = mongo_client[settings.mongo_db_name]
         requests_collection_name = f"{settings.mongo_collection_prefix}_tool_requests"
         logs_collection_name = f"{settings.mongo_collection_prefix}_tool_build_logs"
@@ -95,6 +100,8 @@ def create_app() -> FastAPI:
         port_allocation_repository = PortAllocationRepository(db[ports_collection_name])
         chat_session_repository = ChatSessionRepository(db[chat_sessions_collection_name])
         chat_message_repository = ChatMessageRepository(db[chat_messages_collection_name])
+        instagram_service = InstagramService(settings=settings)
+        youtube_service = YouTubeService(settings=settings)
 
         docker_service = DockerService(settings)
         prompt_service = PromptService()
@@ -151,6 +158,8 @@ def create_app() -> FastAPI:
         app_state.tool_monitor_service = monitor_service
         app_state.chat_service = chat_service
         app_state.codex_service = codex_service
+        app_state.instagram_service = instagram_service
+        app_state.youtube_service = youtube_service
 
     @app.on_event("shutdown")
     def shutdown_event() -> None:
@@ -158,6 +167,8 @@ def create_app() -> FastAPI:
             app_state.tool_monitor_service.stop()
         app_state.chat_service = None
         app_state.codex_service = None
+        app_state.instagram_service = None
+        app_state.youtube_service = None
         if app_state.mongo_client:
             app_state.mongo_client.close()
 

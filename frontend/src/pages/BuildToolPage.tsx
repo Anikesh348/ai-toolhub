@@ -9,6 +9,7 @@ import {
   fetchJobs,
   formatDate,
   mergeLogs,
+  stopJob,
   submitTool,
   trimPrompt
 } from "@/lib/api";
@@ -22,17 +23,18 @@ export default function BuildToolPage() {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<JobDetail | null>(null);
+  const [stopLoadingJobId, setStopLoadingJobId] = useState<string | null>(null);
   const jobsPollingRef = useRef(false);
 
   const activeJobs = useMemo(() => jobs.filter((job) => !isTerminalStatus(job.status)), [jobs]);
-  const activeSummary = useMemo(() => activeJobs.find((job) => job.id === activeJobId) ?? null, [activeJobs, activeJobId]);
+  const activeSummary = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [jobs, activeJobId]);
 
   async function loadJobs(): Promise<void> {
     try {
       const data = await fetchJobs();
       startTransition(() => setJobs(data));
       setActiveJobId((current) => {
-        if (current && data.some((job) => job.id === current && !isTerminalStatus(job.status))) {
+        if (current && data.some((job) => job.id === current)) {
           return current;
         }
         const firstActive = data.find((job) => !isTerminalStatus(job.status));
@@ -59,6 +61,21 @@ export default function BuildToolPage() {
       setUiError(error instanceof Error ? error.message : "Failed to submit request");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleStopBuild(jobId: string): Promise<void> {
+    setUiError(null);
+    setStopLoadingJobId(jobId);
+    try {
+      await stopJob(jobId);
+      await loadJobs();
+      const detail = await fetchJobDetail(jobId);
+      setActiveJob(detail);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : "Unable to stop build");
+    } finally {
+      setStopLoadingJobId(null);
     }
   }
 
@@ -256,7 +273,21 @@ export default function BuildToolPage() {
           {activeJob && (
             <div className="mt-4 space-y-4 lg:min-h-0 lg:flex-1 lg:overflow-hidden">
               <div className="rounded-2xl border border-amber/20 bg-black/40 p-4">
-                <p className="font-[var(--font-mono)] text-xs text-muted">Prompt</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-[var(--font-mono)] text-xs text-muted">Prompt</p>
+                  </div>
+                  {!isTerminalStatus(activeJob.status) && (
+                    <button
+                      type="button"
+                      onClick={() => void handleStopBuild(activeJob.id)}
+                      disabled={stopLoadingJobId === activeJob.id}
+                      className="rounded-full border border-coral/40 bg-coral/12 px-3 py-1.5 text-xs text-coral transition hover:border-coral/60 hover:bg-coral/18 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {stopLoadingJobId === activeJob.id ? "Stopping..." : "Stop Build"}
+                    </button>
+                  )}
+                </div>
                 <p className="mt-1 text-sm text-[color:var(--text-main)]">{activeJob.prompt}</p>
                 {activeJob.error && (
                   <p className="mt-3 rounded-lg border border-coral/35 bg-coral/10 px-2 py-1 text-xs text-coral">{activeJob.error}</p>

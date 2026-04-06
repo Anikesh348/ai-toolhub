@@ -24,3 +24,21 @@ def test_refine_prompt_forces_lightweight_when_no_node_is_requested() -> None:
     refined = PromptService().refine_prompt("Build a React dashboard tool, but no node build tooling.")
     assert "Use a lightweight frontend approach" in refined
     assert "User explicitly asked for a JS framework; honor that request." not in refined
+
+
+def test_refine_prompt_requires_clarification_and_tdd_flow() -> None:
+    refined = PromptService().refine_prompt("Build a movie alert tool for me.")
+
+    assert "Clarify requirements first" in refined
+    assert "docs/test-cases.md" in refined
+    assert "Write tests before backend implementation" in refined
+    assert "run tests, then implement backend changes until tests pass" in refined
+
+
+def test_refine_prompt_requires_api_verification_and_scraping_cross_check() -> None:
+    refined = PromptService().refine_prompt("Build a scraping based movie listings checker.")
+
+    assert "verify backend endpoints with real API calls" in refined
+    assert "cross-check sampled API results with live web search evidence" in refined
+    assert "Only publish/deploy after tests, runtime verification, and any required web cross-checks all pass" in refined
+    assert "bounded retries" in refined

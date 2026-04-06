@@ -11,7 +11,7 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 - `backend` container: FastAPI API + workflow orchestrator.
 - `codex` container: long-running Codex runtime container with workspace-only mount.
 - `ui` container: Vite + React + Tailwind dashboard for request submission and live tracking.
-- external MongoDB Atlas: persistent storage for jobs, logs, and deployed tools.
+- `mongo` container: self-hosted MongoDB with Docker-managed lifecycle and persistent host-mounted data directories.
 - ephemeral builder container: started per build attempt using `CODEX_IMAGE_NAME`.
 - generated tool containers: one per successful build, isolated with CPU/memory limits.
 
@@ -25,12 +25,15 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 - Prompt refinement defaults generated apps/tools to a lightweight UI stack (server-rendered/static HTML + JS) unless prompt explicitly requests a heavier frontend framework.
 - Retry loop for generate -> test -> fix (up to `MAX_BUILD_ATTEMPTS`).
 - Generated tool contract enforces `Dockerfile`, `docker-compose.yml`/`docker-compose.yaml`, `requirements.txt`, and pytest tests.
+- Prompt contract enforces clarify-first requirements analysis and TDD-first implementation flow.
 - Preflight validates docker-compose YAML syntax and requires a top-level non-empty `services` mapping.
 - Strict workspace mount policy (`CODEX_WORKSPACE_HOST` -> `CODEX_WORKSPACE_CONTAINER` only).
 - Docker resource limits for builder/tool containers.
 - Dynamic port allocator (`PORT_RANGE_START` - `PORT_RANGE_END`) with persistent reservation history in MongoDB to avoid reusing previously assigned ports.
 - Each tool keeps a stable assigned host port; stopping/starting the same tool reuses that exact port.
 - Smoke test enforcement on `GET /status` expecting `{"status":"ok"}`.
+- Runtime API verification before launch (OpenAPI/static route discovery + live endpoint probes).
+- Optional scraping accuracy cross-check via Codex web search before tool launch.
 - Brevo alerts for deploy success, build failure, and runtime crashes.
 - Background crash monitor for running tool containers.
 - Live progress updates over Server-Sent Events (`GET /jobs/{jobId}/events`).
@@ -98,7 +101,12 @@ scripts/
    sudo mkdir -p /srv/codex
    sudo chown -R "$USER":"$USER" /srv/codex
    ```
-3. Set your MongoDB Atlas URL (`DB_URL`) and choose a new `MONGO_COLLECTION_PREFIX`.
+3. Review the self-hosted MongoDB settings in `.env`:
+   - `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`
+   - `MONGO_DB_NAME`
+   - `MONGO_COLLECTION_PREFIX`
+   - `MONGO_DATA_DIR` and `MONGO_CONFIG_DIR` for persisted storage paths
+   - By default the Compose stack injects a local MongoDB connection string into the backend, so the app no longer depends on MongoDB Atlas. You can still override `MONGO_URI` manually if you need a custom local URI.
 4. Configure runtime URL bases used when opening generated tools:
    - `NEXT_PUBLIC_TOOL_FRONTEND_BASE_URL` (UI links in dashboard, fallback `http://localhost`)
    - `NEXT_PUBLIC_TOOL_BACKEND_BASE_URL` (service/backend links in dashboard, fallback `http://localhost`)
@@ -115,6 +123,21 @@ scripts/
    ```
 9. Open UI at `http://localhost:${UI_PORT}` (default `http://localhost:3000`).
 10. For lower Pi build CPU, tune `BUILDER_CPU_LIMIT` in `.env` (for tool image builds).
+11. Optional reliability tuning:
+   - `API_VERIFICATION_MAX_CALLS`, `API_VERIFICATION_TIMEOUT_SECONDS` (controls endpoint probe breadth/cost).
+   - `SCRAPING_WEB_VERIFY_ENABLED`, `SCRAPING_WEB_VERIFY_TIMEOUT_SECONDS` (controls scrape/web cross-check behavior).
+
+## Database Persistence
+
+- MongoDB data is stored on the host using the `MONGO_DATA_DIR` and `MONGO_CONFIG_DIR` mounts.
+- That means data survives `docker compose stop`, `docker compose down`, container recreation, and host restarts as long as those paths are preserved.
+- Default paths are repo-local (`./docker-data/mongodb` and `./docker-data/mongodb-config`) so local self-hosting works out of the box.
+- If you want an Immich/Jellyfin-style external storage location, set absolute paths in `.env`, for example:
+  ```bash
+  MONGO_DATA_DIR=/srv/ai-toolhub/mongodb
+  MONGO_CONFIG_DIR=/srv/ai-toolhub/mongodb-config
+  ```
+- If you prefer a Docker named volume instead of host paths, replace the `mongo` service volume source in Compose with a named volume and keep the target paths the same (`/data/db` and `/data/configdb`).
 
 ## Codex Authentication (Docker)
 

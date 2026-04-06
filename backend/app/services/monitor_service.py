@@ -1,5 +1,6 @@
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from app.models.status import BuildStatus, ToolStatus
 from app.repositories.request_repository import RequestRepository
@@ -28,6 +29,10 @@ class ToolMonitorService:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def _monitor_grace_until(self) -> datetime:
+        seconds = max(0, int(getattr(self._settings, "monitor_startup_grace_seconds", 90)))
+        return datetime.now(tz=timezone.utc) + timedelta(seconds=seconds)
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -48,11 +53,40 @@ class ToolMonitorService:
     def _check_running_tools(self) -> None:
         tools = self._tool_repository.get_running_without_crash_alert()
         for tool in tools:
-            container_id = tool.get("containerId")
+            container_id = str(tool.get("containerId") or "").strip()
             if not container_id:
+                recovered_container_id = self._docker_service.resolve_running_container_id_for_tool(
+                    tool_id=tool["toolId"],
+                    runtime_name=tool.get("runtimeName"),
+                )
+                if recovered_container_id:
+                    self._tool_repository.update_deployment(
+                        tool_id=tool["toolId"],
+                        container_id=recovered_container_id,
+                        port=int(tool.get("uiPort") or tool.get("port") or next(iter(tool.get("ports", {}).values()), 0)),
+                        ports={name: int(port) for name, port in (tool.get("ports") or {}).items()},
+                        ui_port=int(tool.get("uiPort") or tool.get("port") or next(iter(tool.get("ports", {}).values()), 0)),
+                        status=ToolStatus.RUNNING,
+                        monitor_ignore_until=self._monitor_grace_until(),
+                    )
                 continue
             is_running = self._docker_service.container_running(container_id)
             if is_running:
+                continue
+            recovered_container_id = self._docker_service.resolve_running_container_id_for_tool(
+                tool_id=tool["toolId"],
+                runtime_name=tool.get("runtimeName"),
+            )
+            if recovered_container_id and recovered_container_id != container_id:
+                self._tool_repository.update_deployment(
+                    tool_id=tool["toolId"],
+                    container_id=recovered_container_id,
+                    port=int(tool.get("uiPort") or tool.get("port") or next(iter(tool.get("ports", {}).values()), 0)),
+                    ports={name: int(port) for name, port in (tool.get("ports") or {}).items()},
+                    ui_port=int(tool.get("uiPort") or tool.get("port") or next(iter(tool.get("ports", {}).values()), 0)),
+                    status=ToolStatus.RUNNING,
+                    monitor_ignore_until=self._monitor_grace_until(),
+                )
                 continue
             self._logger.warning("Detected crashed tool: %s", tool["toolId"])
             self._tool_repository.update_status(

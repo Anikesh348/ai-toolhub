@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app.models.status import BuildStatus, ToolStatus
 from app.repositories.build_log_repository import BuildLogRepository
@@ -12,7 +12,7 @@ from app.workflows.tool_build_workflow import ToolBuildWorkflow
 
 
 class ToolBuilderService:
-    _TERMINAL_BUILD_STATUSES = {BuildStatus.RUNNING.value, BuildStatus.FAILED.value}
+    _TERMINAL_BUILD_STATUSES = {BuildStatus.RUNNING.value, BuildStatus.STOPPED.value, BuildStatus.FAILED.value}
 
     def __init__(
         self,
@@ -32,12 +32,21 @@ class ToolBuilderService:
         self._port_allocator_service = port_allocator_service
         self._workflow = workflow
 
+    def _monitor_grace_seconds(self) -> int:
+        settings = getattr(self._docker_service, "_settings", None)
+        raw_value = getattr(settings, "monitor_startup_grace_seconds", 90)
+        try:
+            return max(0, int(raw_value))
+        except (TypeError, ValueError):
+            return 90
+
     def start_generation(
         self,
         prompt: str,
         name: str | None,
         base_request_id: str | None = None,
         rebuild_tool_id: str | None = None,
+        model: str | None = None,
     ) -> dict:
         workflow_base_request_id = base_request_id
         request = None
@@ -63,6 +72,7 @@ class ToolBuilderService:
                 "tool_name_hint": name,
                 "base_request_id": workflow_base_request_id,
                 "rebuild_tool_id": rebuild_tool_id,
+                "model": model,
             },
             daemon=True,
         )
@@ -166,6 +176,26 @@ class ToolBuilderService:
         self._request_repository.delete(request_id)
         return True
 
+    def stop_job(self, request_id: str) -> tuple[dict | None, str | None]:
+        request = self._request_repository.get_by_id(request_id)
+        if request is None:
+            return None, "Job not found"
+        if request["status"] in self._TERMINAL_BUILD_STATUSES:
+            return request, None
+
+        try:
+            self._docker_service.stop_build_containers(request_id=request_id)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        self._request_repository.update_status(
+            request_id=request_id,
+            status=BuildStatus.STOPPED,
+            error="Build stopped by user",
+        )
+        self._build_log_repository.add_log(request_id, "manual_stop_build", "Build stopped manually")
+        return self._request_repository.get_by_id(request_id), None
+
     def start_tool(self, tool_id: str) -> tuple[dict | None, str | None]:
         tool = self._tool_repository.get_by_id(tool_id)
         if tool is None:
@@ -217,6 +247,8 @@ class ToolBuilderService:
             ports=service_ports,
             ui_port=ui_port,
             status=ToolStatus.DEPLOYING,
+            monitor_ignore_until=datetime.now(tz=timezone.utc)
+            + timedelta(seconds=self._monitor_grace_seconds()),
         )
 
         smoke_ok, smoke_message = self._testing_service.smoke_test(smoke_port)
@@ -285,11 +317,34 @@ class ToolBuilderService:
         request = self._request_repository.get_by_id(request_id)
         if request is None:
             return None
+        tool = self._tool_repository.get_by_request_ids([request_id]).get(request_id)
+        effective_status = request["status"]
+        effective_error = request.get("error")
+        if tool:
+            _, effective_status = self._reconcile_tool_and_request_state(
+                tool=tool,
+                request_status=effective_status,
+            )
+            if effective_status == BuildStatus.RUNNING.value:
+                effective_error = None
         logs = self._build_log_repository.get_logs_for_request(request_id)
-        return {**request, "logs": logs}
+        return {**request, "status": effective_status, "error": effective_error, "logs": logs}
 
     def get_job_state(self, request_id: str) -> dict | None:
-        return self._request_repository.get_by_id(request_id)
+        request = self._request_repository.get_by_id(request_id)
+        if request is None:
+            return None
+        tool = self._tool_repository.get_by_request_ids([request_id]).get(request_id)
+        effective_status = request["status"]
+        effective_error = request.get("error")
+        if tool:
+            _, effective_status = self._reconcile_tool_and_request_state(
+                tool=tool,
+                request_status=effective_status,
+            )
+            if effective_status == BuildStatus.RUNNING.value:
+                effective_error = None
+        return {**request, "status": effective_status, "error": effective_error}
 
     def list_jobs(self, limit: int = 200) -> list[dict]:
         requests = self._request_repository.list_recent(limit=limit)
@@ -395,6 +450,8 @@ class ToolBuilderService:
                         ports={name: int(port) for name, port in existing_ports.items()},
                         ui_port=ui_port,
                         status=ToolStatus.RUNNING,
+                        monitor_ignore_until=datetime.now(tz=timezone.utc)
+                        + timedelta(seconds=self._monitor_grace_seconds()),
                     )
                 else:
                     self._tool_repository.update_status(

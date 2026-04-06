@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.services.chat_service import ChatService
@@ -147,6 +148,245 @@ def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
     assert "Previous tool request:" in prompt
     assert "Latest refined requirements:" in prompt
     assert "Add CSV export for job history." in prompt
+    assert "focused modification request" in prompt
+    assert "Do not rewrite existing scraping/data-source logic" in prompt
+
+
+def test_tool_builder_clarification_targets_live_movie_alert_gaps() -> None:
+    clarification = ChatService._build_tool_builder_clarification(
+        "Build a tool that tracks movie show availability in Chennai and Bangalore and sends alerts."
+    )
+
+    assert clarification is not None
+    assert "authoritative" in clarification
+    assert "alerts fire" in clarification
+
+
+def test_tool_builder_initial_clarification_comes_from_codex_analysis() -> None:
+    codex_service = Mock()
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs=(
+            '{"needsClarification": true, "questions": ['
+            '"Should alerts trigger when the price is at or below the target price, or also within a percentage above it?", '
+            '"Should the polling interval be configured in minutes only, and what minimum should be allowed?"], '
+            '"clarifiedRequest": "Track PlayStation digital game prices from the Sony website and alert users by email when target prices are reached."}'
+        ),
+    )
+    codex_service.clean_cli_output.side_effect = lambda value: value
+    message_repository = Mock()
+    message_repository.list_recent_for_session.return_value = []
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=Mock(),  # type: ignore[arg-type]
+    )
+
+    message, context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content=(
+            "build a tool where user can search for playstation games (digital) along with the price "
+            "they want to purchase it for and send mail alerts"
+        ),
+        selected_model="gpt-5.4-mini",
+    )
+
+    assert "price is at or below the target price" in message
+    assert "polling interval" in message
+    assert "BookMyShow" not in message
+    assert context is not None
+    assert context["phase"] == "clarification"
+    codex_service.run_chat.assert_called_once()
+    assert codex_service.run_chat.call_args.kwargs["model"] == "gpt-5.4-mini"
+
+
+def test_tool_builder_clarification_reply_can_start_build() -> None:
+    tool_builder_service = Mock()
+    tool_builder_service.start_generation.return_value = {"id": "req-clarified", "status": "PENDING"}
+    codex_service = Mock()
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs=(
+            '{"needsClarification": false, "questions": [], '
+            '"clarifiedRequest": "Build a movie alert tool for Chennai and Bangalore using BookMyShow first with District fallback, '
+            'refresh live listings, alert for newly available shows only, and allow polling interval in minutes with a 15 minute minimum."}'
+        ),
+    )
+    codex_service.clean_cli_output.side_effect = lambda value: value
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+    )
+    service._resolve_tool_builder_context = Mock(  # type: ignore[method-assign]
+        return_value={
+            "phase": "clarification",
+            "draftPrompt": "Build a movie alert tool for Chennai and Bangalore.",
+            "pendingQuestions": [
+                "Which source should be treated as authoritative for current show listings: BookMyShow, District, or both with a fallback order?",
+                "When should alerts fire: every polling run with matches, or only when a newly available show appears compared with the previous run?",
+            ],
+        }
+    )
+
+    message, context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content=(
+            "Use BookMyShow first with District fallback, use current live listings, "
+            "send alerts only for newly available shows, and configure interval in minutes with a 15 minute minimum."
+        ),
+        selected_model="gpt-5.4-mini",
+    )
+
+    assert "Build queued with your clarified requirements." in message
+    assert context == {"requestId": "req-clarified", "phase": "building"}
+    tool_builder_service.start_generation.assert_called_once()
+    assert tool_builder_service.start_generation.call_args.kwargs["model"] == "gpt-5.4-mini"
+
+
+def test_tool_builder_follow_up_only_asks_unresolved_questions_from_codex() -> None:
+    codex_service = Mock()
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs=(
+            '{"needsClarification": true, "questions": ['
+            '"Should the polling interval be configured in minutes only, and is 5 minutes the minimum allowed interval?"], '
+            '"clarifiedRequest": "Use the Sony website for PlayStation digital games and send alerts every polling run when price conditions match."}'
+        ),
+    )
+    codex_service.clean_cli_output.side_effect = lambda value: value
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=Mock(),  # type: ignore[arg-type]
+    )
+    service._resolve_tool_builder_context = Mock(  # type: ignore[method-assign]
+        return_value={
+            "phase": "clarification",
+            "draftPrompt": "Build a tool for PlayStation digital game price alerts.",
+            "pendingQuestions": [
+                "Which source should be treated as authoritative for the price data?",
+                "When should alerts fire?",
+            ],
+        }
+    )
+
+    message, _context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content="1. sony website 2. every time alert",
+    )
+
+    assert "polling interval" in message
+    assert "authoritative" not in message
+    assert "alerts fire" not in message
+
+
+def test_modify_chat_uses_codex_clarification_before_rebuild() -> None:
+    codex_service = Mock()
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs=(
+            '{"needsClarification": true, "questions": ['
+            '"Should deleting a watcher remove only the watch configuration, or also delete its historical alert log entries?"], '
+            '"clarifiedRequest": "Add an option to delete an existing movie watcher from the tool."}'
+        ),
+    )
+    codex_service.clean_cli_output.side_effect = lambda value: value
+    tool_builder_service = Mock()
+    tool_builder_service.get_tool.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Movie Alerts",
+        "status": "RUNNING",
+    }
+    tool_builder_service.get_job_state.return_value = {
+        "prompt": "Build a movie watcher tool.",
+        "refinedPrompt": "Track movies and send alerts.",
+        "status": "RUNNING",
+        "error": None,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+    )
+    service._resolve_tool_builder_context = Mock(  # type: ignore[method-assign]
+        return_value={
+            "requestId": "request-1",
+            "toolId": "tool-1",
+            "toolName": "Movie Alerts",
+            "phase": "running",
+        }
+    )
+
+    message, context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content="can you also provide an option to delete an added movie watcher",
+    )
+
+    assert "historical alert log entries" in message
+    assert context is not None
+    assert context["phase"] == "modification_clarification"
+    tool_builder_service.start_generation.assert_not_called()
+
+
+def test_modify_chat_clarification_reply_starts_rebuild() -> None:
+    codex_service = Mock()
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs=(
+            '{"needsClarification": false, "questions": [], '
+            '"clarifiedRequest": "Add an option to delete an existing movie watcher while preserving historical alert logs."}'
+        ),
+    )
+    codex_service.clean_cli_output.side_effect = lambda value: value
+    tool_builder_service = Mock()
+    tool_builder_service.start_generation.return_value = {"id": "request-1", "status": "PENDING"}
+    tool_builder_service.get_job_state.return_value = {
+        "prompt": "Build a movie watcher tool.",
+        "refinedPrompt": "Track movies and send alerts.",
+        "status": "RUNNING",
+        "error": None,
+    }
+    tool_builder_service.get_tool.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Movie Alerts",
+        "status": "RUNNING",
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+    )
+    service._resolve_tool_builder_context = Mock(  # type: ignore[method-assign]
+        return_value={
+            "phase": "modification_clarification",
+            "requestId": "request-1",
+            "toolId": "tool-1",
+            "toolName": "Movie Alerts",
+            "draftChangeRequest": "can you also provide an option to delete an added movie watcher",
+            "pendingQuestions": [
+                "Should deleting a watcher remove only the watch configuration, or also delete its historical alert log entries?"
+            ],
+        }
+    )
+
+    message, context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content="Preserve the historical alert logs.",
+        selected_model="gpt-5.4-mini",
+    )
+
+    assert "Started applying your clarified changes" in message
+    assert context == {"requestId": "request-1", "toolId": "tool-1", "toolName": "Movie Alerts", "phase": "building"}
+    tool_builder_service.start_generation.assert_called_once()
+    assert tool_builder_service.start_generation.call_args.kwargs["model"] == "gpt-5.4-mini"
 
 
 class _StubSessionRepository:
@@ -236,6 +476,14 @@ class _StubCodexService:
     def default_chat_model() -> str | None:
         return None
 
+    @staticmethod
+    def run_chat(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(success=False, logs="")
+
+    @staticmethod
+    def clean_cli_output(value: str) -> str:
+        return value
+
 
 def test_stream_message_persists_assistant_before_final_delta_stream() -> None:
     session_repository = _StubSessionRepository()
@@ -255,3 +503,39 @@ def test_stream_message_persists_assistant_before_final_delta_stream() -> None:
     created_roles = [message["role"] for message in message_repository.created]
     assert created_roles == ["user", "assistant"]
     assert session_repository.touched is True
+
+
+def test_stop_active_stream_stops_codex_for_session() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {"id": "session-1"}
+    codex_service = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=Mock(),
+        codex_service=codex_service,
+    )
+
+    stopped, error = service.stop_active_stream("session-1")
+
+    assert stopped is True
+    assert error is None
+    codex_service.stop_chat.assert_called_once_with(session_id="session-1")
+
+
+def test_stop_active_stream_returns_not_found_for_unknown_session() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = None
+    codex_service = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=Mock(),
+        codex_service=codex_service,
+    )
+
+    stopped, error = service.stop_active_stream("missing-session")
+
+    assert stopped is False
+    assert error == "Session not found"
+    codex_service.stop_chat.assert_not_called()

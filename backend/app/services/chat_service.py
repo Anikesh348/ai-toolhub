@@ -1,6 +1,7 @@
 import json
 import mimetypes
 import re
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -44,6 +45,8 @@ class ChatService:
         self._tool_frontend_base_url = self._normalize_runtime_base_url(tool_frontend_base_url)
         self._tool_backend_base_url = self._normalize_runtime_base_url(tool_backend_base_url)
         self._logger = get_logger(__name__)
+        self._cancelled_stream_sessions: set[str] = set()
+        self._cancelled_stream_lock = threading.Lock()
 
     def create_session(self, title: str | None, mode: str, model: str | None = None) -> dict:
         normalized_mode = self._normalize_mode(mode)
@@ -121,7 +124,11 @@ class ChatService:
             success = True
             exit_code = 0
         elif self._normalize_mode(session["mode"]) == "tool_builder":
-            assistant_text, tool_builder_context = self._run_tool_builder_task(session_id=session_id, user_content=content)
+            assistant_text, tool_builder_context = self._run_tool_builder_task(
+                session_id=session_id,
+                user_content=content,
+                selected_model=selected_model,
+            )
             success = True
             exit_code = 0
             if tool_builder_context:
@@ -161,6 +168,7 @@ class ChatService:
         model: str | None = None,
         attachment_ids: list[str] | None = None,
     ) -> Iterable[dict[str, Any]]:
+        self._clear_stream_cancelled(session_id)
         session = self._session_repository.get_by_id(session_id)
         if session is None:
             yield {"type": "error", "error": "Session not found"}
@@ -222,7 +230,11 @@ class ChatService:
             success = True
             exit_code = 0
         elif self._normalize_mode(session["mode"]) == "tool_builder":
-            assistant_text, tool_builder_context = self._run_tool_builder_task(session_id=session_id, user_content=user_content)
+            assistant_text, tool_builder_context = self._run_tool_builder_task(
+                session_id=session_id,
+                user_content=user_content,
+                selected_model=selected_model,
+            )
             success = True
             exit_code = 0
             if tool_builder_context:
@@ -264,6 +276,13 @@ class ChatService:
                 assistant_text = self._build_assistant_text(completion.logs, completion.success)
                 success = completion.success
                 exit_code = completion.exit_code
+            stream_cancelled = self._consume_stream_cancelled(session_id)
+            if stream_cancelled:
+                if not assistant_text.strip():
+                    assistant_text = "Generation stopped."
+                success = False
+                exit_code = 130
+                assistant_metadata["stopped"] = True
             if completion is not None and not completion.success:
                 self._logger.warning(
                     "Chat stream completion failed for session %s: exit=%s",
@@ -365,12 +384,36 @@ class ChatService:
         enriched["url"] = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
         return enriched
 
+    def stop_active_stream(self, session_id: str) -> tuple[bool, str | None]:
+        session = self._session_repository.get_by_id(session_id)
+        if session is None:
+            return False, "Session not found"
+
+        self._mark_stream_cancelled(session_id)
+        self._codex_service.stop_chat(session_id=session_id)
+        return True, None
+
     def delete_session(self, session_id: str) -> bool:
         session = self._session_repository.get_by_id(session_id)
         if session is None:
             return False
         self._message_repository.delete_for_session(session_id=session_id)
         return self._session_repository.delete(session_id=session_id)
+
+    def _mark_stream_cancelled(self, session_id: str) -> None:
+        with self._cancelled_stream_lock:
+            self._cancelled_stream_sessions.add(session_id)
+
+    def _clear_stream_cancelled(self, session_id: str) -> None:
+        with self._cancelled_stream_lock:
+            self._cancelled_stream_sessions.discard(session_id)
+
+    def _consume_stream_cancelled(self, session_id: str) -> bool:
+        with self._cancelled_stream_lock:
+            if session_id in self._cancelled_stream_sessions:
+                self._cancelled_stream_sessions.remove(session_id)
+                return True
+        return False
 
     def _build_chat_prompt(self, mode: str, messages: list[dict[str, Any]]) -> str:
         normalized_mode = self._normalize_mode(mode)
@@ -811,11 +854,131 @@ class ChatService:
                 return branch_name
         return None
 
-    def _run_tool_builder_task(self, session_id: str, user_content: str) -> tuple[str, dict[str, Any] | None]:
+    def _run_tool_builder_task(
+        self,
+        session_id: str,
+        user_content: str,
+        selected_model: str | None = None,
+    ) -> tuple[str, dict[str, Any] | None]:
         if self._tool_builder_service is None:
             return "Tool builder workflow is not configured yet. Please check backend startup dependencies.", None
 
         context = self._resolve_tool_builder_context(session_id)
+        if context and context.get("phase") == "modification_clarification":
+            base_request_id = str(context.get("requestId") or "").strip()
+            rebuild_tool_id = str(context.get("toolId") or "").strip() or None
+            tool_name = str(context.get("toolName") or "").strip() or None
+            draft_change_request = str(context.get("draftChangeRequest") or "").strip()
+            request_state = self._tool_builder_service.get_job_state(base_request_id) if base_request_id else None
+            tool = self._tool_builder_service.get_tool(rebuild_tool_id) if rebuild_tool_id else None
+            if tool is None and base_request_id:
+                tool = self._tool_builder_service.get_tool_for_request(request_id=base_request_id)
+
+            if draft_change_request and base_request_id:
+                combined_change_request = (
+                    f"{draft_change_request}\n\n"
+                    "Additional clarification from user:\n"
+                    f"{user_content.strip()}"
+                )
+                clarification, clarification_result = self._tool_builder_modification_clarification_from_codex(
+                    session_id=session_id,
+                    change_request=combined_change_request,
+                    tool=tool,
+                    request_state=request_state,
+                    prior_questions=context.get("pendingQuestions"),
+                    model=selected_model,
+                )
+                if clarification:
+                    return clarification, {
+                        "phase": "modification_clarification",
+                        "requestId": base_request_id,
+                        "toolId": rebuild_tool_id,
+                        "toolName": tool_name,
+                        "draftChangeRequest": str(
+                            clarification_result.get("clarifiedRequest") if isinstance(clarification_result, dict) else combined_change_request
+                        )
+                        or combined_change_request,
+                        "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
+                    }
+
+                finalized_change_request = (
+                    str(clarification_result.get("clarifiedRequest") or "").strip()
+                    if isinstance(clarification_result, dict)
+                    else ""
+                ) or combined_change_request
+                modification_prompt = self._build_tool_modification_prompt(
+                    user_content=finalized_change_request,
+                    tool=tool,
+                    request_state=request_state,
+                )
+                job = self._tool_builder_service.start_generation(
+                    prompt=modification_prompt,
+                    name=tool_name,
+                    base_request_id=base_request_id,
+                    rebuild_tool_id=rebuild_tool_id,
+                    model=selected_model,
+                )
+                next_context = {
+                    "requestId": job["id"],
+                    "toolId": rebuild_tool_id,
+                    "toolName": tool_name,
+                    "phase": "building",
+                }
+                message = (
+                    "Started applying your clarified changes to the existing tool.\n\n"
+                    f"- Request ID: `{job['id']}`\n"
+                    f"- Tool ID: `{rebuild_tool_id or 'will be resolved after build starts'}`\n"
+                    "- I will rebuild and redeploy the tool container once tests and verification pass.\n"
+                    "- Ask `status` anytime in this chat to get the latest state and port."
+                )
+                return message, next_context
+
+        if context and context.get("phase") == "clarification":
+            draft_prompt = str(context.get("draftPrompt") or "").strip()
+            if draft_prompt:
+                combined_request = (
+                    f"{draft_prompt}\n\n"
+                    "Clarifications from user:\n"
+                    f"{user_content.strip()}"
+                )
+                clarification, clarification_result = self._tool_builder_clarification_from_codex(
+                    session_id=session_id,
+                    request_text=combined_request,
+                    prior_questions=context.get("pendingQuestions"),
+                    model=selected_model,
+                )
+                if clarification:
+                    next_context = {
+                        "phase": "clarification",
+                        "draftPrompt": str(
+                            clarification_result.get("clarifiedRequest") if isinstance(clarification_result, dict) else combined_request
+                        )
+                        or combined_request,
+                        "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
+                    }
+                    return clarification, next_context
+
+                finalized_request = (
+                    str(clarification_result.get("clarifiedRequest") or "").strip()
+                    if isinstance(clarification_result, dict)
+                    else ""
+                ) or combined_request
+                initial_prompt = self._build_tool_initial_prompt(finalized_request)
+                job = self._tool_builder_service.start_generation(
+                    prompt=initial_prompt,
+                    name=None,
+                    model=selected_model,
+                )
+                next_context = {"requestId": job["id"], "phase": "building"}
+                message = (
+                    "Build queued with your clarified requirements.\n\n"
+                    f"- Request ID: `{job['id']}`\n"
+                    "- Next I’ll turn this into acceptance criteria, write tests first, implement the tool, and verify runtime APIs before publish.\n"
+                    "- For live scraping/data tools, I’ll only publish after backend results line up with web verification.\n"
+                    "- Ask `status` in this chat anytime to check progress and runtime details."
+                )
+                return message, next_context
+
         if context and not context.get("requestId") and not context.get("toolId"):
             context = None
         explicit_tool_id = self._extract_tool_id(user_content)
@@ -855,8 +1018,35 @@ class ChatService:
             rebuild_tool_id = str(context.get("toolId") or "").strip() or None
             tool_name = str(context.get("toolName") or "").strip() or None
             request_state = self._tool_builder_service.get_job_state(base_request_id)
+            clarification, clarification_result = self._tool_builder_modification_clarification_from_codex(
+                session_id=session_id,
+                change_request=user_content,
+                tool=tool,
+                request_state=request_state,
+                model=selected_model,
+            )
+            if clarification:
+                draft_change_request = (
+                    str(clarification_result.get("clarifiedRequest") or "").strip()
+                    if isinstance(clarification_result, dict)
+                    else ""
+                ) or user_content.strip()
+                return clarification, {
+                    "phase": "modification_clarification",
+                    "requestId": base_request_id,
+                    "toolId": rebuild_tool_id,
+                    "toolName": tool_name,
+                    "draftChangeRequest": draft_change_request,
+                    "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
+                }
+
+            finalized_change_request = (
+                str(clarification_result.get("clarifiedRequest") or "").strip()
+                if isinstance(clarification_result, dict)
+                else ""
+            ) or user_content
             modification_prompt = self._build_tool_modification_prompt(
-                user_content=user_content,
+                user_content=finalized_change_request,
                 tool=tool,
                 request_state=request_state,
             )
@@ -865,6 +1055,7 @@ class ChatService:
                 name=tool_name,
                 base_request_id=base_request_id,
                 rebuild_tool_id=rebuild_tool_id,
+                model=selected_model,
             )
             next_context = {
                 "requestId": job["id"],
@@ -881,22 +1072,40 @@ class ChatService:
             )
             return message, next_context
 
-        if self._needs_tool_builder_clarification(user_content):
-            clarification = (
-                "Before I build this, please clarify these points:\n"
-                "1. What is the exact primary user workflow?\n"
-                "2. Do you need UI only, API only, or full-stack?\n"
-                "3. Any required integrations/auth/storage constraints?"
-            )
-            return clarification, {"phase": "clarification"}
+        clarification, clarification_result = self._tool_builder_clarification_from_codex(
+            session_id=session_id,
+            request_text=user_content,
+            model=selected_model,
+        )
+        if clarification:
+            draft_prompt = (
+                str(clarification_result.get("clarifiedRequest") or "").strip()
+                if isinstance(clarification_result, dict)
+                else ""
+            ) or user_content.strip()
+            return clarification, {
+                "phase": "clarification",
+                "draftPrompt": draft_prompt,
+                "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
+            }
 
-        initial_prompt = self._build_tool_initial_prompt(user_content)
-        job = self._tool_builder_service.start_generation(prompt=initial_prompt, name=None)
+        finalized_request = (
+            str(clarification_result.get("clarifiedRequest") or "").strip()
+            if isinstance(clarification_result, dict)
+            else ""
+        ) or user_content
+        initial_prompt = self._build_tool_initial_prompt(finalized_request)
+        job = self._tool_builder_service.start_generation(
+            prompt=initial_prompt,
+            name=None,
+            model=selected_model,
+        )
         next_context = {"requestId": job["id"], "phase": "building"}
         message = (
-            "Great, I’ve started building this tool.\n\n"
+            "Build queued.\n\n"
             f"- Request ID: `{job['id']}`\n"
-            "- I will generate, test, and deploy it automatically.\n"
+            "- Next I’ll convert this into acceptance criteria, write tests first, implement the tool, and verify runtime behavior before deployment.\n"
+            "- If the backend relies on scraping or live external data, I’ll cross-check sampled results with web verification before publish.\n"
             "- Once deployed, ask `status` in this chat to get the live port and runtime state.\n"
             "- You can keep chatting here to request further changes; I’ll rebuild from the last successful version."
         )
@@ -936,6 +1145,276 @@ class ChatService:
             "whatever works",
         )
         return any(marker in cleaned for marker in vague_markers) and token_count < 20
+
+    def _tool_builder_clarification_from_codex(
+        self,
+        session_id: str,
+        request_text: str,
+        prior_questions: object | None = None,
+        model: str | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        clarification_prompt = self._build_tool_builder_clarification_analysis_prompt(
+            request_text=request_text,
+            prior_questions=prior_questions,
+        )
+        result = self._codex_service.run_chat(
+            session_id=f"{session_id}-tool-clarify",
+            prompt=clarification_prompt,
+            model=model,
+            timeout_seconds=90,
+        )
+        if result.success:
+            cleaned = self._codex_service.clean_cli_output(result.logs)
+            parsed = self._parse_first_json_object(cleaned)
+            normalized = self._normalize_tool_builder_clarification_result(parsed)
+            if normalized is not None:
+                if normalized["needsClarification"] and normalized["questions"]:
+                    return self._render_tool_builder_clarification_message(normalized["questions"]), normalized
+                return None, normalized
+
+        clarification = self._build_tool_builder_clarification(request_text)
+        if clarification:
+            fallback_questions = self._collect_tool_builder_ambiguities(request_text)
+            return clarification, {
+                "needsClarification": True,
+                "questions": fallback_questions,
+                "clarifiedRequest": request_text.strip(),
+                "source": "fallback",
+            }
+        return None, {
+            "needsClarification": False,
+            "questions": [],
+            "clarifiedRequest": request_text.strip(),
+            "source": "fallback",
+        }
+
+    def _tool_builder_modification_clarification_from_codex(
+        self,
+        session_id: str,
+        change_request: str,
+        tool: dict[str, Any] | None,
+        request_state: dict[str, Any] | None,
+        prior_questions: object | None = None,
+        model: str | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        clarification_prompt = self._build_tool_builder_modification_clarification_analysis_prompt(
+            change_request=change_request,
+            tool=tool,
+            request_state=request_state,
+            prior_questions=prior_questions,
+        )
+        result = self._codex_service.run_chat(
+            session_id=f"{session_id}-tool-modify-clarify",
+            prompt=clarification_prompt,
+            model=model,
+            timeout_seconds=90,
+        )
+        if result.success:
+            cleaned = self._codex_service.clean_cli_output(result.logs)
+            parsed = self._parse_first_json_object(cleaned)
+            normalized = self._normalize_tool_builder_clarification_result(parsed)
+            if normalized is not None:
+                if normalized["needsClarification"] and normalized["questions"]:
+                    return self._render_tool_builder_clarification_message(normalized["questions"]), normalized
+                return None, normalized
+
+        return None, {
+            "needsClarification": False,
+            "questions": [],
+            "clarifiedRequest": change_request.strip(),
+            "source": "fallback",
+        }
+
+    @staticmethod
+    def _build_tool_builder_clarification_analysis_prompt(
+        request_text: str,
+        prior_questions: object | None = None,
+    ) -> str:
+        prior_lines: list[str] = []
+        if isinstance(prior_questions, list):
+            cleaned_prior = [str(item).strip() for item in prior_questions if str(item).strip()]
+            if cleaned_prior:
+                prior_lines.append("Previously asked clarification questions:")
+                for question in cleaned_prior[:5]:
+                    prior_lines.append(f"- {question}")
+
+        prior_block = "\n".join(prior_lines).strip()
+        if prior_block:
+            prior_block = f"{prior_block}\n\n"
+
+        return (
+            "Analyze this tool-building request and decide if clarification is still required before implementation.\n"
+            "Use the full request plus any user follow-up answers already included.\n"
+            "Do not repeat questions that are already answered.\n"
+            "Infer reasonable defaults when risk is low, but ask concise questions for anything that could materially change implementation.\n"
+            "Prefer at most 3 questions.\n"
+            "Return strict JSON only in this shape:\n"
+            '{"needsClarification": true|false, "questions": ["..."], "clarifiedRequest": "...", "reason": "..."}\n\n'
+            f"{prior_block}"
+            f"Request and follow-ups:\n{request_text.strip()}"
+        )
+
+    @staticmethod
+    def _build_tool_builder_modification_clarification_analysis_prompt(
+        change_request: str,
+        tool: dict[str, Any] | None,
+        request_state: dict[str, Any] | None,
+        prior_questions: object | None = None,
+    ) -> str:
+        prior_lines: list[str] = []
+        if isinstance(prior_questions, list):
+            cleaned_prior = [str(item).strip() for item in prior_questions if str(item).strip()]
+            if cleaned_prior:
+                prior_lines.append("Previously asked clarification questions:")
+                for question in cleaned_prior[:5]:
+                    prior_lines.append(f"- {question}")
+
+        context_lines = ["Existing tool context:"]
+        if tool:
+            context_lines.append(f"- Tool name: {tool.get('name')}")
+            context_lines.append(f"- Tool status: {tool.get('status')}")
+        if request_state:
+            prompt = str(request_state.get("prompt") or "").strip()
+            refined = str(request_state.get("refinedPrompt") or "").strip()
+            if prompt:
+                context_lines.append(f"Previous request: {prompt[:1200]}")
+            if refined:
+                context_lines.append(f"Refined requirements: {refined[:1200]}")
+
+        prior_block = "\n".join(prior_lines).strip()
+        context_block = "\n".join(context_lines).strip()
+        if prior_block:
+            prior_block = f"{prior_block}\n\n"
+
+        return (
+            "Analyze this requested modification to an existing generated tool and decide if clarification is still required before implementation.\n"
+            "Use the existing tool context, prior requirements, and the user follow-up answers already included.\n"
+            "Do not repeat questions that are already answered.\n"
+            "If the change is simple and low-risk, avoid asking unnecessary questions.\n"
+            "Prefer at most 3 questions.\n"
+            "Return strict JSON only in this shape:\n"
+            '{"needsClarification": true|false, "questions": ["..."], "clarifiedRequest": "...", "reason": "..."}\n\n'
+            f"{prior_block}"
+            f"{context_block}\n\n"
+            f"Change request and follow-ups:\n{change_request.strip()}"
+        )
+
+    @staticmethod
+    def _render_tool_builder_clarification_message(questions: list[str]) -> str:
+        lines = ["Before I build this, I need to lock down these details so the generated tool is accurate:"]
+        for index, question in enumerate(questions[:4], start=1):
+            lines.append(f"{index}. {question}")
+        lines.append(
+            "Once you reply, I’ll turn that into acceptance criteria, write the tests first, then build and verify the tool before publish."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_tool_builder_clarification_result(payload: object) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        questions_raw = payload.get("questions")
+        questions = []
+        if isinstance(questions_raw, list):
+            for item in questions_raw:
+                question = str(item).strip()
+                if question:
+                    questions.append(question)
+
+        clarified_request = str(payload.get("clarifiedRequest") or "").strip()
+        needs_clarification = bool(payload.get("needsClarification"))
+        if questions and not needs_clarification:
+            needs_clarification = True
+        return {
+            "needsClarification": needs_clarification,
+            "questions": questions[:4],
+            "clarifiedRequest": clarified_request,
+            "reason": str(payload.get("reason") or "").strip(),
+            "source": "codex",
+        }
+
+    @staticmethod
+    def _parse_first_json_object(value: str) -> dict[str, Any] | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+
+        try:
+            parsed_direct = json.loads(text)
+            return parsed_direct if isinstance(parsed_direct, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        for match in re.finditer(r"\{[\s\S]*?\}", text):
+            candidate = match.group(0)
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    @classmethod
+    def _build_tool_builder_clarification(cls, user_content: str) -> str | None:
+        questions = cls._collect_tool_builder_ambiguities(user_content)
+        if not questions:
+            return None
+
+        return cls._render_tool_builder_clarification_message(questions)
+
+    @classmethod
+    def _collect_tool_builder_ambiguities(cls, user_content: str) -> list[str]:
+        cleaned = re.sub(r"\s+", " ", user_content).strip()
+        lowered = cleaned.lower()
+        questions: list[str] = []
+
+        if cls._needs_tool_builder_clarification(user_content):
+            questions.append("What is the exact primary user workflow from first input to final output?")
+
+        if cls._request_mentions_live_movie_data(lowered) and not any(token in lowered for token in ("bookmyshow", "district")):
+            questions.append("Which source should be treated as authoritative for current show listings: BookMyShow, District, or both with a fallback order?")
+
+        if cls._request_mentions_live_movie_data(lowered) and not any(
+            token in lowered
+            for token in (
+                "newly available",
+                "new show",
+                "first appears",
+                "first available",
+                "every run",
+                "every match",
+                "repeat alert",
+                "dedupe",
+            )
+        ):
+            questions.append("When should alerts fire: every polling run with matches, or only when a newly available show appears compared with the previous run?")
+
+        if any(token in lowered for token in ("cron", "interval", "schedule", "poll")) and not any(
+            token in lowered for token in ("minute", "minutes", "hour", "hours")
+        ):
+            questions.append("Should the run interval be configured in minutes, hours, or both, and what minimum interval should be allowed?")
+
+        if "email" in lowered and not any(token in lowered for token in ("brevo", "smtp", "sendinblue")):
+            questions.append("Which email provider should the generated tool integrate with for alerts?")
+
+        if any(token in lowered for token in ("bookmyshow", "district")) and "current" not in lowered and "live" not in lowered:
+            questions.append("Should the movie dropdown always refresh from live listings before the user saves the alert configuration, or is cached data acceptable?")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for question in questions:
+            normalized = question.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(question)
+        return deduped
+
+    @staticmethod
+    def _request_mentions_live_movie_data(lowered: str) -> bool:
+        movie_markers = ("movie", "movies", "show", "shows", "showtime", "showtimes", "theatre", "theater", "cinema")
+        return any(marker in lowered for marker in movie_markers)
 
     @staticmethod
     def _is_tool_builder_status_query(user_content: str) -> bool:
@@ -1025,12 +1504,19 @@ class ChatService:
             "Build a production-ready tool based on this request:\n"
             f"{user_content}\n\n"
             "Requirements:\n"
+            "- Clarify requirements first. Convert requirements into explicit acceptance criteria and list assumptions before implementation.\n"
+            "- Save the clarified requirements in `docs/requirements.md` and save concrete test cases in `docs/test-cases.md` before implementation.\n"
             "- Implement the exact requested workflow; avoid unrelated extra features.\n"
             "- Convert the request into concrete acceptance criteria and satisfy each criterion in code/tests.\n"
+            "- Follow TDD: write/update failing tests first, then implement backend changes until tests pass.\n"
+            "- Choose a concise, domain-meaningful product name; avoid generic names based on filler words from the prompt.\n"
             "- Include a usable UI unless explicitly backend-only.\n"
             "- Prefer a lightweight UI stack (server-rendered/static HTML + JS) unless a heavier frontend framework is explicitly requested.\n"
             "- Include tests for the core requested behavior (not only health/status endpoints).\n"
-            "- Include tests and runnable docker artifacts.\n"
+            "- Include tests and runnable docker artifacts including docker-compose.\n"
+            "- Add a lightweight mock deployment validation step for docker-compose/runtime wiring.\n"
+            "- Before launch, verify backend endpoints using real API calls; if scraping/external data is involved, cross-check sampled API output with live web search evidence and fix mismatches before publish.\n"
+            "- For live-data tools, do not ship placeholder or stale sample datasets as the primary source of truth.\n"
             "- Keep implementation practical and maintainable."
         )
 
@@ -1074,11 +1560,16 @@ class ChatService:
             f"{context_block}\n\n"
             f"Change request:\n{user_content}\n\n"
             "Requirements:\n"
+            "- Clarify updated requirements and assumptions before changing implementation.\n"
+            "- Keep `docs/requirements.md` and `docs/test-cases.md` in sync with the requested change before implementation.\n"
             "- Implement exactly what the user asked in this change request.\n"
+            "- Treat this as a focused modification request: make the smallest code change that satisfies it.\n"
             "- Preserve existing working behavior unless this request explicitly changes it.\n"
+            "- Do not rewrite existing scraping/data-source logic unless the change request explicitly requires it.\n"
             "- Keep the UI/runtime stack lightweight unless the request explicitly requires a heavier frontend framework.\n"
-            "- Update or add tests for the changed behavior and likely regressions.\n"
-            "- Keep Docker/runtime compatibility intact, including required health/status checks."
+            "- Follow TDD: update/add tests first for the changed behavior and likely regressions, then implement backend changes.\n"
+            "- Keep Docker/runtime compatibility intact, including required health/status checks.\n"
+            "- Re-verify runtime APIs after the change; for scraping/live-data flows, compare sampled API results with live web evidence before publish."
         )
 
     @staticmethod

@@ -1143,6 +1143,45 @@ class DockerService:
             except Exception:  # pylint: disable=broad-except
                 pass
 
+    def stop_build_containers(self, request_id: str) -> None:
+        builder_name = self._builder_container_name(request_id)
+        probe_prefix = f"probe-{self._safe_name_token(request_id, default='request')[:10]}"
+
+        candidates: dict[str, Any] = {}
+
+        def collect(filters: dict[str, str]) -> None:
+            try:
+                containers = self._client.containers.list(all=True, filters=filters)
+            except Exception:  # pylint: disable=broad-except
+                return
+            for container in containers:
+                try:
+                    candidates[container.id] = container
+                except Exception:  # pylint: disable=broad-except
+                    continue
+
+        collect({"name": builder_name})
+        collect({"name": probe_prefix})
+        collect({"label": "tool.runtime=probe"})
+        collect({"label": f"tool.request_id={request_id}"})
+
+        for container in list(candidates.values()):
+            try:
+                labels = ((container.attrs.get("Config", {}) or {}).get("Labels", {}) or {})
+            except Exception:  # pylint: disable=broad-except
+                labels = {}
+            runtime_kind = str(labels.get("tool.runtime") or "").strip()
+            if runtime_kind and runtime_kind not in {"probe"}:
+                continue
+            container_name = getattr(container, "name", "")
+            if container_name != builder_name and not str(container_name).startswith(probe_prefix):
+                if runtime_kind != "probe":
+                    continue
+            try:
+                container.remove(force=True)
+            except Exception:  # pylint: disable=broad-except
+                continue
+
     @staticmethod
     def _safe_name_token(value: str, default: str = "generated-tool", max_length: int = 48) -> str:
         lowered = value.strip().lower()

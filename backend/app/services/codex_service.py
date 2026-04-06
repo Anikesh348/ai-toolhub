@@ -23,7 +23,7 @@ class CodexService:
         self._settings = settings
         self._docker_service = docker_service
 
-    def run_generation(self, request_id: str, prompt: str) -> CommandResult:
+    def run_generation(self, request_id: str, prompt: str, model: str | None = None) -> CommandResult:
         host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
         prompt_file_host = host_job_path / "prompt.txt"
         prompt_file_host.write_text(prompt, encoding="utf-8")
@@ -35,6 +35,7 @@ class CodexService:
             workspace=self._settings.codex_workspace_container,
             request_id=request_id,
         )
+        shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         return self._docker_service.run_builder_container(
             request_id=request_id,
             shell_command=shell_command,
@@ -100,6 +101,10 @@ class CodexService:
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.build_timeout_seconds,
         )
+
+    def stop_chat(self, session_id: str) -> None:
+        request_id = f"chat-{session_id}"
+        self._docker_service.stop_request_containers(request_id=request_id)
 
     def list_chat_models(self) -> list[str]:
         return self._settings.available_chat_models

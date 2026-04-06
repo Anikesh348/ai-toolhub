@@ -27,6 +27,7 @@ class ToolRepository:
             "ports": {},
             "status": ToolStatus.DEPLOYING.value,
             "crashAlertSent": False,
+            "monitorIgnoreUntil": None,
             "createdAt": now,
             "updatedAt": now,
         }
@@ -59,7 +60,18 @@ class ToolRepository:
         return result.deleted_count > 0
 
     def get_running_without_crash_alert(self) -> list[dict]:
-        docs = self._collection.find({"status": ToolStatus.RUNNING.value, "crashAlertSent": False})
+        now = datetime.now(tz=timezone.utc)
+        docs = self._collection.find(
+            {
+                "status": ToolStatus.RUNNING.value,
+                "crashAlertSent": False,
+                "$or": [
+                    {"monitorIgnoreUntil": None},
+                    {"monitorIgnoreUntil": {"$lte": now}},
+                    {"monitorIgnoreUntil": {"$exists": False}},
+                ],
+            }
+        )
         return [self._to_model(doc) for doc in docs]
 
     def get_ports_in_use(self, exclude_tool_id: str | None = None) -> set[int]:
@@ -90,6 +102,7 @@ class ToolRepository:
         status: ToolStatus,
         ports: dict[str, int] | None = None,
         ui_port: int | None = None,
+        monitor_ignore_until: datetime | None = None,
     ) -> None:
         assigned_ui_port = ui_port if ui_port is not None else port
         updates: dict[str, Any] = {
@@ -101,6 +114,8 @@ class ToolRepository:
         }
         if ports is not None:
             updates["ports"] = ports
+        if monitor_ignore_until is not None:
+            updates["monitorIgnoreUntil"] = monitor_ignore_until
 
         self._collection.update_one(
             {"toolId": tool_id},
@@ -118,6 +133,7 @@ class ToolRepository:
                     "dockerImage": docker_image,
                     "status": ToolStatus.DEPLOYING.value,
                     "crashAlertSent": False,
+                    "monitorIgnoreUntil": None,
                     "updatedAt": datetime.now(tz=timezone.utc),
                 }
             },
@@ -174,6 +190,7 @@ class ToolRepository:
             "ports": document.get("ports") or {},
             "status": document["status"],
             "crashAlertSent": document.get("crashAlertSent", False),
+            "monitorIgnoreUntil": document.get("monitorIgnoreUntil"),
             "createdAt": document["createdAt"],
             "updatedAt": document["updatedAt"],
         }

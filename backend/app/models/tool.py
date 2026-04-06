@@ -17,5 +17,6 @@ class Tool(BaseModel):
     ports: dict[str, int] = Field(default_factory=dict)
     status: ToolStatus
     crashAlertSent: bool = False
+    monitorIgnoreUntil: Optional[datetime] = None
     createdAt: datetime
     updatedAt: datetime

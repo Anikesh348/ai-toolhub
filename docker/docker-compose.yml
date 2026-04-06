@@ -1,4 +1,28 @@
 services:
+  mongo:
+    image: mongo:7
+    container_name: tool-builder-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-toolhub}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-toolhub-dev-password}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-ai-toolhub}
+    ports:
+      - "${MONGO_BIND_ADDRESS:-127.0.0.1}:${MONGO_PORT:-27017}:27017"
+    volumes:
+      - ${MONGO_DATA_DIR:-../docker-data/mongodb}:/data/db
+      - ${MONGO_CONFIG_DIR:-../docker-data/mongodb-config}:/data/configdb
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --host 127.0.0.1 --port 27017 -u \"$${MONGO_INITDB_ROOT_USERNAME}\" -p \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
   codex:
     image: ${CODEX_IMAGE_NAME:-tool-builder-codex:latest}
     build:
@@ -24,9 +48,15 @@ services:
     container_name: tool-builder-backend
     restart: unless-stopped
     depends_on:
-      - codex
+      codex:
+        condition: service_started
+      mongo:
+        condition: service_healthy
     env_file:
       - ../.env
+    environment:
+      MONGO_URI: ${MONGO_URI:-mongodb://${MONGO_INITDB_ROOT_USERNAME:-toolhub}:${MONGO_INITDB_ROOT_PASSWORD:-toolhub-dev-password}@mongo:27017/${MONGO_DB_NAME:-ai-toolhub}?authSource=admin}
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-ai-toolhub}
     ports:
       - "${APP_PORT:-8000}:${APP_PORT:-8000}"
     extra_hosts:

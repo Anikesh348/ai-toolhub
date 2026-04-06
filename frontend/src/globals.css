@@ -368,4 +368,9 @@ body::before {
   body.pwa-mobile .chat-page-root > section > div:first-child {
     padding-top: 0.6rem;
   }
+
+  body.pwa-mobile .chat-companion-aside {
+    top: calc(env(safe-area-inset-top, 0px) + 4.2rem);
+    bottom: 0;
+  }
 }

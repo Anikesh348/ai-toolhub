@@ -9,6 +9,7 @@ const DEFAULT_SIDEBAR_WIDTH = 268;
 const MIN_SIDEBAR_WIDTH = 236;
 const MAX_SIDEBAR_WIDTH = 420;
 const MOBILE_BREAKPOINT_QUERY = "(max-width: 1023px)";
+const DISPLAY_MODE_STANDALONE_QUERY = "(display-mode: standalone)";
 const LAST_SIGNED_IN_STORAGE_KEY = "toolhub.auth.lastSignedIn";
 
 function getErrorMessage(error: unknown): string {
@@ -36,6 +37,16 @@ function getPhoneViewState(): boolean {
   }
 
   return window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
+}
+
+function getStandalonePwaState(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const displayModeStandalone = window.matchMedia(DISPLAY_MODE_STANDALONE_QUERY).matches;
+  const iosStandalone = Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
+  return displayModeStandalone || iosStandalone;
 }
 
 function GoogleSignInLayer() {
@@ -99,6 +110,7 @@ export function AppShell() {
   const { pathname } = useLocation();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [isPhoneView, setIsPhoneView] = useState(false);
+  const [isStandalonePwa, setIsStandalonePwa] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [optimisticSignedIn, setOptimisticSignedIn] = useState(false);
   const [allowSignedOutUi, setAllowSignedOutUi] = useState(false);
@@ -163,24 +175,40 @@ export function AppShell() {
   useEffect(() => {
     const updateMode = (): void => {
       setIsPhoneView(getPhoneViewState());
+      setIsStandalonePwa(getStandalonePwaState());
     };
 
     updateMode();
+    const displayModeMediaQuery = window.matchMedia(DISPLAY_MODE_STANDALONE_QUERY);
     window.addEventListener("resize", updateMode);
     document.addEventListener("visibilitychange", updateMode);
+
+    if ("addEventListener" in displayModeMediaQuery) {
+      displayModeMediaQuery.addEventListener("change", updateMode);
+    } else {
+      displayModeMediaQuery.addListener(updateMode);
+    }
 
     return () => {
       window.removeEventListener("resize", updateMode);
       document.removeEventListener("visibilitychange", updateMode);
+
+      if ("removeEventListener" in displayModeMediaQuery) {
+        displayModeMediaQuery.removeEventListener("change", updateMode);
+      } else {
+        displayModeMediaQuery.removeListener(updateMode);
+      }
     };
   }, []);
 
   useEffect(() => {
     document.body.classList.toggle("pwa-mobile", isPhoneView);
+    document.body.classList.toggle("pwa-standalone", isStandalonePwa);
     return () => {
       document.body.classList.remove("pwa-mobile");
+      document.body.classList.remove("pwa-standalone");
     };
-  }, [isPhoneView]);
+  }, [isPhoneView, isStandalonePwa]);
 
   useEffect(() => {
     setMobileMenuOpen(false);

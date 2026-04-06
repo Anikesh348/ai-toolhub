@@ -92,6 +92,11 @@ export type DeleteChatSessionResponse = {
   deleted: boolean;
 };
 
+export type StopChatStreamResponse = {
+  sessionId: string;
+  stopped: boolean;
+};
+
 export type UpdateChatSessionPayload = {
   title?: string | null;
   mode?: ChatMode;
@@ -107,6 +112,11 @@ export type DeleteToolResponse = {
 export type DeleteJobResponse = {
   jobId: string;
   deleted: boolean;
+};
+
+export type StopJobResponse = {
+  jobId: string;
+  stopped: boolean;
 };
 
 export type CodexAuthStatus = {
@@ -131,6 +141,44 @@ export type GitSshVerification = {
   exitCode: number;
   message: string;
   logs: string;
+};
+
+export type InstagramBrowserSession = {
+  running: boolean;
+  authenticated: boolean;
+  requiresLogin: boolean;
+  containerName: string;
+  containerId: string | null;
+  hostPort: number | null;
+  viewerUrl: string | null;
+  image: string;
+  message: string;
+};
+
+export type InstagramReelsScrollAction = "swipe_up" | "swipe_down";
+
+export type InstagramReelsControlResponse = {
+  ok: boolean;
+  action: InstagramReelsScrollAction;
+  message: string;
+};
+
+export type YouTubeShortFeedItem = {
+  id: string;
+  title: string;
+  channel: string;
+  category: string;
+};
+
+export type YouTubeShortFeedResponse = {
+  items: YouTubeShortFeedItem[];
+  nextCursor: string | null;
+  source: "youtube" | "fallback";
+};
+
+export type InstagramBrowserViewport = {
+  width: number;
+  height: number;
 };
 
 export type CodexLoginStreamEvent =
@@ -179,6 +227,17 @@ export const TOOL_BACKEND_BASE_URL = normalizePublicBaseUrl(
   ENV.NEXT_PUBLIC_TOOL_BACKEND_BASE_URL ?? ENV.VITE_TOOL_BACKEND_BASE_URL,
   "http://localhost"
 );
+
+function buildViewerOriginHeaders(): Record<string, string> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  const origin = window.location.origin?.trim();
+  if (!origin) {
+    return {};
+  }
+  return { "X-Toolhub-Viewer-Origin": origin };
+}
 
 export async function fetchJobs(): Promise<JobSummary[]> {
   const response = await fetch(`${API_BASE_URL}/jobs`, { cache: "no-store" });
@@ -231,6 +290,102 @@ export async function verifyGitSshConnection(host: string, username = "git"): Pr
   return (await response.json()) as GitSshVerification;
 }
 
+export async function fetchInstagramBrowserSession(): Promise<InstagramBrowserSession> {
+  const response = await fetch(`${API_BASE_URL}/integrations/instagram/browser/session`, {
+    cache: "no-store",
+    headers: buildViewerOriginHeaders()
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch Instagram browser session: ${response.status} ${text}`);
+  }
+  return (await response.json()) as InstagramBrowserSession;
+}
+
+export async function startInstagramBrowserSession(
+  forceRestart = false,
+  viewport?: InstagramBrowserViewport
+): Promise<InstagramBrowserSession> {
+  const params = new URLSearchParams({
+    forceRestart: forceRestart ? "true" : "false"
+  });
+  if (viewport) {
+    params.set("width", String(Math.round(viewport.width)));
+    params.set("height", String(Math.round(viewport.height)));
+  }
+
+  const response = await fetch(
+    `${API_BASE_URL}/integrations/instagram/browser/session?${params.toString()}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...buildViewerOriginHeaders()
+      }
+    }
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to start Instagram browser session: ${response.status} ${text}`);
+  }
+  return (await response.json()) as InstagramBrowserSession;
+}
+
+export async function stopInstagramBrowserSession(): Promise<InstagramBrowserSession> {
+  const response = await fetch(`${API_BASE_URL}/integrations/instagram/browser/session`, {
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildViewerOriginHeaders()
+    }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to stop Instagram browser session: ${response.status} ${text}`);
+  }
+  return (await response.json()) as InstagramBrowserSession;
+}
+
+export async function controlInstagramReelsScroll(
+  action: InstagramReelsScrollAction
+): Promise<InstagramReelsControlResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/integrations/instagram/browser/reels/scroll?action=${encodeURIComponent(action)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...buildViewerOriginHeaders()
+      }
+    }
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to control Instagram reels scroll: ${response.status} ${text}`);
+  }
+  return (await response.json()) as InstagramReelsControlResponse;
+}
+
+export async function fetchYouTubeShortsFeed(
+  cursor: string | null = null,
+  limit = 24
+): Promise<YouTubeShortFeedResponse> {
+  const normalizedLimit = Math.max(1, Math.min(40, Math.round(limit)));
+  const params = new URLSearchParams({ limit: String(normalizedLimit) });
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+
+  const response = await fetch(`${API_BASE_URL}/integrations/youtube/shorts/feed?${params.toString()}`, {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch YouTube shorts feed: ${response.status} ${text}`);
+  }
+  return (await response.json()) as YouTubeShortFeedResponse;
+}
+
 export async function fetchTools(): Promise<ToolRecord[]> {
   const response = await fetch(`${API_BASE_URL}/tools`, { cache: "no-store" });
   if (!response.ok) {
@@ -256,6 +411,18 @@ export async function deleteJob(jobId: string): Promise<DeleteJobResponse> {
     throw new Error(`Unable to delete job: ${response.status} ${text}`);
   }
   return (await response.json()) as DeleteJobResponse;
+}
+
+export async function stopJob(jobId: string): Promise<StopJobResponse> {
+  const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to stop job: ${response.status} ${text}`);
+  }
+  return (await response.json()) as StopJobResponse;
 }
 
 export async function submitTool(prompt: string, name?: string): Promise<{ jobId: string; status: BuildStatus }> {
@@ -636,6 +803,18 @@ export async function streamChatMessage(
       // Ignore partial trailing payloads.
     }
   }
+}
+
+export async function stopChatMessageStream(sessionId: string): Promise<StopChatStreamResponse> {
+  const response = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}/messages/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to stop chat stream: ${response.status} ${text}`);
+  }
+  return (await response.json()) as StopChatStreamResponse;
 }
 
 export async function uploadChatAttachment(sessionId: string, file: File): Promise<ChatAttachment> {

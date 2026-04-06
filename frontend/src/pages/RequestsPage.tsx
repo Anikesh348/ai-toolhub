@@ -78,7 +78,7 @@ export default function RequestsPage() {
         continue;
       }
 
-      if (ACTIVE_STATUSES.includes(job.status)) {
+      if (ACTIVE_STATUSES.includes(job.status) || job.status === "FAILED" || job.status === "STOPPED") {
         rows.push(job);
       }
     }
