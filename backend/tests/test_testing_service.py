@@ -86,6 +86,34 @@ def test_verify_runtime_apis_fails_when_endpoint_returns_server_error(monkeypatc
     assert "/movies" in report["failedPaths"][0]
 
 
+def test_verify_runtime_apis_retries_and_recovers_from_transient_server_error(monkeypatch, tmp_path: Path) -> None:
+    service, _ = _build_service(tmp_path=tmp_path)
+    openapi_payload = {"paths": {"/rules": {"get": {}}}}
+    attempts = {"count": 0}
+
+    monkeypatch.setattr("app.services.testing_service.requests.get", lambda *_args, **_kwargs: _Response(200, openapi_payload))
+
+    def flaky_request(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return _Response(500, {"error": "temporary"})
+        return _Response(200, {"items": []})
+
+    monkeypatch.setattr("app.services.testing_service.requests.request", flaky_request)
+
+    ok, summary, report = service.verify_runtime_apis(request_id="req-2b", host_port=3124, host="127.0.0.1")
+
+    assert ok is True
+    assert "passed" in summary.lower()
+    assert not report["failedPaths"]
+    assert attempts["count"] >= 2
+    probe = report["probes"][0]
+    assert probe["path"] == "/rules"
+    assert probe["statusCode"] == 200
+    assert probe["ok"] is True
+    assert probe["attempt"] == 2
+
+
 def test_detect_scraping_signals(tmp_path: Path) -> None:
     service, docker_service = _build_service(tmp_path=tmp_path)
     (tmp_path / "app.py").write_text("from bs4 import BeautifulSoup\n", encoding="utf-8")

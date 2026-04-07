@@ -211,6 +211,7 @@ def test_workflow_fails_when_api_verification_fails() -> None:
     docker_service = Mock()
     docker_service.build_image.return_value = CommandResult(success=True, exit_code=0, logs="image built")
     docker_service.run_probe_container.return_value = (True, "probe-1", "")
+    docker_service.get_container_logs.return_value = "Traceback: api rules failed"
     port_allocator_service = Mock()
     port_allocator_service.allocate_port.return_value = 3456
     alert_service = Mock()
@@ -236,6 +237,7 @@ def test_workflow_fails_when_api_verification_fails() -> None:
         host_port=3456,
         host="127.0.0.1",
     )
+    docker_service.get_container_logs.assert_called_once_with("probe-1")
     docker_service.stop_container.assert_called_once_with("probe-1")
     tool_repository.create.assert_not_called()
     assert any(

@@ -267,10 +267,14 @@ class ToolBuildWorkflow:
                     if self._request_stopped_or_missing(request_id):
                         return
                     api_report_text = json.dumps(api_report, ensure_ascii=True)
+                    api_failure_logs = ""
+                    if not api_ok:
+                        fetched_logs = self._docker_service.get_container_logs(probe_container_id)
+                        api_failure_logs = fetched_logs if isinstance(fetched_logs, str) else str(fetched_logs or "")
                     self._build_log_repository.add_log(
                         request_id,
                         f"api_verify_attempt_{attempt}",
-                        f"{api_summary}\n{api_report_text[-5000:]}",
+                        f"{api_summary}\n{api_report_text[-5000:]}\n{api_failure_logs[-3000:]}".strip(),
                     )
                     self._store_log_artifact(
                         request_id=request_id,
@@ -280,6 +284,7 @@ class ToolBuildWorkflow:
                             {
                                 "summary": api_summary,
                                 "report": api_report,
+                                "containerLogs": api_failure_logs,
                             },
                             ensure_ascii=True,
                             indent=2,
@@ -287,7 +292,11 @@ class ToolBuildWorkflow:
                         content_type="application/json; charset=utf-8",
                     )
                     if not api_ok:
-                        last_failure = f"{api_summary}\n{api_report_text[-5000:]}"
+                        last_failure = (
+                            f"{api_summary}\n"
+                            f"{api_report_text[-5000:]}\n"
+                            f"Container logs:\n{api_failure_logs[-4000:]}"
+                        ).strip()
                         continue
 
                     data_reliability_ok, data_reliability_message = self._testing_service.assess_dynamic_data_reliability(

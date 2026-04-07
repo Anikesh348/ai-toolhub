@@ -202,6 +202,13 @@ class TestingService:
             guidance.append(
                 "If scraping/external data is used, improve extraction/parsing accuracy and handle empty/malformed upstream responses."
             )
+        if "/api/rules" in lowered and ("500" in lowered or "server error" in lowered):
+            guidance.append(
+                "Ensure GET /api/rules handles empty datasets and database read failures gracefully; return a valid JSON list/object instead of raising exceptions."
+            )
+            guidance.append(
+                "Verify response serialization for rule documents (for example ObjectId/date fields) so list endpoints cannot crash at runtime."
+            )
         if (
             "mongoserverselectionerror" in lowered
             or "server selection timed out" in lowered
@@ -304,6 +311,11 @@ class TestingService:
         timeout_seconds = max(1, int(getattr(self._settings, "api_verification_timeout_seconds", 4)))
         max_calls = max(1, int(getattr(self._settings, "api_verification_max_calls", 8)))
         max_samples = max(1, int(getattr(self._settings, "api_verification_max_samples", 5)))
+        endpoint_retries = max(1, int(getattr(self._settings, "api_verification_endpoint_retries", 2)))
+        endpoint_retry_interval_seconds = max(
+            0.0,
+            float(getattr(self._settings, "api_verification_endpoint_retry_interval_seconds", 0.75)),
+        )
 
         openapi_payload = self._fetch_openapi_payload(base_url=base_url, timeout_seconds=timeout_seconds)
         endpoints = self._discover_openapi_endpoints_from_payload(
@@ -325,36 +337,32 @@ class TestingService:
 
         for method, path_with_query, body in endpoints[:max_calls]:
             url = f"{base_url}{path_with_query}"
-            try:
-                response = requests.request(
+            response = None
+            probe: dict[str, object] | None = None
+            for attempt in range(endpoint_retries):
+                probe, response = self._probe_endpoint(
                     method=method,
+                    path_with_query=path_with_query,
                     url=url,
-                    timeout=timeout_seconds,
-                    json=body,
+                    timeout_seconds=timeout_seconds,
+                    body=body,
                 )
-                ok = response.status_code < 500
-                probe = {
-                    "method": method,
-                    "path": path_with_query,
-                    "statusCode": response.status_code,
-                    "ok": ok,
-                }
-                if not ok:
-                    failed_paths.append(path_with_query)
-                else:
-                    sample_terms.extend(self._extract_sample_terms(response=response, max_terms=max_samples))
-                probes.append(probe)
-            except requests.RequestException as exc:
+                probe["attempt"] = attempt + 1
+                if bool(probe.get("ok")):
+                    break
+                if attempt < endpoint_retries - 1:
+                    time.sleep(endpoint_retry_interval_seconds)
+
+            if probe is None:
                 failed_paths.append(path_with_query)
-                probes.append(
-                    {
-                        "method": method,
-                        "path": path_with_query,
-                        "statusCode": None,
-                        "ok": False,
-                        "error": str(exc),
-                    }
-                )
+                probes.append({"method": method, "path": path_with_query, "statusCode": None, "ok": False})
+                continue
+
+            if not bool(probe.get("ok")):
+                failed_paths.append(path_with_query)
+            elif response is not None:
+                sample_terms.extend(self._extract_sample_terms(response=response, max_terms=max_samples))
+            probes.append(probe)
 
         stateful_ok, stateful_failures, stateful_probes = self._run_stateful_config_search_probe(
             base_url=base_url,
@@ -388,6 +396,43 @@ class TestingService:
             "sampleTerms": unique_terms,
         }
         return success, summary, report
+
+    @staticmethod
+    def _probe_endpoint(
+        method: str,
+        path_with_query: str,
+        url: str,
+        timeout_seconds: int,
+        body: dict | None,
+    ) -> tuple[dict[str, object], requests.Response | None]:
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                timeout=timeout_seconds,
+                json=body,
+            )
+            ok = response.status_code < 500
+            return (
+                {
+                    "method": method,
+                    "path": path_with_query,
+                    "statusCode": response.status_code,
+                    "ok": ok,
+                },
+                response,
+            )
+        except requests.RequestException as exc:
+            return (
+                {
+                    "method": method,
+                    "path": path_with_query,
+                    "statusCode": None,
+                    "ok": False,
+                    "error": str(exc),
+                },
+                None,
+            )
 
     def assess_dynamic_data_reliability(self, request_id: str, prompt: str) -> tuple[bool, str]:
         if not self._is_dynamic_data_prompt(prompt):
