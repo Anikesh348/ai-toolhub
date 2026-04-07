@@ -52,6 +52,7 @@ class ToolBuilderService:
         rebuild_tool_id: str | None = None,
         model: str | None = None,
         workflow_prompt: str | None = None,
+        prompt_already_refined: bool = False,
     ) -> dict:
         workflow_base_request_id = base_request_id
         request = None
@@ -81,6 +82,7 @@ class ToolBuilderService:
                 "rebuild_tool_id": rebuild_tool_id,
                 "model": model,
                 "prompt_override": generation_prompt,
+                "prompt_already_refined": prompt_already_refined,
             },
             daemon=True,
         )
@@ -313,7 +315,12 @@ class ToolBuilderService:
         if request["status"] not in self._TERMINAL_BUILD_STATUSES:
             return None, "A build is already running for this tool"
 
-        current_prompt = str(request.get("prompt") or "").strip()
+        original_prompt = str(request.get("initialPrompt") or request.get("prompt") or "").strip()
+        latest_prompt = str(request.get("latestPrompt") or request.get("prompt") or "").strip()
+        if latest_prompt and latest_prompt != original_prompt:
+            current_prompt = f"Original tool request:\n{original_prompt}\n\nLatest user request:\n{latest_prompt}"
+        else:
+            current_prompt = original_prompt
         rebuild_prompt = (
             "Rebuild and redeploy the existing tool from the current workspace.\n"
             "No feature changes are requested.\n"

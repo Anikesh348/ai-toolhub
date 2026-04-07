@@ -67,6 +67,27 @@ def test_infer_name_from_prompt_ignores_filler_words_in_enumerated_request() -> 
     assert "movies" in inferred
 
 
+def test_effective_request_context_prompt_preserves_original_request_and_changes() -> None:
+    prompt = ToolBuildWorkflow._effective_request_context_prompt(  # pylint: disable=protected-access
+        {
+            "prompt": "Add delete watcher action.",
+            "initialPrompt": "Build a movie watcher tool with email alerts.",
+            "latestPrompt": "Add delete watcher action.",
+            "promptHistory": [
+                {"kind": "initial", "prompt": "Build a movie watcher tool with email alerts."},
+                {"kind": "modification", "prompt": "Add snooze support for alerts."},
+                {"kind": "modification", "prompt": "Add delete watcher action."},
+            ],
+        }
+    )
+
+    assert "Original tool request:" in prompt
+    assert "Build a movie watcher tool with email alerts." in prompt
+    assert "Modification history:" in prompt
+    assert "Add snooze support for alerts." in prompt
+    assert "Latest user request:" in prompt
+
+
 def test_workflow_uses_default_tool_builder_model_for_generation() -> None:
     settings = SimpleNamespace(
         max_build_attempts=1,
@@ -110,6 +131,52 @@ def test_workflow_uses_default_tool_builder_model_for_generation() -> None:
         file_name="generate-attempt-1.log",
         content="generation failed",
         content_type="text/plain; charset=utf-8",
+    )
+
+
+def test_workflow_skips_prompt_refinement_when_prompt_is_already_refined() -> None:
+    settings = SimpleNamespace(
+        max_build_attempts=1,
+        smoke_test_host="127.0.0.1",
+        scraping_web_verify_timeout_seconds=30,
+        tool_builder_model="gpt-5.3-codex",
+    )
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "req-refined",
+        "prompt": "Build a price tracker tool",
+        "status": BuildStatus.PENDING.value,
+    }
+    prompt_service = Mock()
+    codex_service = Mock()
+    codex_service.run_generation.return_value = CommandResult(success=False, exit_code=1, logs="generation failed")
+    codex_service.clean_cli_output.return_value = "generation failed"
+
+    workflow = ToolBuildWorkflow(
+        settings=settings,  # type: ignore[arg-type]
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
+        tool_repository=Mock(),  # type: ignore[arg-type]
+        prompt_service=prompt_service,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        testing_service=Mock(),  # type: ignore[arg-type]
+        docker_service=Mock(),  # type: ignore[arg-type]
+        port_allocator_service=Mock(),  # type: ignore[arg-type]
+        alert_service=Mock(),  # type: ignore[arg-type]
+    )
+
+    workflow._run(  # pylint: disable=protected-access
+        request_id="req-refined",
+        tool_name_hint=None,
+        prompt_override="Build a production-ready tool based on this request:\nBuild a price tracker tool",
+        prompt_already_refined=True,
+    )
+
+    prompt_service.refine_prompt.assert_not_called()
+    request_repository.set_refined_prompt.assert_called_once_with(
+        "req-refined",
+        "Build a production-ready tool based on this request:\nBuild a price tracker tool",
     )
 
 

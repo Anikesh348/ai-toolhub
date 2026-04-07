@@ -65,3 +65,16 @@ def test_refine_prompt_defaults_timezone_to_ist() -> None:
     assert "Asia/Kolkata" in refined
     assert "Default all user-facing dates, times, schedules, and cron behavior to IST" in refined
     assert "TZ=Asia/Kolkata" in refined
+
+
+def test_refine_prompt_keeps_platform_build_brief_intact() -> None:
+    prompt = (
+        "Build a production-ready tool based on this request:\n"
+        "Build a dashboard for monitoring jobs.\n\n"
+        "Requirements:\n"
+        "- Keep `docs/requirements.md` and `docs/test-cases.md` in sync.\n"
+    )
+
+    refined = PromptService().refine_prompt(prompt)
+
+    assert refined == prompt.strip()

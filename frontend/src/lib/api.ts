@@ -705,6 +705,7 @@ export async function createToolBuilderSessionForTool(tool: ToolRecord): Promise
     : "Current UI port is unknown; resolve it from status.";
   const seedPrompt = (
     `Use tool id ${tool.toolId} (name: ${tool.name}, request id: ${tool.requestId}) as active context for this chat. `
+    + "This message is only to set the active tool context for future modify requests; do not start a rebuild yet. "
     + "I want follow-up changes to modify this tool in place and redeploy it. "
     + `${runtimeHint} `
     + "First, share current status and port."

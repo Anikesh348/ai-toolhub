@@ -1059,6 +1059,8 @@ function ChatPageContent() {
   const [composerMode, setComposerMode] = useState<SelectableMode>("general");
   const [composerModel, setComposerModel] = useState<string | null>(null);
   const [toolBuilderIntakeOpen, setToolBuilderIntakeOpen] = useState(false);
+  const [toolBuilderStudioManualOverride, setToolBuilderStudioManualOverride] = useState(false);
+  const [toolBuilderStudioVisible, setToolBuilderStudioVisible] = useState(true);
   const [toolBuilderIntake, setToolBuilderIntake] = useState<ToolBuilderIntakeState>(DEFAULT_TOOL_BUILDER_INTAKE);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
@@ -1302,6 +1304,24 @@ function ChatPageContent() {
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
   }, [activeChatId]);
+
+  useEffect(() => {
+    setToolBuilderStudioManualOverride(false);
+  }, [activeChatId, isToolBuilderMode]);
+
+  useEffect(() => {
+    if (!isToolBuilderMode) {
+      setToolBuilderStudioVisible(false);
+      return;
+    }
+    if (toolBuilderStudioManualOverride) {
+      return;
+    }
+    if (loadingMessages && activeChatId) {
+      return;
+    }
+    setToolBuilderStudioVisible(messages.length === 0);
+  }, [activeChatId, isToolBuilderMode, loadingMessages, messages.length, toolBuilderStudioManualOverride]);
 
   useEffect(() => {
     const textarea = promptTextareaRef.current;
@@ -1969,49 +1989,9 @@ function ChatPageContent() {
                 </h2>
                 <p className="mt-3 max-w-2xl text-sm text-muted">
                   {isToolBuilderMode
-                    ? "Use sample prompts or the intake form to turn rough ideas into a cleaner build brief. Tool Builder will still clarify gaps and refine the brief before coding."
+                    ? "Use the Tool Builder Studio near the composer to start from sample prompts or a structured intake form."
                     : "Start a new chat and pick the mode below to guide how ToolHub should respond."}
                 </p>
-                {isToolBuilderMode && (
-                  <div className="mt-6 w-full max-w-4xl rounded-[1.8rem] border border-amber/18 bg-[radial-gradient(circle_at_top,#231a10_0%,#15110d_55%,#0c0a08_100%)] p-4 text-left shadow-[0_30px_80px_-36px_rgba(0,0,0,0.92)]">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">Prompt Studio</p>
-                        <h3 className="mt-1 text-lg font-semibold text-[color:var(--text-main)]">Start from examples or open the intake form</h3>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setToolBuilderIntakeOpen(true)}
-                        className="btn-primary px-4 py-2 text-sm"
-                      >
-                        Open Intake Form
-                      </button>
-                    </div>
-                    <div className="mt-4 grid gap-3 md:grid-cols-2">
-                      {TOOL_BUILDER_PROMPT_EXAMPLES.map((example) => (
-                        <button
-                          key={example.id}
-                          type="button"
-                          onClick={() => handleUseToolBuilderExample(example)}
-                          className="rounded-[1.3rem] border border-amber/15 bg-black/25 p-4 text-left transition hover:border-amber/35 hover:bg-black/35"
-                        >
-                          <div className="flex flex-wrap gap-2">
-                            {example.tags.map((tag) => (
-                              <span
-                                key={`${example.id}-${tag}`}
-                                className="rounded-full border border-amber/15 bg-amber/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-amber/80"
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                          <h4 className="mt-3 text-base font-semibold text-[color:var(--text-main)]">{example.title}</h4>
-                          <p className="mt-2 text-sm leading-6 text-muted">{example.summary}</p>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -2093,6 +2073,19 @@ function ChatPageContent() {
                   );
                 })}
                 {updatingMode && <span className="text-[11px] text-muted">Switching mode...</span>}
+                {isToolBuilderMode && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolBuilderStudioManualOverride(true);
+                      setToolBuilderStudioVisible((current) => !current);
+                    }}
+                    disabled={!activeChat}
+                    className="rounded-full border border-amber/30 bg-black/35 px-3 py-1 text-[11px] uppercase tracking-[0.14em] text-amber/80 transition hover:border-amber/45 hover:text-amber disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {toolBuilderStudioVisible ? "Hide Studio" : "Show Studio"}
+                  </button>
+                )}
                 <div className="ml-auto flex items-center gap-2">
                   <label htmlFor="chat-companion-select" className="text-[11px] uppercase tracking-[0.14em] text-muted">
                     Companion
@@ -2131,7 +2124,7 @@ function ChatPageContent() {
                 </div>
               </div>
 
-              {isToolBuilderMode && (
+              {isToolBuilderMode && toolBuilderStudioVisible && (
                 <div className="mb-3 rounded-[1.6rem] border border-amber/18 bg-[radial-gradient(circle_at_top,#21180f_0%,#14110d_56%,#0d0b09_100%)] p-3 shadow-[0_24px_70px_-36px_rgba(0,0,0,0.92)]">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="max-w-2xl">

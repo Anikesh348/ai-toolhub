@@ -117,6 +117,32 @@ def test_start_generation_keeps_persisted_prompt_concise_when_workflow_prompt_is
     )
     thread_kwargs = thread_cls.call_args.kwargs["kwargs"]
     assert thread_kwargs["prompt_override"].startswith("Apply the requested change to the existing tool codebase.")
+    assert thread_kwargs["prompt_already_refined"] is False
+    thread_instance.start.assert_called_once()
+
+
+def test_start_generation_can_mark_workflow_prompt_as_already_refined() -> None:
+    request_repository = Mock()
+    request_repository.create.return_value = {
+        "id": "new-request-id",
+        "status": "PENDING",
+    }
+    service = _build_service(request_repository=request_repository)
+
+    with patch("app.services.tool_builder_service.threading.Thread") as thread_cls:
+        thread_instance = Mock()
+        thread_cls.return_value = thread_instance
+
+        service.start_generation(
+            prompt="Build a tool.",
+            workflow_prompt="Build a production-ready tool based on this request:\nBuild a tool.\n\nRequirements:\n- Preserve requirements.",
+            name="demo tool",
+            prompt_already_refined=True,
+        )
+
+    thread_kwargs = thread_cls.call_args.kwargs["kwargs"]
+    assert thread_kwargs["prompt_override"].startswith("Build a production-ready tool based on this request:")
+    assert thread_kwargs["prompt_already_refined"] is True
     thread_instance.start.assert_called_once()
 
 

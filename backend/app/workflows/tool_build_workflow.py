@@ -56,6 +56,7 @@ class ToolBuildWorkflow:
         rebuild_tool_id: str | None = None,
         model: str | None = None,
         prompt_override: str | None = None,
+        prompt_already_refined: bool = False,
     ) -> None:
         try:
             self._run(
@@ -65,6 +66,7 @@ class ToolBuildWorkflow:
                 rebuild_tool_id=rebuild_tool_id,
                 model=model,
                 prompt_override=prompt_override,
+                prompt_already_refined=prompt_already_refined,
             )
         except Exception as exc:  # pylint: disable=broad-except
             self._logger.exception("Workflow failed for request %s", request_id)
@@ -87,6 +89,7 @@ class ToolBuildWorkflow:
         rebuild_tool_id: str | None = None,
         model: str | None = None,
         prompt_override: str | None = None,
+        prompt_already_refined: bool = False,
     ) -> None:
         request = self._request_repository.get_by_id(request_id)
         if request is None:
@@ -107,9 +110,10 @@ class ToolBuildWorkflow:
 
         self._transition(request_id, BuildStatus.REFINING_PROMPT, "Refining prompt")
         source_prompt = (prompt_override or "").strip() or str(request["prompt"])
-        refined_prompt = self._prompt_service.refine_prompt(source_prompt)
+        refined_prompt = source_prompt if prompt_already_refined else self._prompt_service.refine_prompt(source_prompt)
         self._request_repository.set_refined_prompt(request_id, refined_prompt)
         generation_model = (model or "").strip() or str(getattr(self._settings, "tool_builder_model", "") or "").strip() or None
+        request_context_prompt = self._effective_request_context_prompt(request)
 
         last_failure = ""
         terminal_failure_reason: str | None = None
@@ -288,7 +292,7 @@ class ToolBuildWorkflow:
 
                     data_reliability_ok, data_reliability_message = self._testing_service.assess_dynamic_data_reliability(
                         request_id=request_id,
-                        prompt=request["prompt"],
+                        prompt=request_context_prompt,
                     )
                     self._build_log_repository.add_log(
                         request_id,
@@ -309,7 +313,7 @@ class ToolBuildWorkflow:
                         getattr(self._settings, "scraping_web_verify_enabled", True)
                     ) and self._testing_service.should_cross_check_live_data(
                         request_id=request_id,
-                        prompt=request["prompt"],
+                        prompt=request_context_prompt,
                     )
                     if should_cross_check_scraping:
                         self._transition(
@@ -320,7 +324,7 @@ class ToolBuildWorkflow:
                         scrape_ok, scrape_message = self._verify_scraped_api_output_with_web(
                             request_id=request_id,
                             attempt=attempt,
-                            request_prompt=request["prompt"],
+                            request_prompt=request_context_prompt,
                             api_report=api_report,
                         )
                         if self._request_stopped_or_missing(request_id):
@@ -463,6 +467,37 @@ class ToolBuildWorkflow:
             f"Tool running. UI port {ui_port}. Service ports [{mapped_ports}]",
         )
         self._alert_service.send_tool_deployed_alert(tool_name=tool_name, port=ui_port)
+
+    @staticmethod
+    def _effective_request_context_prompt(request: dict[str, object]) -> str:
+        initial_prompt = str(request.get("initialPrompt") or "").strip()
+        latest_prompt = str(request.get("latestPrompt") or request.get("prompt") or "").strip()
+        raw_history = request.get("promptHistory")
+
+        history_prompts: list[str] = []
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if not isinstance(item, dict):
+                    continue
+                prompt = str(item.get("prompt") or "").strip()
+                if prompt:
+                    history_prompts.append(prompt)
+
+        if not initial_prompt and not history_prompts:
+            return latest_prompt
+
+        parts: list[str] = []
+        if initial_prompt:
+            parts.append(f"Original tool request:\n{initial_prompt}")
+        if history_prompts:
+            recent_changes = history_prompts[1:] if len(history_prompts) > 1 else []
+            if recent_changes:
+                parts.append("Modification history:\n" + "\n".join(f"- {prompt}" for prompt in recent_changes[-3:]))
+        if latest_prompt and latest_prompt != initial_prompt:
+            parts.append(f"Latest user request:\n{latest_prompt}")
+
+        combined = "\n\n".join(part for part in parts if part.strip()).strip()
+        return combined or str(request.get("prompt") or "").strip()
 
     def _request_stopped_or_missing(self, request_id: str) -> bool:
         request = self._request_repository.get_by_id(request_id)

@@ -901,11 +901,10 @@ class ChatService:
                         "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
                     }
 
-                finalized_change_request = (
-                    str(clarification_result.get("clarifiedRequest") or "").strip()
-                    if isinstance(clarification_result, dict)
-                    else ""
-                ) or combined_change_request
+                finalized_change_request = self._finalize_tool_builder_request(
+                    original_request=combined_change_request,
+                    clarification_result=clarification_result,
+                )
                 modification_prompt = self._build_tool_modification_prompt(
                     user_content=finalized_change_request,
                     tool=tool,
@@ -918,6 +917,7 @@ class ChatService:
                     rebuild_tool_id=rebuild_tool_id,
                     model=selected_model,
                     workflow_prompt=modification_prompt,
+                    prompt_already_refined=True,
                 )
                 next_context = {
                     "requestId": job["id"],
@@ -959,17 +959,17 @@ class ChatService:
                     }
                     return clarification, next_context
 
-                finalized_request = (
-                    str(clarification_result.get("clarifiedRequest") or "").strip()
-                    if isinstance(clarification_result, dict)
-                    else ""
-                ) or combined_request
+                finalized_request = self._finalize_tool_builder_request(
+                    original_request=combined_request,
+                    clarification_result=clarification_result,
+                )
                 initial_prompt = self._build_tool_initial_prompt(finalized_request)
                 job = self._tool_builder_service.start_generation(
                     prompt=finalized_request,
                     name=None,
                     model=selected_model,
                     workflow_prompt=initial_prompt,
+                    prompt_already_refined=True,
                 )
                 next_context = {"requestId": job["id"], "phase": "building"}
                 message = (
@@ -1052,11 +1052,10 @@ class ChatService:
                     "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
                 }
 
-            finalized_change_request = (
-                str(clarification_result.get("clarifiedRequest") or "").strip()
-                if isinstance(clarification_result, dict)
-                else ""
-            ) or user_content
+            finalized_change_request = self._finalize_tool_builder_request(
+                original_request=user_content,
+                clarification_result=clarification_result,
+            )
             modification_prompt = self._build_tool_modification_prompt(
                 user_content=finalized_change_request,
                 tool=tool,
@@ -1069,6 +1068,7 @@ class ChatService:
                 rebuild_tool_id=rebuild_tool_id,
                 model=selected_model,
                 workflow_prompt=modification_prompt,
+                prompt_already_refined=True,
             )
             next_context = {
                 "requestId": job["id"],
@@ -1102,17 +1102,17 @@ class ChatService:
                 "pendingQuestions": clarification_result.get("questions", []) if isinstance(clarification_result, dict) else [],
             }
 
-        finalized_request = (
-            str(clarification_result.get("clarifiedRequest") or "").strip()
-            if isinstance(clarification_result, dict)
-            else ""
-        ) or user_content
+        finalized_request = self._finalize_tool_builder_request(
+            original_request=user_content,
+            clarification_result=clarification_result,
+        )
         initial_prompt = self._build_tool_initial_prompt(finalized_request)
         job = self._tool_builder_service.start_generation(
             prompt=finalized_request,
             name=None,
             model=selected_model,
             workflow_prompt=initial_prompt,
+            prompt_already_refined=True,
         )
         next_context = {"requestId": job["id"], "phase": "building"}
         message = (
@@ -1240,6 +1240,101 @@ class ChatService:
         }
 
     @staticmethod
+    def _tool_request_history_entries(request_state: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(request_state, dict):
+            return []
+        raw_history = request_state.get("promptHistory")
+        entries: list[dict[str, Any]] = []
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if not isinstance(item, dict):
+                    continue
+                prompt = str(item.get("prompt") or "").strip()
+                if not prompt:
+                    continue
+                entries.append(
+                    {
+                        "kind": str(item.get("kind") or "unknown").strip() or "unknown",
+                        "prompt": prompt,
+                    }
+                )
+        return entries
+
+    @classmethod
+    def _tool_request_context_lines(cls, request_state: dict[str, Any] | None, limit: int = 1500) -> list[str]:
+        if not isinstance(request_state, dict):
+            return []
+
+        lines: list[str] = []
+        initial_prompt = cls._summarize_tool_builder_request_text(str(request_state.get("initialPrompt") or ""), limit=limit)
+        latest_prompt = cls._summarize_tool_builder_request_text(
+            str(request_state.get("latestPrompt") or request_state.get("prompt") or ""),
+            limit=limit,
+        )
+        refined_prompt = cls._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=limit)
+        history = cls._tool_request_history_entries(request_state)
+        status = str(request_state.get("status") or "").strip()
+        error = cls._truncate_prompt_for_context(str(request_state.get("error") or ""), limit=min(1200, limit))
+
+        if status:
+            lines.append(f"- Latest build status: {status}")
+        if initial_prompt:
+            lines.append(f"\nOriginal tool request:\n{initial_prompt}")
+        if history:
+            recent_entries = history[1:] if len(history) > 1 else []
+            if recent_entries:
+                lines.append("\nApplied modification history:")
+                for entry in recent_entries[-3:]:
+                    kind = str(entry.get("kind") or "change").strip() or "change"
+                    prompt = cls._summarize_tool_builder_request_text(str(entry.get("prompt") or ""), limit=limit)
+                    if prompt:
+                        lines.append(f"- {kind}: {prompt}")
+        if latest_prompt and latest_prompt != initial_prompt:
+            lines.append(f"\nLatest user request:\n{latest_prompt}")
+        if refined_prompt:
+            lines.append(f"\nLatest refined requirements:\n{refined_prompt}")
+        if error:
+            lines.append(f"\nLatest build/runtime error:\n{error}")
+        return lines
+
+    @classmethod
+    def _finalize_tool_builder_request(
+        cls,
+        original_request: str,
+        clarification_result: dict[str, Any] | None,
+    ) -> str:
+        original = original_request.strip()
+        clarified = ""
+        if isinstance(clarification_result, dict):
+            clarified = str(clarification_result.get("clarifiedRequest") or "").strip()
+
+        if not clarified:
+            return original
+        if clarified == original or clarified in original:
+            return original
+
+        original_norm = re.sub(r"\s+", " ", original).strip().lower()
+        clarified_norm = re.sub(r"\s+", " ", clarified).strip().lower()
+        if clarified_norm and clarified_norm in original_norm:
+            return original
+
+        original_has_structure = bool(re.search(r"(^|\n)\s*(?:[-*]|\d+\.)\s+", original)) or "requirements:" in original_norm
+        if original_has_structure and len(clarified) < max(120, int(len(original) * 0.8)):
+            return (
+                f"{original}\n\n"
+                "Resolved clarifications and implementation notes:\n"
+                f"{clarified}"
+            )
+
+        if len(clarified) < max(80, int(len(original) * 0.65)):
+            return (
+                f"{original}\n\n"
+                "Clarified version preserving the same requirements:\n"
+                f"{clarified}"
+            )
+        return clarified
+
+    @staticmethod
     def _build_tool_builder_clarification_analysis_prompt(
         request_text: str,
         prior_questions: object | None = None,
@@ -1260,6 +1355,9 @@ class ChatService:
             "Analyze this tool-building request and decide if clarification is still required before implementation.\n"
             "Use the full request plus any user follow-up answers already included.\n"
             "Do not repeat questions that are already answered.\n"
+            "Do not drop, rewrite away, or weaken explicit user requirements when you produce clarifiedRequest.\n"
+            "Preserve all concrete requirements, constraints, technologies, integrations, must-have fields, and must-not statements from the user's wording.\n"
+            "Use clarifiedRequest to preserve the full request while appending resolved assumptions or follow-up answers, not to compress it into a shorter summary.\n"
             "Infer reasonable defaults when risk is low, but ask concise questions for anything that could materially change implementation.\n"
             "Prefer at most 3 questions.\n"
             "Return strict JSON only in this shape:\n"
@@ -1288,13 +1386,7 @@ class ChatService:
         if tool:
             context_lines.append(f"- Tool name: {tool.get('name')}")
             context_lines.append(f"- Tool status: {tool.get('status')}")
-        if request_state:
-            prompt = cls._summarize_tool_builder_request_text(str(request_state.get("prompt") or ""), limit=1200)
-            refined = cls._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=1200)
-            if prompt:
-                context_lines.append(f"Previous request: {prompt}")
-            if refined:
-                context_lines.append(f"Refined requirements: {refined}")
+        context_lines.extend(cls._tool_request_context_lines(request_state, limit=1200))
 
         prior_block = "\n".join(prior_lines).strip()
         context_block = "\n".join(context_lines).strip()
@@ -1305,6 +1397,9 @@ class ChatService:
             "Analyze this requested modification to an existing generated tool and decide if clarification is still required before implementation.\n"
             "Use the existing tool context, prior requirements, and the user follow-up answers already included.\n"
             "Do not repeat questions that are already answered.\n"
+            "Do not drop or simplify away earlier accepted tool requirements when you produce clarifiedRequest.\n"
+            "Keep clarifiedRequest faithful to both the original tool brief and the new requested change.\n"
+            "For clarifiedRequest, preserve the user's exact requested change and only append resolved decisions or assumptions.\n"
             "If the change is simple and low-risk, avoid asking unnecessary questions.\n"
             "Prefer at most 3 questions.\n"
             "Return strict JSON only in this shape:\n"
@@ -1573,18 +1668,7 @@ class ChatService:
                 lines.append(f"- Service ports: {serialized_ports}")
 
         if request_state:
-            prompt = self._summarize_tool_builder_request_text(str(request_state.get("prompt") or ""), limit=3000)
-            refined = self._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=3000)
-            status = str(request_state.get("status") or "").strip()
-            error = self._truncate_prompt_for_context(str(request_state.get("error") or ""), limit=1200)
-            if status:
-                lines.append(f"- Latest build status: {status}")
-            if prompt:
-                lines.append(f"\nPrevious request:\n{prompt}")
-            if refined:
-                lines.append(f"\nRefined requirements:\n{refined}")
-            if error:
-                lines.append(f"\nLatest error:\n{error}")
+            lines.extend(self._tool_request_context_lines(request_state, limit=3000))
 
         lines.extend(
             [
@@ -1685,6 +1769,8 @@ class ChatService:
             "Requirements:\n"
             "- Clarify requirements first. Convert requirements into explicit acceptance criteria and list assumptions before implementation.\n"
             "- Save the clarified requirements in `docs/requirements.md` and save concrete test cases in `docs/test-cases.md` before implementation.\n"
+            "- Preserve every explicit user requirement from the request. Do not summarize away fields, constraints, integrations, or must-not rules.\n"
+            "- Create a checklist in `docs/requirements.md` that maps each user requirement to the code/tests that satisfy it.\n"
             "- Implement the exact requested workflow; avoid unrelated extra features.\n"
             "- Convert the request into concrete acceptance criteria and satisfy each criterion in code/tests.\n"
             "- Follow TDD: write/update failing tests first, then implement backend changes until tests pass.\n"
@@ -1724,17 +1810,7 @@ class ChatService:
             tool_lines.append("- Tool metadata unavailable in chat context; infer from repository workspace.")
 
         if request_state:
-            prior_prompt = self._summarize_tool_builder_request_text(str(request_state.get("prompt") or ""), limit=5000)
-            refined_prompt = self._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=5000)
-            status = str(request_state.get("status") or "UNKNOWN")
-            tool_lines.append(f"- Latest build status: {status}")
-            if prior_prompt:
-                tool_lines.append(f"\nPrevious tool request:\n{prior_prompt}")
-            if refined_prompt:
-                tool_lines.append(f"\nLatest refined requirements:\n{refined_prompt}")
-            if request_state.get("error"):
-                error_summary = self._truncate_prompt_for_context(str(request_state["error"]), limit=2000)
-                tool_lines.append(f"\nLatest build/runtime error:\n{error_summary}")
+            tool_lines.extend(self._tool_request_context_lines(request_state, limit=5000))
 
         context_block = "\n".join(tool_lines)
         return (
@@ -1745,6 +1821,8 @@ class ChatService:
             "Requirements:\n"
             "- Clarify updated requirements and assumptions before changing implementation.\n"
             "- Keep `docs/requirements.md` and `docs/test-cases.md` in sync with the requested change before implementation.\n"
+            "- Preserve all previously working requirements unless this change request explicitly replaces them.\n"
+            "- Add the new change to the requirements checklist and verify old requirements still hold after the edit.\n"
             "- Implement exactly what the user asked in this change request.\n"
             "- Treat this as a focused modification request: make the smallest code change that satisfies it.\n"
             "- Preserve existing working behavior unless this request explicitly changes it.\n"

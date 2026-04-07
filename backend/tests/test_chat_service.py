@@ -141,7 +141,13 @@ def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
         "ports": {"app": 3010},
     }
     request_state = {
-        "prompt": "Build a dashboard for monitoring background jobs.",
+        "prompt": "Add CSV export for job history.",
+        "initialPrompt": "Build a dashboard for monitoring background jobs.",
+        "latestPrompt": "Add CSV export for job history.",
+        "promptHistory": [
+            {"kind": "initial", "prompt": "Build a dashboard for monitoring background jobs."},
+            {"kind": "modification", "prompt": "Add CSV export for job history."},
+        ],
         "refinedPrompt": "Include status board and retry controls.",
         "status": "RUNNING",
         "error": None,
@@ -155,7 +161,8 @@ def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
 
     assert "Existing tool context:" in prompt
     assert "Tool ID: tool-1" in prompt
-    assert "Previous tool request:" in prompt
+    assert "Original tool request:" in prompt
+    assert "Applied modification history:" in prompt
     assert "Latest refined requirements:" in prompt
     assert "Add CSV export for job history." in prompt
     assert "focused modification request" in prompt
@@ -163,6 +170,28 @@ def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
     assert "default to a dark theme" in prompt
     assert "Asia/Kolkata" in prompt
     assert "TZ=Asia/Kolkata" in prompt
+
+
+def test_finalize_tool_builder_request_preserves_structured_requirements() -> None:
+    original_request = (
+        "Build a production-ready movie alerts tool.\n\n"
+        "Requirements:\n"
+        "- Allow users to select city, movie, language, and format.\n"
+        "- Persist alerts in MongoDB.\n"
+        "- Run scheduled polling every 15 minutes.\n"
+    )
+    clarification_result = {
+        "clarifiedRequest": "Build a movie alerts tool with MongoDB and a 15 minute polling interval."
+    }
+
+    finalized = ChatService._finalize_tool_builder_request(  # pylint: disable=protected-access
+        original_request=original_request,
+        clarification_result=clarification_result,
+    )
+
+    assert "Allow users to select city, movie, language, and format." in finalized
+    assert "Persist alerts in MongoDB." in finalized
+    assert "15 minutes" in finalized
 
 
 def test_build_tool_initial_prompt_defaults_ui_to_dark_theme() -> None:
@@ -265,6 +294,7 @@ def test_tool_builder_clarification_reply_can_start_build() -> None:
     assert context == {"requestId": "req-clarified", "phase": "building"}
     tool_builder_service.start_generation.assert_called_once()
     assert tool_builder_service.start_generation.call_args.kwargs["model"] == "gpt-5.4-mini"
+    assert tool_builder_service.start_generation.call_args.kwargs["prompt_already_refined"] is True
 
 
 def test_tool_builder_follow_up_only_asks_unresolved_questions_from_codex() -> None:
@@ -303,6 +333,30 @@ def test_tool_builder_follow_up_only_asks_unresolved_questions_from_codex() -> N
     assert "polling interval" in message
     assert "authoritative" not in message
     assert "alerts fire" not in message
+
+
+def test_modification_clarification_prompt_uses_original_request_and_change_history() -> None:
+    prompt = ChatService._build_tool_builder_modification_clarification_analysis_prompt(  # pylint: disable=protected-access
+        change_request="Add a delete watcher action.",
+        tool={"name": "Movie Alerts", "status": "RUNNING"},
+        request_state={
+            "prompt": "Add delete watcher action.",
+            "initialPrompt": "Build a movie watcher tool with email alerts.",
+            "latestPrompt": "Add delete watcher action.",
+            "promptHistory": [
+                {"kind": "initial", "prompt": "Build a movie watcher tool with email alerts."},
+                {"kind": "modification", "prompt": "Add snooze support for alerts."},
+            ],
+            "refinedPrompt": "Track movies, send alerts, and support snooze.",
+            "status": "RUNNING",
+        },
+    )
+
+    assert "Original tool request:" in prompt
+    assert "Build a movie watcher tool with email alerts." in prompt
+    assert "Applied modification history:" in prompt
+    assert "Add snooze support for alerts." in prompt
+    assert "Latest refined requirements:" in prompt
 
 
 def test_modify_chat_uses_codex_clarification_before_rebuild() -> None:
@@ -408,6 +462,7 @@ def test_modify_chat_clarification_reply_starts_rebuild() -> None:
     assert context == {"requestId": "request-1", "toolId": "tool-1", "toolName": "Movie Alerts", "phase": "building"}
     tool_builder_service.start_generation.assert_called_once()
     assert tool_builder_service.start_generation.call_args.kwargs["model"] == "gpt-5.4-mini"
+    assert tool_builder_service.start_generation.call_args.kwargs["prompt_already_refined"] is True
     assert (
         tool_builder_service.start_generation.call_args.kwargs["prompt"]
         == "Add an option to delete an existing movie watcher while preserving historical alert logs."

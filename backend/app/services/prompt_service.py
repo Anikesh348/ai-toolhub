@@ -1,11 +1,17 @@
 class PromptService:
     def refine_prompt(self, prompt: str) -> str:
+        normalized_prompt = prompt.strip()
+        if self._is_platform_build_brief(normalized_prompt):
+            return normalized_prompt
+
         requirements = """
 You are generating a production-ready Python tool for container deployment.
 Mandatory requirements:
 - Clarify requirements first: restate user requirements as explicit acceptance criteria, identify ambiguities, and resolve them with explicit assumptions before coding.
 - Create a short requirements summary artifact in the project (for example `docs/requirements.md`) with assumptions and acceptance criteria.
 - Create a concrete test cases artifact (for example `docs/test-cases.md`) before implementation so the intended behavior is explicit.
+- Preserve every explicit user requirement from the request. Do not summarize away fields, constraints, integrations, workflow steps, or must-not rules.
+- Create a requirement-by-requirement checklist in `docs/requirements.md` and ensure each item is covered by code and/or tests.
 - Use Python 3.11.
 - Implement the user's requested workflow directly; avoid unrelated placeholder features.
 - Derive clear acceptance criteria from the user request and satisfy each in the implementation.
@@ -67,7 +73,18 @@ Mandatory requirements:
                     "- UI should call backend APIs and render meaningful output for the requested tool.\n"
                 )
 
-        return f"{requirements}\n\nUser request:\n{prompt.strip()}"
+        return f"{requirements}\n\nUser request:\n{normalized_prompt}"
+
+    @staticmethod
+    def _is_platform_build_brief(prompt: str) -> bool:
+        prefixes = (
+            "Build a production-ready tool based on this request:\n",
+            "Apply the requested change to the existing tool codebase.\n",
+            "Build a production-ready tool using this structured intake brief.\n",
+        )
+        if any(prompt.startswith(prefix) for prefix in prefixes):
+            return True
+        return "docs/requirements.md" in prompt and "docs/test-cases.md" in prompt and "Requirements:\n" in prompt
 
     @staticmethod
     def _should_require_web_ui(prompt: str) -> bool:
