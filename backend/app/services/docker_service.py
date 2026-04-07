@@ -456,11 +456,12 @@ class DockerService:
 
     def inspect_runtime_plan(self, request_id: str) -> RuntimePlan:
         host_job_path, _ = self.ensure_job_workspace(request_id)
+        default_single_port = self._single_runtime_port_from_workspace(host_job_path)
         compose_path = self._find_compose_file(host_job_path)
         if compose_path is None:
             return RuntimePlan(
                 mode="single",
-                services=[ServiceRuntimeSpec(name="app", container_port=self._settings.tool_internal_port, is_ui=True, is_smoke=True)],
+                services=[ServiceRuntimeSpec(name="app", container_port=default_single_port, is_ui=True, is_smoke=True)],
                 ui_service="app",
                 smoke_service="app",
             )
@@ -471,7 +472,7 @@ class DockerService:
         except (OSError, yaml.YAMLError):
             return RuntimePlan(
                 mode="single",
-                services=[ServiceRuntimeSpec(name="app", container_port=self._settings.tool_internal_port, is_ui=True, is_smoke=True)],
+                services=[ServiceRuntimeSpec(name="app", container_port=default_single_port, is_ui=True, is_smoke=True)],
                 ui_service="app",
                 smoke_service="app",
             )
@@ -480,7 +481,7 @@ class DockerService:
         if not isinstance(services_section, dict) or not services_section:
             return RuntimePlan(
                 mode="single",
-                services=[ServiceRuntimeSpec(name="app", container_port=self._settings.tool_internal_port, is_ui=True, is_smoke=True)],
+                services=[ServiceRuntimeSpec(name="app", container_port=default_single_port, is_ui=True, is_smoke=True)],
                 ui_service="app",
                 smoke_service="app",
             )
@@ -496,7 +497,7 @@ class DockerService:
 
         published = [spec for spec in specs if spec.container_port is not None]
         if not published:
-            specs = [ServiceRuntimeSpec(name="app", container_port=self._settings.tool_internal_port, is_ui=True, is_smoke=True)]
+            specs = [ServiceRuntimeSpec(name="app", container_port=default_single_port, is_ui=True, is_smoke=True)]
             return RuntimePlan(mode="single", services=specs, ui_service="app", smoke_service="app")
 
         ui_service = self._select_ui_service(published)
@@ -531,12 +532,14 @@ class DockerService:
             host_port = next(iter(service_host_ports.values()))
         if host_port is None:
             return False, None, "No host port provided for single-container runtime"
+        container_port = self._container_port_for_service(runtime_plan, ui_service) or self._settings.tool_internal_port
         return self.run_tool_container(
             tool_id=tool_id,
             runtime_name=runtime_name,
             request_id=request_id,
             image_tag=image_tag,
             host_port=host_port,
+            container_port=container_port,
         )
 
     def run_tool_container(
@@ -546,6 +549,7 @@ class DockerService:
         request_id: str,
         image_tag: str,
         host_port: int,
+        container_port: int | None = None,
     ) -> tuple[bool, Optional[str], str]:
         runtime_token = self._safe_name_token(runtime_name, default="generated-tool")
         name = f"tool-{runtime_token}"
@@ -555,6 +559,7 @@ class DockerService:
             "tool.id": tool_id,
             "tool.request_id": request_id,
         }
+        resolved_container_port = int(container_port) if isinstance(container_port, int) and container_port > 0 else self._settings.tool_internal_port
         mongo_network_name = self._shared_mongo_network_name()
         run_kwargs: dict[str, Any] = {}
         if mongo_network_name:
@@ -575,7 +580,7 @@ class DockerService:
                 name=name,
                 detach=True,
                 auto_remove=False,
-                ports={f"{self._settings.tool_internal_port}/tcp": host_port},
+                ports={f"{resolved_container_port}/tcp": host_port},
                 environment=self._tool_runtime_environment() or None,
                 extra_hosts=self._CONTAINER_EXTRA_HOSTS,
                 mem_limit=self._settings.tool_memory_limit,
@@ -598,11 +603,18 @@ class DockerService:
         image_tag: str,
         host_port: int,
         request_id: str | None = None,
+        container_port: int | None = None,
     ) -> tuple[bool, Optional[str], str]:
         probe_name = f"probe-{name}"
         labels: dict[str, str] = {"tool.runtime": "probe"}
         if request_id:
             labels["tool.request_id"] = request_id
+        resolved_container_port = container_port
+        if not isinstance(resolved_container_port, int) or resolved_container_port <= 0:
+            if request_id:
+                resolved_container_port = self._single_runtime_container_port(request_id)
+            else:
+                resolved_container_port = self._settings.tool_internal_port
         mongo_network_name = self._shared_mongo_network_name()
         run_kwargs: dict[str, Any] = {}
         if mongo_network_name:
@@ -618,7 +630,7 @@ class DockerService:
                 name=probe_name,
                 detach=True,
                 auto_remove=False,
-                ports={f"{self._settings.tool_internal_port}/tcp": host_port},
+                ports={f"{resolved_container_port}/tcp": host_port},
                 environment=self._tool_runtime_environment() or None,
                 extra_hosts=self._CONTAINER_EXTRA_HOSTS,
                 mem_limit=self._settings.tool_memory_limit,
@@ -1000,6 +1012,54 @@ class DockerService:
             compose_path = root / compose_name
             if compose_path.exists():
                 return compose_path
+        return None
+
+    def _single_runtime_port_from_workspace(self, host_job_path: Path) -> int:
+        detected = self._detect_dockerfile_exposed_port(host_job_path)
+        if detected is not None:
+            return detected
+        return self._settings.tool_internal_port
+
+    def _single_runtime_container_port(self, request_id: str) -> int:
+        runtime_plan = self.inspect_runtime_plan(request_id)
+        ui_service = runtime_plan.ui_service or "app"
+        container_port = self._container_port_for_service(runtime_plan, ui_service)
+        if container_port is None:
+            for service in runtime_plan.published_services:
+                if service.container_port is not None:
+                    container_port = service.container_port
+                    break
+        return container_port or self._settings.tool_internal_port
+
+    def _detect_dockerfile_exposed_port(self, root: Path) -> int | None:
+        dockerfile_path = root / "Dockerfile"
+        if not dockerfile_path.exists() or not dockerfile_path.is_file():
+            return None
+        try:
+            lines = dockerfile_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.match(r"(?i)^EXPOSE\s+(.+)$", line)
+            if not match:
+                continue
+            payload = match.group(1).split("#", 1)[0].strip()
+            for token in payload.split():
+                normalized = token.split("/", 1)[0].strip()
+                parsed = self._parse_port_token(normalized)
+                if parsed is not None:
+                    return parsed
+        return None
+
+    @staticmethod
+    def _container_port_for_service(runtime_plan: RuntimePlan, service_name: str) -> int | None:
+        for service in runtime_plan.services:
+            if service.name == service_name and service.container_port is not None:
+                return service.container_port
         return None
 
     def _compose_env(self, service_host_ports: dict[str, int], runtime_plan: RuntimePlan) -> dict[str, str]:
