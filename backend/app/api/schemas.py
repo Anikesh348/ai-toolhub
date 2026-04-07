@@ -54,6 +54,17 @@ class JobEventResponse(BaseModel):
     logs: list[dict]
 
 
+class JobLogArtifactResponse(BaseModel):
+    id: str
+    requestId: str
+    step: str
+    fileName: str
+    contentType: str
+    sizeBytes: int
+    createdAt: datetime
+    updatedAt: datetime
+
+
 class ToolResponse(BaseModel):
     toolId: str
     requestId: str

@@ -1,10 +1,11 @@
 import json
 import re
 import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 from app.models.status import BuildStatus, ToolStatus
+from app.repositories.build_log_artifact_repository import BuildLogArtifactRepository
 from app.repositories.build_log_repository import BuildLogRepository
 from app.repositories.request_repository import RequestRepository
 from app.repositories.tool_repository import ToolRepository
@@ -16,6 +17,7 @@ from app.services.prompt_service import PromptService
 from app.services.testing_service import TestingService
 from app.utils.config import Settings
 from app.utils.logger import get_logger
+from app.utils.time import now_ist
 
 
 class ToolBuildWorkflow:
@@ -24,6 +26,7 @@ class ToolBuildWorkflow:
         settings: Settings,
         request_repository: RequestRepository,
         build_log_repository: BuildLogRepository,
+        build_log_artifact_repository: BuildLogArtifactRepository,
         tool_repository: ToolRepository,
         prompt_service: PromptService,
         codex_service: CodexService,
@@ -35,6 +38,7 @@ class ToolBuildWorkflow:
         self._settings = settings
         self._request_repository = request_repository
         self._build_log_repository = build_log_repository
+        self._build_log_artifact_repository = build_log_artifact_repository
         self._tool_repository = tool_repository
         self._prompt_service = prompt_service
         self._codex_service = codex_service
@@ -51,6 +55,7 @@ class ToolBuildWorkflow:
         base_request_id: str | None = None,
         rebuild_tool_id: str | None = None,
         model: str | None = None,
+        prompt_override: str | None = None,
     ) -> None:
         try:
             self._run(
@@ -59,6 +64,7 @@ class ToolBuildWorkflow:
                 base_request_id=base_request_id,
                 rebuild_tool_id=rebuild_tool_id,
                 model=model,
+                prompt_override=prompt_override,
             )
         except Exception as exc:  # pylint: disable=broad-except
             self._logger.exception("Workflow failed for request %s", request_id)
@@ -80,6 +86,7 @@ class ToolBuildWorkflow:
         base_request_id: str | None = None,
         rebuild_tool_id: str | None = None,
         model: str | None = None,
+        prompt_override: str | None = None,
     ) -> None:
         request = self._request_repository.get_by_id(request_id)
         if request is None:
@@ -99,7 +106,8 @@ class ToolBuildWorkflow:
             )
 
         self._transition(request_id, BuildStatus.REFINING_PROMPT, "Refining prompt")
-        refined_prompt = self._prompt_service.refine_prompt(request["prompt"])
+        source_prompt = (prompt_override or "").strip() or str(request["prompt"])
+        refined_prompt = self._prompt_service.refine_prompt(source_prompt)
         self._request_repository.set_refined_prompt(request_id, refined_prompt)
         generation_model = (model or "").strip() or str(getattr(self._settings, "tool_builder_model", "") or "").strip() or None
 
@@ -135,6 +143,12 @@ class ToolBuildWorkflow:
                 f"generate_attempt_{attempt}",
                 generation_result.logs[-12000:],
             )
+            self._store_log_artifact(
+                request_id=request_id,
+                step=f"generate_attempt_{attempt}",
+                file_name=f"generate-attempt-{attempt}.log",
+                content=generation_result.logs,
+            )
             if not generation_result.success:
                 generation_logs = self._codex_service.clean_cli_output(generation_result.logs)
                 last_failure = generation_logs or generation_result.logs
@@ -153,6 +167,12 @@ class ToolBuildWorkflow:
 
             preflight_ok, preflight_message = self._testing_service.preflight_validate(request_id=request_id)
             self._build_log_repository.add_log(request_id, f"preflight_attempt_{attempt}", preflight_message)
+            self._store_log_artifact(
+                request_id=request_id,
+                step=f"preflight_attempt_{attempt}",
+                file_name=f"preflight-attempt-{attempt}.log",
+                content=preflight_message,
+            )
             if not preflight_ok:
                 last_failure = preflight_message
                 continue
@@ -160,6 +180,12 @@ class ToolBuildWorkflow:
             self._transition(request_id, BuildStatus.TESTING, f"Running tests (attempt {attempt})")
             test_result = self._testing_service.run_tests(request_id=request_id)
             self._build_log_repository.add_log(request_id, f"test_attempt_{attempt}", test_result.logs[-12000:])
+            self._store_log_artifact(
+                request_id=request_id,
+                step=f"test_attempt_{attempt}",
+                file_name=f"test-attempt-{attempt}.log",
+                content=test_result.logs,
+            )
             if test_result.success:
                 self._transition(request_id, BuildStatus.BUILDING_IMAGE, f"Building Docker image (attempt {attempt})")
                 attempt_image_tag = f"generated-tool:{request_id}-a{attempt}"
@@ -170,6 +196,12 @@ class ToolBuildWorkflow:
                     request_id,
                     f"image_build_attempt_{attempt}",
                     image_build_result.logs[-12000:],
+                )
+                self._store_log_artifact(
+                    request_id=request_id,
+                    step=f"image_build_attempt_{attempt}",
+                    file_name=f"image-build-attempt-{attempt}.log",
+                    content=image_build_result.logs,
                 )
                 if not image_build_result.success:
                     last_failure = f"Docker image build failed:\n{image_build_result.logs[-4000:]}"
@@ -205,6 +237,12 @@ class ToolBuildWorkflow:
                         f"predeploy_smoke_attempt_{attempt}",
                         f"{smoke_message}\n{probe_logs[-3000:]}".strip(),
                     )
+                    self._store_log_artifact(
+                        request_id=request_id,
+                        step=f"predeploy_smoke_attempt_{attempt}",
+                        file_name=f"predeploy-smoke-attempt-{attempt}.log",
+                        content=f"{smoke_message}\n\n{probe_logs}".strip(),
+                    )
                     if not smoke_ok:
                         last_failure = (
                             f"Runtime precheck failed: {smoke_message}\n"
@@ -230,6 +268,20 @@ class ToolBuildWorkflow:
                         f"api_verify_attempt_{attempt}",
                         f"{api_summary}\n{api_report_text[-5000:]}",
                     )
+                    self._store_log_artifact(
+                        request_id=request_id,
+                        step=f"api_verify_attempt_{attempt}",
+                        file_name=f"api-verify-attempt-{attempt}.json",
+                        content=json.dumps(
+                            {
+                                "summary": api_summary,
+                                "report": api_report,
+                            },
+                            ensure_ascii=True,
+                            indent=2,
+                        ),
+                        content_type="application/json; charset=utf-8",
+                    )
                     if not api_ok:
                         last_failure = f"{api_summary}\n{api_report_text[-5000:]}"
                         continue
@@ -242,6 +294,12 @@ class ToolBuildWorkflow:
                         request_id,
                         f"data_reliability_attempt_{attempt}",
                         data_reliability_message[-5000:],
+                    )
+                    self._store_log_artifact(
+                        request_id=request_id,
+                        step=f"data_reliability_attempt_{attempt}",
+                        file_name=f"data-reliability-attempt-{attempt}.log",
+                        content=data_reliability_message,
                     )
                     if not data_reliability_ok:
                         last_failure = data_reliability_message
@@ -271,6 +329,12 @@ class ToolBuildWorkflow:
                             request_id,
                             f"scrape_verify_attempt_{attempt}",
                             scrape_message[-6000:],
+                        )
+                        self._store_log_artifact(
+                            request_id=request_id,
+                            step=f"scrape_verify_attempt_{attempt}",
+                            file_name=f"scrape-verify-attempt-{attempt}.log",
+                            content=scrape_message,
                         )
                         if not scrape_ok:
                             last_failure = scrape_message
@@ -363,7 +427,7 @@ class ToolBuildWorkflow:
             ports=service_ports,
             ui_port=ui_port,
             status=ToolStatus.DEPLOYING,
-            monitor_ignore_until=datetime.now(tz=timezone.utc)
+            monitor_ignore_until=now_ist()
             + timedelta(seconds=max(0, int(getattr(self._settings, "monitor_startup_grace_seconds", 90)))),
         )
 
@@ -375,6 +439,12 @@ class ToolBuildWorkflow:
         if not smoke_ok:
             runtime_logs = self._docker_service.get_container_logs(container_id)
         self._build_log_repository.add_log(request_id, "smoke_test", f"{smoke_message}\n{runtime_logs[-3000:]}".strip())
+        self._store_log_artifact(
+            request_id=request_id,
+            step="smoke_test",
+            file_name="runtime-smoke-test.log",
+            content=f"{smoke_message}\n\n{runtime_logs}".strip(),
+        )
         if not smoke_ok:
             self._docker_service.stop_container(container_id)
             self._tool_repository.update_status(tool["toolId"], ToolStatus.FAILED, clear_runtime=True)
@@ -844,7 +914,31 @@ class ToolBuildWorkflow:
             return
         self._request_repository.update_status(request_id, BuildStatus.FAILED, error=reason)
         self._build_log_repository.add_log(request_id, "failed", reason[-12000:])
+        self._store_log_artifact(
+            request_id=request_id,
+            step="failed",
+            file_name="failure-summary.log",
+            content=reason,
+        )
         self._alert_service.send_build_failed_alert(request_id=request_id, reason=reason[-4000:])
+
+    def _store_log_artifact(
+        self,
+        request_id: str,
+        step: str,
+        file_name: str,
+        content: str,
+        content_type: str = "text/plain; charset=utf-8",
+    ) -> None:
+        if not content:
+            return
+        self._build_log_artifact_repository.add_artifact(
+            request_id=request_id,
+            step=step,
+            file_name=file_name,
+            content=content,
+            content_type=content_type,
+        )
 
     @staticmethod
     def _allocation_order(runtime_plan: RuntimePlan) -> list[str]:

@@ -79,3 +79,4 @@ def test_settings_default_to_local_compose_mongo() -> None:
 
     assert settings.mongo_uri == "mongodb://toolhub:toolhub-dev-password@mongo:27017/ai-toolhub?authSource=admin"
     assert settings.mongo_db_name == "ai-toolhub"
+    assert settings.instagram_browser_timezone == "Asia/Kolkata"

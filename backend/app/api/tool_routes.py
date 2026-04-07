@@ -4,7 +4,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.api.schemas import (
     CodexAuthStatusResponse,
@@ -16,6 +16,7 @@ from app.api.schemas import (
     InstagramReelsControlResponse,
     InstagramBrowserSessionResponse,
     JobEventResponse,
+    JobLogArtifactResponse,
     JobResponse,
     JobSummaryResponse,
     StopJobResponse,
@@ -339,6 +340,36 @@ def stop_job(job_id: str, service: ToolBuilderService = Depends(get_tool_builder
 def list_jobs(service: ToolBuilderService = Depends(get_tool_builder_service)) -> list[JobSummaryResponse]:
     jobs = service.list_jobs()
     return [JobSummaryResponse(**job) for job in jobs]
+
+
+@router.get("/jobs/{job_id}/log-artifacts", response_model=list[JobLogArtifactResponse])
+def list_job_log_artifacts(
+    job_id: str,
+    service: ToolBuilderService = Depends(get_tool_builder_service),
+) -> list[JobLogArtifactResponse]:
+    job = service.get_job_state(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    artifacts = service.list_job_log_artifacts(job_id)
+    return [JobLogArtifactResponse(**artifact) for artifact in artifacts]
+
+
+@router.get("/jobs/{job_id}/log-artifacts/{artifact_id}/download")
+def download_job_log_artifact(
+    job_id: str,
+    artifact_id: str,
+    service: ToolBuilderService = Depends(get_tool_builder_service),
+) -> Response:
+    artifact = service.get_job_log_artifact(job_id, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log artifact not found")
+
+    response = Response(
+        content=artifact.get("content") or "",
+        media_type=str(artifact.get("contentType") or "text/plain; charset=utf-8"),
+    )
+    response.headers["Content-Disposition"] = f'attachment; filename="{artifact["fileName"]}"'
+    return response
 
 
 @router.get("/jobs/{job_id}/events")

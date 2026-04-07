@@ -1,13 +1,15 @@
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from app.models.status import BuildStatus, ToolStatus
+from app.repositories.build_log_artifact_repository import BuildLogArtifactRepository
 from app.repositories.build_log_repository import BuildLogRepository
 from app.repositories.request_repository import RequestRepository
 from app.repositories.tool_repository import ToolRepository
 from app.services.docker_service import DockerService, RuntimePlan
 from app.services.port_allocator_service import PortAllocatorService
 from app.services.testing_service import TestingService
+from app.utils.time import now_ist
 from app.workflows.tool_build_workflow import ToolBuildWorkflow
 
 
@@ -18,6 +20,7 @@ class ToolBuilderService:
         self,
         request_repository: RequestRepository,
         build_log_repository: BuildLogRepository,
+        build_log_artifact_repository: BuildLogArtifactRepository,
         tool_repository: ToolRepository,
         docker_service: DockerService,
         testing_service: TestingService,
@@ -26,6 +29,7 @@ class ToolBuilderService:
     ) -> None:
         self._request_repository = request_repository
         self._build_log_repository = build_log_repository
+        self._build_log_artifact_repository = build_log_artifact_repository
         self._tool_repository = tool_repository
         self._docker_service = docker_service
         self._testing_service = testing_service
@@ -47,22 +51,25 @@ class ToolBuilderService:
         base_request_id: str | None = None,
         rebuild_tool_id: str | None = None,
         model: str | None = None,
+        workflow_prompt: str | None = None,
     ) -> dict:
         workflow_base_request_id = base_request_id
         request = None
+        persisted_prompt = prompt
+        generation_prompt = (workflow_prompt or "").strip() or prompt
 
         # Rebuilds should continue in the existing tool workspace (same request id)
         # so modify-chat iterations do not fan out into new workspace directories.
         if rebuild_tool_id and base_request_id:
             request = self._request_repository.prepare_for_rebuild(
                 request_id=base_request_id,
-                prompt=prompt,
+                prompt=persisted_prompt,
             )
             if request is not None:
                 workflow_base_request_id = None
 
         if request is None:
-            request = self._request_repository.create(prompt=prompt)
+            request = self._request_repository.create(prompt=persisted_prompt)
 
         request_id = request["id"]
         thread = threading.Thread(
@@ -73,6 +80,7 @@ class ToolBuilderService:
                 "base_request_id": workflow_base_request_id,
                 "rebuild_tool_id": rebuild_tool_id,
                 "model": model,
+                "prompt_override": generation_prompt,
             },
             daemon=True,
         )
@@ -173,6 +181,7 @@ class ToolBuilderService:
         if tool_id:
             self._tool_repository.delete(tool_id)
         self._build_log_repository.delete_for_request(request_id)
+        self._build_log_artifact_repository.delete_for_request(request_id)
         self._request_repository.delete(request_id)
         return True
 
@@ -247,8 +256,7 @@ class ToolBuilderService:
             ports=service_ports,
             ui_port=ui_port,
             status=ToolStatus.DEPLOYING,
-            monitor_ignore_until=datetime.now(tz=timezone.utc)
-            + timedelta(seconds=self._monitor_grace_seconds()),
+            monitor_ignore_until=now_ist() + timedelta(seconds=self._monitor_grace_seconds()),
         )
 
         smoke_ok, smoke_message = self._testing_service.smoke_test(smoke_port)
@@ -266,6 +274,12 @@ class ToolBuilderService:
                 "manual_start_failed",
                 f"{smoke_message}\n{runtime_logs[-3000:]}".strip(),
             )
+            self._store_log_artifact(
+                request_id=tool["requestId"],
+                step="manual_start_failed",
+                file_name="manual-start-failed.log",
+                content=f"{smoke_message}\n\n{runtime_logs}".strip(),
+            )
             return None, f"Start smoke test failed: {smoke_message}"
 
         self._tool_repository.update_status(tool_id, ToolStatus.RUNNING)
@@ -279,6 +293,12 @@ class ToolBuilderService:
             tool["requestId"],
             "manual_start",
             f"Tool started manually. UI port {ui_port}. Service ports [{mapped_ports}]",
+        )
+        self._store_log_artifact(
+            request_id=tool["requestId"],
+            step="manual_start",
+            file_name="manual-start.log",
+            content=f"Tool started manually. UI port {ui_port}. Service ports [{mapped_ports}]",
         )
         return self._tool_repository.get_by_id(tool_id), None
 
@@ -390,6 +410,39 @@ class ToolBuilderService:
     def get_job_logs_after(self, request_id: str, timestamp: datetime | None, limit: int = 200) -> list[dict]:
         return self._build_log_repository.get_logs_after(request_id=request_id, timestamp=timestamp, limit=limit)
 
+    def list_job_log_artifacts(self, request_id: str) -> list[dict]:
+        request = self._request_repository.get_by_id(request_id)
+        if request is None:
+            return []
+        return self._build_log_artifact_repository.list_for_request(request_id=request_id)
+
+    def get_job_log_artifact(self, request_id: str, artifact_id: str) -> dict | None:
+        request = self._request_repository.get_by_id(request_id)
+        if request is None:
+            return None
+        return self._build_log_artifact_repository.get_by_id_for_request(
+            request_id=request_id,
+            artifact_id=artifact_id,
+        )
+
+    def _store_log_artifact(
+        self,
+        request_id: str,
+        step: str,
+        file_name: str,
+        content: str,
+        content_type: str = "text/plain; charset=utf-8",
+    ) -> None:
+        if not content:
+            return
+        self._build_log_artifact_repository.add_artifact(
+            request_id=request_id,
+            step=step,
+            file_name=file_name,
+            content=content,
+            content_type=content_type,
+        )
+
     def _resolve_or_allocate_service_ports(self, tool: dict, runtime_plan: RuntimePlan) -> tuple[dict[str, int], str | None]:
         allocation_order = self._allocation_order(runtime_plan)
         existing_ports = self._existing_service_ports(tool=tool, allocation_order=allocation_order)
@@ -450,8 +503,7 @@ class ToolBuilderService:
                         ports={name: int(port) for name, port in existing_ports.items()},
                         ui_port=ui_port,
                         status=ToolStatus.RUNNING,
-                        monitor_ignore_until=datetime.now(tz=timezone.utc)
-                        + timedelta(seconds=self._monitor_grace_seconds()),
+                        monitor_ignore_until=now_ist() + timedelta(seconds=self._monitor_grace_seconds()),
                     )
                 else:
                     self._tool_repository.update_status(

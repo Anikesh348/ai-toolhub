@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
 from app.services.monitor_service import ToolMonitorService
+from app.utils.time import now_ist
 
 
 def test_monitor_recovers_runtime_without_sending_crash_alert() -> None:
@@ -51,7 +52,7 @@ def test_monitor_recovers_runtime_without_sending_crash_alert() -> None:
 
 
 def test_monitor_query_skips_tools_inside_grace_window() -> None:
-    future = datetime.now(tz=timezone.utc) + timedelta(seconds=60)
+    future = now_ist() + timedelta(seconds=60)
     collection = Mock()
     collection.find.return_value = []
 

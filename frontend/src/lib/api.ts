@@ -1,5 +1,24 @@
 import { BuildStatus } from "./status";
 
+const IST_TIME_ZONE = "Asia/Kolkata";
+const IST_UTC_OFFSET_MINUTES = 5 * 60 + 30;
+const IST_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-IN", {
+  timeZone: IST_TIME_ZONE,
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: true
+});
+const IST_DATE_FORMATTER = new Intl.DateTimeFormat("en-IN", {
+  timeZone: IST_TIME_ZONE,
+  year: "numeric",
+  month: "short",
+  day: "2-digit"
+});
+
 export type JobSummary = {
   id: string;
   prompt: string;
@@ -44,6 +63,17 @@ export type JobEvent = {
   error: string | null;
   updatedAt: string;
   logs: JobLog[];
+};
+
+export type JobLogArtifact = {
+  id: string;
+  requestId: string;
+  step: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type ToolRecord = {
@@ -402,6 +432,19 @@ export async function fetchJobDetail(jobId: string): Promise<JobDetail> {
   return (await response.json()) as JobDetail;
 }
 
+export async function fetchJobLogArtifacts(jobId: string): Promise<JobLogArtifact[]> {
+  const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/log-artifacts`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch log artifacts: ${response.status} ${text}`);
+  }
+  return (await response.json()) as JobLogArtifact[];
+}
+
+export function buildJobLogArtifactDownloadUrl(jobId: string, artifactId: string): string {
+  return `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/log-artifacts/${encodeURIComponent(artifactId)}/download`;
+}
+
 export async function deleteJob(jobId: string): Promise<DeleteJobResponse> {
   const response = await fetch(`${API_BASE_URL}/jobs/${jobId}`, {
     method: "DELETE"
@@ -488,7 +531,39 @@ export function formatDate(value: string | null): string {
   if (!value) {
     return "-";
   }
-  return new Date(value).toLocaleString();
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return IST_DATE_TIME_FORMATTER.format(parsed);
+}
+
+export function formatDateOnly(value: string | null): string {
+  if (!value) {
+    return "-";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return IST_DATE_FORMATTER.format(parsed);
+}
+
+export function timestampToMillis(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+export function currentIstTimestamp(): string {
+  const shifted = new Date(Date.now() + (IST_UTC_OFFSET_MINUTES * 60 * 1000));
+  const year = shifted.getUTCFullYear();
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  const hours = String(shifted.getUTCHours()).padStart(2, "0");
+  const minutes = String(shifted.getUTCMinutes()).padStart(2, "0");
+  const seconds = String(shifted.getUTCSeconds()).padStart(2, "0");
+  const milliseconds = String(shifted.getUTCMilliseconds()).padStart(3, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${milliseconds}+05:30`;
 }
 
 export function trimPrompt(prompt: string, limit = 90): string {
@@ -509,19 +584,20 @@ export function mergeLogs(existing: JobLog[], incoming: JobLog[]): JobLog[] {
   const merged = [...existing];
   let changed = false;
   let outOfOrder = false;
-  let lastTimestamp = existing.length > 0 ? existing[existing.length - 1].timestamp : "";
+  let lastTimestamp = existing.length > 0 ? timestampToMillis(existing[existing.length - 1].timestamp) : Number.NEGATIVE_INFINITY;
 
   for (const log of incoming) {
     const key = toKey(log);
     if (seen.has(key)) {
       continue;
     }
-    if (lastTimestamp && log.timestamp < lastTimestamp) {
+    const currentTimestamp = timestampToMillis(log.timestamp);
+    if (currentTimestamp < lastTimestamp) {
       outOfOrder = true;
     }
     merged.push(log);
     seen.add(key);
-    lastTimestamp = log.timestamp;
+    lastTimestamp = currentTimestamp;
     changed = true;
   }
 
@@ -530,7 +606,7 @@ export function mergeLogs(existing: JobLog[], incoming: JobLog[]): JobLog[] {
   }
 
   if (outOfOrder) {
-    merged.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    merged.sort((a, b) => timestampToMillis(a.timestamp) - timestampToMillis(b.timestamp));
   }
 
   return merged.slice(-250);

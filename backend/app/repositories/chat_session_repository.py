@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
 from pymongo.collection import Collection
 from pymongo import ReturnDocument
+
+from app.utils.time import now_ist
 
 
 class ChatSessionRepository:
@@ -12,7 +13,7 @@ class ChatSessionRepository:
 
     def create(self, title: str, mode: str, model: str | None = None) -> dict:
         session_id = uuid4().hex
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         document = {
             "_id": session_id,
             "title": title,
@@ -44,7 +45,7 @@ class ChatSessionRepository:
         model: str | None = None,
         archived: bool | None = None,
     ) -> Optional[dict]:
-        update_fields: dict[str, Any] = {"updatedAt": datetime.now(tz=timezone.utc)}
+        update_fields: dict[str, Any] = {"updatedAt": now_ist()}
         if title is not None:
             update_fields["title"] = title
         if mode is not None:
@@ -64,7 +65,7 @@ class ChatSessionRepository:
     def touch(self, session_id: str) -> None:
         self._collection.update_one(
             {"_id": session_id},
-            {"$set": {"updatedAt": datetime.now(tz=timezone.utc)}},
+            {"$set": {"updatedAt": now_ist()}},
         )
 
     def delete(self, session_id: str) -> bool:

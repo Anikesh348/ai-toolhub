@@ -1,8 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 
 from bson import ObjectId
 from pymongo.collection import Collection
+
+from app.utils.time import now_ist
 
 
 class BuildLogRepository:
@@ -15,7 +17,7 @@ class BuildLogRepository:
                 "requestId": request_id,
                 "step": step,
                 "message": message,
-                "timestamp": datetime.now(tz=timezone.utc),
+                "timestamp": now_ist(),
             }
         )
 

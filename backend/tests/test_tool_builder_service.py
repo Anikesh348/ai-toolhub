@@ -10,6 +10,7 @@ def _build_service(request_repository: object) -> ToolBuilderService:
     return ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=Mock(),
+        build_log_artifact_repository=Mock(),
         tool_repository=Mock(),
         docker_service=Mock(),
         testing_service=Mock(),
@@ -52,6 +53,7 @@ def test_start_generation_reuses_existing_request_for_rebuild() -> None:
     assert thread_kwargs["request_id"] == "existing-request-id"
     assert thread_kwargs["base_request_id"] is None
     assert thread_kwargs["model"] == "gpt-5.4-mini"
+    assert thread_kwargs["prompt_override"] == "Apply dark mode updates"
     thread_instance.start.assert_called_once()
 
 
@@ -85,6 +87,36 @@ def test_start_generation_falls_back_to_new_request_when_rebuild_seed_missing() 
     assert thread_kwargs["request_id"] == "new-request-id"
     assert thread_kwargs["base_request_id"] == "old-request-id"
     assert thread_kwargs["model"] is None
+    assert thread_kwargs["prompt_override"] == "Apply dashboard updates"
+    thread_instance.start.assert_called_once()
+
+
+def test_start_generation_keeps_persisted_prompt_concise_when_workflow_prompt_is_provided() -> None:
+    request_repository = Mock()
+    request_repository.prepare_for_rebuild.return_value = {
+        "id": "existing-request-id",
+        "status": "PENDING",
+    }
+    service = _build_service(request_repository=request_repository)
+
+    with patch("app.services.tool_builder_service.threading.Thread") as thread_cls:
+        thread_instance = Mock()
+        thread_cls.return_value = thread_instance
+
+        service.start_generation(
+            prompt="Add bulk delete for saved products.",
+            workflow_prompt="Apply the requested change to the existing tool codebase.\n\nChange request:\nAdd bulk delete for saved products.\n\nRequirements:\n- Keep the change focused.",
+            name="demo tool",
+            base_request_id="existing-request-id",
+            rebuild_tool_id="tool-1",
+        )
+
+    request_repository.prepare_for_rebuild.assert_called_once_with(
+        request_id="existing-request-id",
+        prompt="Add bulk delete for saved products.",
+    )
+    thread_kwargs = thread_cls.call_args.kwargs["kwargs"]
+    assert thread_kwargs["prompt_override"].startswith("Apply the requested change to the existing tool codebase.")
     thread_instance.start.assert_called_once()
 
 
@@ -129,6 +161,7 @@ def test_rebuild_tool_starts_redeploy_workflow() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=Mock(),
         testing_service=Mock(),
@@ -166,6 +199,7 @@ def test_rebuild_tool_rejects_when_build_already_running() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=Mock(),
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=Mock(),
         testing_service=Mock(),
@@ -201,6 +235,7 @@ def test_stop_job_marks_build_stopped_and_keeps_record() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=docker_service,  # type: ignore[arg-type]
         testing_service=Mock(),
@@ -247,6 +282,7 @@ def test_stop_job_does_not_stop_existing_tool_runtime_for_rebuild() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=Mock(),
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=Mock(),
         docker_service=docker_service,  # type: ignore[arg-type]
         testing_service=Mock(),
@@ -311,6 +347,7 @@ def test_list_jobs_recovers_running_state_when_container_is_alive() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=docker_service,  # type: ignore[arg-type]
         testing_service=Mock(),
@@ -386,6 +423,7 @@ def test_list_jobs_marks_running_tool_failed_when_container_stops() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=docker_service,  # type: ignore[arg-type]
         testing_service=Mock(),
@@ -462,6 +500,7 @@ def test_list_jobs_recovers_when_container_id_missing_but_runtime_is_alive() -> 
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=docker_service,  # type: ignore[arg-type]
         testing_service=Mock(),
@@ -539,6 +578,7 @@ def test_get_job_reconciles_failed_request_when_tool_runtime_is_alive() -> None:
     service = ToolBuilderService(
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         docker_service=docker_service,  # type: ignore[arg-type]
         testing_service=Mock(),

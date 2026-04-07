@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 from uuid import uuid4
 
 from pymongo.collection import Collection
 
 from app.models.status import ToolStatus
+from app.utils.time import now_ist
 
 
 class ToolRepository:
@@ -13,7 +14,7 @@ class ToolRepository:
 
     def create(self, request_id: str, name: str, docker_image: str, runtime_name: str) -> dict:
         tool_id = uuid4().hex
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         document = {
             "_id": tool_id,
             "toolId": tool_id,
@@ -60,7 +61,7 @@ class ToolRepository:
         return result.deleted_count > 0
 
     def get_running_without_crash_alert(self) -> list[dict]:
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         docs = self._collection.find(
             {
                 "status": ToolStatus.RUNNING.value,
@@ -110,7 +111,7 @@ class ToolRepository:
             "port": assigned_ui_port,
             "uiPort": assigned_ui_port,
             "status": status.value,
-            "updatedAt": datetime.now(tz=timezone.utc),
+            "updatedAt": now_ist(),
         }
         if ports is not None:
             updates["ports"] = ports
@@ -134,7 +135,7 @@ class ToolRepository:
                     "status": ToolStatus.DEPLOYING.value,
                     "crashAlertSent": False,
                     "monitorIgnoreUntil": None,
-                    "updatedAt": datetime.now(tz=timezone.utc),
+                    "updatedAt": now_ist(),
                 }
             },
         )
@@ -154,7 +155,7 @@ class ToolRepository:
                     "ports": ports,
                     "port": effective_ui_port,
                     "uiPort": effective_ui_port,
-                    "updatedAt": datetime.now(tz=timezone.utc),
+                    "updatedAt": now_ist(),
                 }
             },
         )
@@ -168,7 +169,7 @@ class ToolRepository:
     ) -> None:
         updates: dict[str, Any] = {
             "status": status.value,
-            "updatedAt": datetime.now(tz=timezone.utc),
+            "updatedAt": now_ist(),
         }
         if crash_alert_sent is not None:
             updates["crashAlertSent"] = crash_alert_sent

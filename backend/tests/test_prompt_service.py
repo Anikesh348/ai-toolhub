@@ -42,3 +42,26 @@ def test_refine_prompt_requires_api_verification_and_scraping_cross_check() -> N
     assert "cross-check sampled API results with live web search evidence" in refined
     assert "Only publish/deploy after tests, runtime verification, and any required web cross-checks all pass" in refined
     assert "bounded retries" in refined
+
+
+def test_refine_prompt_requires_shared_mongo_for_persistent_tools() -> None:
+    refined = PromptService().refine_prompt("Build a price tracking tool with alerts and price history.")
+
+    assert "reuse the platform MongoDB" in refined
+    assert "`MONGO_URI` and `MONGO_DB_NAME`" in refined
+    assert "Create tool-specific collections" in refined
+
+
+def test_refine_prompt_defaults_ui_to_modern_dark_theme() -> None:
+    refined = PromptService().refine_prompt("Build a dashboard for monitoring background jobs.")
+
+    assert "modern, polished, and production-ready" in refined
+    assert "Default generated UIs to a dark theme" in refined
+
+
+def test_refine_prompt_defaults_timezone_to_ist() -> None:
+    refined = PromptService().refine_prompt("Build a booking dashboard with daily reports and reminders.")
+
+    assert "Asia/Kolkata" in refined
+    assert "Default all user-facing dates, times, schedules, and cron behavior to IST" in refined
+    assert "TZ=Asia/Kolkata" in refined

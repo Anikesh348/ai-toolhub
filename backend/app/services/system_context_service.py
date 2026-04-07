@@ -1,10 +1,11 @@
 import os
 import platform
 import socket
-from datetime import datetime, timezone
 from typing import Any
 
 import psutil
+
+from app.utils.time import now_ist
 
 
 class SystemContextService:
@@ -19,10 +20,10 @@ class SystemContextService:
             except OSError:
                 load_averages = None
 
-        uptime_seconds = max(int(datetime.now(tz=timezone.utc).timestamp() - psutil.boot_time()), 0)
+        uptime_seconds = max(int(now_ist().timestamp() - psutil.boot_time()), 0)
 
         return {
-            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "timestamp": now_ist().isoformat(),
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
             "system": platform.system(),

@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     instagram_browser_port_end: int = Field(default=4199, alias="INSTAGRAM_BROWSER_PORT_END")
     instagram_browser_memory_limit: str = Field(default="768m", alias="INSTAGRAM_BROWSER_MEMORY_LIMIT")
     instagram_browser_cpu_limit: float = Field(default=1.0, alias="INSTAGRAM_BROWSER_CPU_LIMIT")
-    instagram_browser_timezone: str = Field(default="UTC", alias="INSTAGRAM_BROWSER_TIMEZONE")
+    instagram_browser_timezone: str = Field(default="Asia/Kolkata", alias="INSTAGRAM_BROWSER_TIMEZONE")
     instagram_browser_profile_host_dir: str | None = Field(default=None, alias="INSTAGRAM_BROWSER_PROFILE_HOST_DIR")
     youtube_data_api_key: str | None = Field(default=None, alias="YOUTUBE_DATA_API_KEY")
     youtube_shorts_queries: str = Field(

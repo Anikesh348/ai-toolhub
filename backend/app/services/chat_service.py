@@ -912,11 +912,12 @@ class ChatService:
                     request_state=request_state,
                 )
                 job = self._tool_builder_service.start_generation(
-                    prompt=modification_prompt,
+                    prompt=finalized_change_request,
                     name=tool_name,
                     base_request_id=base_request_id,
                     rebuild_tool_id=rebuild_tool_id,
                     model=selected_model,
+                    workflow_prompt=modification_prompt,
                 )
                 next_context = {
                     "requestId": job["id"],
@@ -965,9 +966,10 @@ class ChatService:
                 ) or combined_request
                 initial_prompt = self._build_tool_initial_prompt(finalized_request)
                 job = self._tool_builder_service.start_generation(
-                    prompt=initial_prompt,
+                    prompt=finalized_request,
                     name=None,
                     model=selected_model,
+                    workflow_prompt=initial_prompt,
                 )
                 next_context = {"requestId": job["id"], "phase": "building"}
                 message = (
@@ -1007,6 +1009,17 @@ class ChatService:
             if self._is_tool_builder_status_query(user_content):
                 return self._tool_builder_status_message(context=context), context
 
+            request_state = self._tool_builder_service.get_job_state(request_id) if request_id else None
+            if self._is_tool_builder_information_query(user_content):
+                answer = self._answer_tool_builder_question(
+                    session_id=session_id,
+                    user_content=user_content,
+                    tool=tool,
+                    request_state=request_state,
+                    model=selected_model,
+                )
+                return answer, context
+
             base_request_id = str(context.get("requestId") or "").strip()
             if not base_request_id:
                 return (
@@ -1017,7 +1030,6 @@ class ChatService:
 
             rebuild_tool_id = str(context.get("toolId") or "").strip() or None
             tool_name = str(context.get("toolName") or "").strip() or None
-            request_state = self._tool_builder_service.get_job_state(base_request_id)
             clarification, clarification_result = self._tool_builder_modification_clarification_from_codex(
                 session_id=session_id,
                 change_request=user_content,
@@ -1051,11 +1063,12 @@ class ChatService:
                 request_state=request_state,
             )
             job = self._tool_builder_service.start_generation(
-                prompt=modification_prompt,
+                prompt=finalized_change_request,
                 name=tool_name,
                 base_request_id=base_request_id,
                 rebuild_tool_id=rebuild_tool_id,
                 model=selected_model,
+                workflow_prompt=modification_prompt,
             )
             next_context = {
                 "requestId": job["id"],
@@ -1096,9 +1109,10 @@ class ChatService:
         ) or user_content
         initial_prompt = self._build_tool_initial_prompt(finalized_request)
         job = self._tool_builder_service.start_generation(
-            prompt=initial_prompt,
+            prompt=finalized_request,
             name=None,
             model=selected_model,
+            workflow_prompt=initial_prompt,
         )
         next_context = {"requestId": job["id"], "phase": "building"}
         message = (
@@ -1254,8 +1268,9 @@ class ChatService:
             f"Request and follow-ups:\n{request_text.strip()}"
         )
 
-    @staticmethod
+    @classmethod
     def _build_tool_builder_modification_clarification_analysis_prompt(
+        cls,
         change_request: str,
         tool: dict[str, Any] | None,
         request_state: dict[str, Any] | None,
@@ -1274,12 +1289,12 @@ class ChatService:
             context_lines.append(f"- Tool name: {tool.get('name')}")
             context_lines.append(f"- Tool status: {tool.get('status')}")
         if request_state:
-            prompt = str(request_state.get("prompt") or "").strip()
-            refined = str(request_state.get("refinedPrompt") or "").strip()
+            prompt = cls._summarize_tool_builder_request_text(str(request_state.get("prompt") or ""), limit=1200)
+            refined = cls._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=1200)
             if prompt:
-                context_lines.append(f"Previous request: {prompt[:1200]}")
+                context_lines.append(f"Previous request: {prompt}")
             if refined:
-                context_lines.append(f"Refined requirements: {refined[:1200]}")
+                context_lines.append(f"Refined requirements: {refined}")
 
         prior_block = "\n".join(prior_lines).strip()
         context_block = "\n".join(context_lines).strip()
@@ -1417,6 +1432,170 @@ class ChatService:
         return any(marker in lowered for marker in movie_markers)
 
     @staticmethod
+    def _is_tool_builder_information_query(user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return False
+
+        if ChatService._is_tool_builder_status_query(user_content):
+            return True
+
+        action_pattern = re.compile(
+            r"\b("
+            r"modify|change|update|fix|add|remove|delete|implement|refactor|improve|"
+            r"optimi[sz]e|rewrite|build|rebuild|redeploy|deploy|create|generate|"
+            r"make|migrate|convert|replace|rename|integrate|configure|setup|set\s+up"
+            r")\b"
+        )
+        if action_pattern.search(lowered):
+            return False
+
+        question_prefixes = (
+            "what ",
+            "what's ",
+            "what is ",
+            "how ",
+            "why ",
+            "when ",
+            "where ",
+            "which ",
+            "who ",
+            "is ",
+            "are ",
+            "do ",
+            "does ",
+            "did ",
+            "can ",
+            "could ",
+            "would ",
+            "should ",
+            "will ",
+            "explain ",
+            "describe ",
+            "tell me ",
+            "help me understand ",
+            "walk me through ",
+        )
+        question_phrases = (
+            "how does",
+            "what does",
+            "how is",
+            "why is",
+            "where is",
+            "is there",
+            "does it",
+            "can it",
+            "which api",
+            "which database",
+            "what database",
+            "what collections",
+        )
+        compact_info_markers = (
+            "architecture",
+            "workflow",
+            "data model",
+            "database",
+            "mongodb",
+            "collection",
+            "collections",
+            "api",
+            "storage",
+            "persist",
+            "persistence",
+            "how it works",
+            "how this works",
+        )
+
+        word_count = len(re.findall(r"\w+", lowered))
+        if "?" in lowered:
+            return True
+        if any(lowered.startswith(prefix) for prefix in question_prefixes):
+            return True
+        if any(phrase in lowered for phrase in question_phrases):
+            return True
+        return word_count <= 10 and any(marker in lowered for marker in compact_info_markers)
+
+    def _answer_tool_builder_question(
+        self,
+        session_id: str,
+        user_content: str,
+        tool: dict[str, Any] | None,
+        request_state: dict[str, Any] | None,
+        model: str | None = None,
+    ) -> str:
+        prompt = self._build_tool_builder_question_answer_prompt(
+            user_content=user_content,
+            tool=tool,
+            request_state=request_state,
+        )
+        result = self._codex_service.run_chat(
+            session_id=f"{session_id}-tool-question",
+            prompt=prompt,
+            model=model,
+            timeout_seconds=90,
+        )
+        if result.success:
+            answer = self._build_assistant_text(result.logs, result.success)
+            if answer.strip():
+                return answer
+
+        return (
+            "I couldn’t answer that from the available tool context right now. "
+            "Ask `status` for runtime details, or send a change request if you want me to rebuild the tool."
+        )
+
+    def _build_tool_builder_question_answer_prompt(
+        self,
+        user_content: str,
+        tool: dict[str, Any] | None,
+        request_state: dict[str, Any] | None,
+    ) -> str:
+        lines = [
+            "You are answering a user's question about an existing generated software tool.",
+            "Do not start a build, rebuild, or code change.",
+            "Do not propose implementation changes unless the user explicitly asks for them.",
+            "Answer the user's question directly using the provided tool context and requirements.",
+            "If some implementation detail is not known from the provided context, say what is known and note the uncertainty briefly.",
+            "Keep the answer concise and practical.",
+            "",
+            "Existing tool context:",
+        ]
+
+        if tool:
+            lines.append(f"- Tool ID: {tool.get('toolId')}")
+            lines.append(f"- Tool name: {tool.get('name')}")
+            lines.append(f"- Tool status: {tool.get('status')}")
+            if tool.get("uiPort"):
+                lines.append(f"- UI port: {tool.get('uiPort')}")
+            ports = tool.get("ports")
+            if isinstance(ports, dict) and ports:
+                serialized_ports = ", ".join(f"{name}:{port}" for name, port in ports.items())
+                lines.append(f"- Service ports: {serialized_ports}")
+
+        if request_state:
+            prompt = self._summarize_tool_builder_request_text(str(request_state.get("prompt") or ""), limit=3000)
+            refined = self._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=3000)
+            status = str(request_state.get("status") or "").strip()
+            error = self._truncate_prompt_for_context(str(request_state.get("error") or ""), limit=1200)
+            if status:
+                lines.append(f"- Latest build status: {status}")
+            if prompt:
+                lines.append(f"\nPrevious request:\n{prompt}")
+            if refined:
+                lines.append(f"\nRefined requirements:\n{refined}")
+            if error:
+                lines.append(f"\nLatest error:\n{error}")
+
+        lines.extend(
+            [
+                "",
+                "User question:",
+                user_content.strip(),
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
     def _is_tool_builder_status_query(user_content: str) -> bool:
         lowered = re.sub(r"\s+", " ", user_content).strip().lower()
         if not lowered:
@@ -1511,6 +1690,10 @@ class ChatService:
             "- Follow TDD: write/update failing tests first, then implement backend changes until tests pass.\n"
             "- Choose a concise, domain-meaningful product name; avoid generic names based on filler words from the prompt.\n"
             "- Include a usable UI unless explicitly backend-only.\n"
+            "- Make the UI feel modern and polished.\n"
+            "- Default the UI to a dark theme unless the user explicitly requests another theme.\n"
+            "- Default all user-facing dates, times, schedules, and cron behavior to IST using the `Asia/Kolkata` timezone unless the user explicitly requests another timezone.\n"
+            "- Configure the generated app/runtime to honor `TZ=Asia/Kolkata` by default and keep frontend/backend time handling aligned with that timezone.\n"
             "- Prefer a lightweight UI stack (server-rendered/static HTML + JS) unless a heavier frontend framework is explicitly requested.\n"
             "- Include tests for the core requested behavior (not only health/status endpoints).\n"
             "- Include tests and runnable docker artifacts including docker-compose.\n"
@@ -1541,8 +1724,8 @@ class ChatService:
             tool_lines.append("- Tool metadata unavailable in chat context; infer from repository workspace.")
 
         if request_state:
-            prior_prompt = self._truncate_prompt_for_context(str(request_state.get("prompt") or ""), limit=5000)
-            refined_prompt = self._truncate_prompt_for_context(str(request_state.get("refinedPrompt") or ""), limit=5000)
+            prior_prompt = self._summarize_tool_builder_request_text(str(request_state.get("prompt") or ""), limit=5000)
+            refined_prompt = self._summarize_tool_builder_request_text(str(request_state.get("refinedPrompt") or ""), limit=5000)
             status = str(request_state.get("status") or "UNKNOWN")
             tool_lines.append(f"- Latest build status: {status}")
             if prior_prompt:
@@ -1565,6 +1748,9 @@ class ChatService:
             "- Implement exactly what the user asked in this change request.\n"
             "- Treat this as a focused modification request: make the smallest code change that satisfies it.\n"
             "- Preserve existing working behavior unless this request explicitly changes it.\n"
+            "- Keep the UI modern and polished; default to a dark theme unless this change request explicitly asks for another theme.\n"
+            "- Keep user-facing dates, times, schedules, and cron behavior on IST using the `Asia/Kolkata` timezone unless this change request explicitly asks for another timezone.\n"
+            "- Preserve or add runtime timezone configuration so the tool defaults to `TZ=Asia/Kolkata`.\n"
             "- Do not rewrite existing scraping/data-source logic unless the change request explicitly requires it.\n"
             "- Keep the UI/runtime stack lightweight unless the request explicitly requires a heavier frontend framework.\n"
             "- Follow TDD: update/add tests first for the changed behavior and likely regressions, then implement backend changes.\n"
@@ -1578,6 +1764,53 @@ class ChatService:
         if len(normalized) <= limit:
             return normalized
         return f"{normalized[:limit].rstrip()}\n... [truncated]"
+
+    @classmethod
+    def _summarize_tool_builder_request_text(cls, value: str, limit: int = 3000) -> str:
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return ""
+
+        extracted = normalized
+        for _ in range(4):
+            inner = cls._extract_embedded_tool_builder_request(extracted)
+            if not inner or inner == extracted:
+                break
+            extracted = inner.strip()
+
+        return cls._truncate_prompt_for_context(extracted, limit=limit)
+
+    @staticmethod
+    def _extract_embedded_tool_builder_request(value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            return ""
+
+        user_request_marker = "\n\nUser request:\n"
+        if user_request_marker in normalized:
+            return normalized.split(user_request_marker, 1)[1].strip()
+
+        initial_prefix = "Build a production-ready tool based on this request:\n"
+        if normalized.startswith(initial_prefix):
+            remainder = normalized[len(initial_prefix):]
+            if "\n\nRequirements:\n" in remainder:
+                return remainder.split("\n\nRequirements:\n", 1)[0].strip()
+            return remainder.strip()
+
+        change_marker = "\n\nChange request:\n"
+        if change_marker in normalized:
+            remainder = normalized.split(change_marker, 1)[1]
+            if "\n\nRequirements:\n" in remainder:
+                return remainder.split("\n\nRequirements:\n", 1)[0].strip()
+            return remainder.strip()
+
+        if normalized.startswith("Change request:\n"):
+            remainder = normalized[len("Change request:\n"):]
+            if "\n\nRequirements:\n" in remainder:
+                return remainder.split("\n\nRequirements:\n", 1)[0].strip()
+            return remainder.strip()
+
+        return normalized
 
     def _recent_operator_session_context(
         self,

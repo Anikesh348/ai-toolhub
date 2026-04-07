@@ -52,6 +52,25 @@ type KnowledgeArticle = {
 };
 type YouTubeShort = YouTubeShortFeedItem;
 type SelectableThinkingPanelMode = Exclude<ThinkingPanelMode, "none">;
+type ToolBuilderPromptExample = {
+  id: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  prompt: string;
+};
+type ToolBuilderIntakeState = {
+  toolName: string;
+  details: string;
+  workflow: string;
+  integrations: string;
+  constraints: string;
+  requiresFrontend: boolean;
+  requiresBackend: boolean;
+  requiresMongo: boolean;
+  requiresCron: boolean;
+};
+type ToolBuilderBooleanField = "requiresFrontend" | "requiresBackend" | "requiresMongo" | "requiresCron";
 
 const MODE_OPTIONS: Array<{ value: SelectableMode; label: string }> = [
   { value: "general", label: "General" },
@@ -60,6 +79,8 @@ const MODE_OPTIONS: Array<{ value: SelectableMode; label: string }> = [
 ];
 const TECHNICAL_READING_WPM = 120;
 const MIN_KNOWLEDGE_ARTICLE_MINUTES = 10;
+const CHAT_COMPOSER_MAX_WIDTH_CLASS = "max-w-5xl";
+const CHAT_INPUT_MAX_HEIGHT_PX = 240;
 
 const KNOWLEDGE_ARTICLES: KnowledgeArticle[] = [
   {
@@ -273,6 +294,113 @@ const SHORTS_FETCH_BATCH_SIZE = 24;
 const SHORTS_PREFETCH_THRESHOLD = 12;
 const MOBILE_BREAKPOINT_QUERY = "(max-width: 1023px)";
 const DISPLAY_MODE_STANDALONE_QUERY = "(display-mode: standalone)";
+const TOOL_BUILDER_PROMPT_EXAMPLES: ToolBuilderPromptExample[] = [
+  {
+    id: "price-tracker",
+    title: "Price Tracker",
+    summary: "Track products, save price history, and alert when targets are reached.",
+    tags: ["Mongo", "Frontend", "Alerts"],
+    prompt: `Build a production-ready price tracking tool.
+
+Requirements:
+- Build a modern dark-themed web UI for managing tracked products.
+- Users should be able to add a product with name, product URL, target price, currency, category, and optional notes.
+- Include a dashboard that shows current price, lowest recorded price, highest recorded price, target price, change since last check, and last checked time.
+- Persist all tool data in the existing MongoDB provided by this platform using MONGO_URI and MONGO_DB_NAME.
+- Create tool-specific MongoDB collections for products, price_history, and alerts.
+- Do not use in-memory storage for tracked products or price history.
+- Add APIs to create a tracked product, list tracked products, trigger a price check, update target price, and fetch historical price data.
+- Support a manual "Check now" action from the UI.
+- Store every observed price point so history survives reloads, container restarts, and crashes.
+- Show a product detail view with a price history table or chart.
+- Include alert logic that marks a product as triggered when the price is at or below the target.
+- Add tests for product creation, MongoDB persistence, price history persistence, and the main tracking workflow.
+- Keep the implementation lightweight and easy to run in Docker.
+- Include GET /status returning {"status":"ok"}.`
+  },
+  {
+    id: "movie-alerts",
+    title: "Movie Alerts",
+    summary: "Monitor live show listings and notify users when matches appear.",
+    tags: ["Cron", "Backend", "Live Data"],
+    prompt: `Build a production-ready movie alerts tool for live show availability.
+
+Requirements:
+- Build a modern dark-themed UI where users can create and manage movie alert rules.
+- Users should be able to choose city, movie name, language, format, theatre preference, and date range.
+- The backend should poll live movie listing sources on a schedule and compare fresh results with previous runs.
+- Add cron or scheduler support so checks can run automatically at a configurable interval.
+- Alerts should fire only when a newly available matching show appears compared with the previous successful check.
+- Persist alert rules, polling runs, match history, and sent-alert history in MongoDB using the platform-provided MONGO_URI and MONGO_DB_NAME.
+- Create separate collections for alert_rules, polling_runs, match_history, and sent_alerts.
+- Include APIs to create an alert rule, list alert rules, trigger a manual run, fetch latest matches, and inspect previous run history.
+- The dashboard should show rule status, last run time, newly detected matches, and previous alert activity.
+- Design the workflow so duplicate alerts are avoided for the same show unless availability changes again later.
+- Add tests for rule creation, scheduler/manual-run behavior, persistence of run history, and dedupe logic for alerts.
+- Keep the stack lightweight and Docker-friendly.
+- Include GET /status returning {"status":"ok"}.`
+  },
+  {
+    id: "lead-dashboard",
+    title: "Lead Dashboard",
+    summary: "Collect leads, qualify them, and view pipeline analytics.",
+    tags: ["Frontend", "Backend", "Mongo"],
+    prompt: `Build a production-ready lead management dashboard.
+
+Requirements:
+- Build a modern dark-themed UI for sales or operations teams.
+- Include a lead capture form with fields for name, company, email, phone, source, status, owner, notes, and priority.
+- Add list and detail views for leads, plus summary cards and charts for pipeline status, source breakdown, and conversion trends.
+- Persist all data in MongoDB using the existing platform database via MONGO_URI and MONGO_DB_NAME.
+- Create collections for leads, lead_activities, and dashboard_snapshots or aggregated metrics if needed.
+- Provide backend APIs to create, update, assign, qualify, archive, and list leads with filtering by status, owner, source, and date.
+- Track a timeline of lead activity whenever a lead is created, updated, reassigned, or qualified.
+- The dashboard should support quick actions like mark as contacted, qualify lead, move to closed won, and archive.
+- Include search and filtering in the UI.
+- Add tests for lead creation, update workflow, MongoDB persistence, and activity tracking behavior.
+- Keep the implementation clean, practical, and Docker-friendly.
+- Include GET /status returning {"status":"ok"}.`
+  },
+  {
+    id: "content-planner",
+    title: "Content Planner",
+    summary: "Plan campaigns, store drafts, and schedule recurring work.",
+    tags: ["Cron", "Mongo", "Workflow"],
+    prompt: `Build a production-ready content planning and scheduling tool.
+
+Requirements:
+- Build a modern dark-themed UI for planning campaigns and managing content drafts.
+- Users should be able to create campaigns, add draft content items, assign channel, target publish date, owner, status, and notes.
+- Add calendar and list views for upcoming content, overdue work, draft status, and campaign progress.
+- Persist all draft, campaign, and schedule data in the existing MongoDB using MONGO_URI and MONGO_DB_NAME.
+- Create collections for campaigns, content_items, publishing_schedules, and activity_log.
+- Support recurring schedules or cron-style planned work for repetitive publishing tasks.
+- Include backend APIs to create campaigns, create drafts, update publishing status, reschedule items, and list upcoming content.
+- The UI should clearly separate idea, draft, review, scheduled, published, and archived states.
+- Add a lightweight workflow history so users can see when a content item changed state.
+- Include tests for campaign creation, content-item persistence, schedule creation, and status transition behavior.
+- Keep the stack lightweight and practical for Docker deployment.
+- Include GET /status returning {"status":"ok"}.`
+  }
+];
+
+const DEFAULT_TOOL_BUILDER_INTAKE: ToolBuilderIntakeState = {
+  toolName: "",
+  details: "",
+  workflow: "",
+  integrations: "",
+  constraints: "",
+  requiresFrontend: true,
+  requiresBackend: true,
+  requiresMongo: false,
+  requiresCron: false
+};
+const TOOL_BUILDER_STACK_HINTS: Array<{ field: ToolBuilderBooleanField; label: string }> = [
+  { field: "requiresFrontend", label: "Frontend" },
+  { field: "requiresBackend", label: "Backend/API" },
+  { field: "requiresMongo", label: "MongoDB" },
+  { field: "requiresCron", label: "Cron / Scheduler" }
+];
 
 function getPhoneViewportState(): boolean {
   if (typeof window === "undefined") {
@@ -421,6 +549,196 @@ function buildYouTubeShortEmbedUrl(videoId: string): string {
     controls: "1"
   });
   return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
+}
+
+function buildToolBuilderIntakePrompt(intake: ToolBuilderIntakeState): string {
+  const requestedCapabilities: string[] = [];
+  requestedCapabilities.push(`Frontend: ${intake.requiresFrontend ? "required" : "not required"}`);
+  requestedCapabilities.push(`Backend/API: ${intake.requiresBackend ? "required" : "not required"}`);
+  requestedCapabilities.push(`MongoDB persistence: ${intake.requiresMongo ? "required" : "not required"}`);
+  requestedCapabilities.push(`Cron/scheduled jobs: ${intake.requiresCron ? "required" : "not required"}`);
+
+  const sections = [
+    "Build a production-ready tool using this structured intake brief.",
+    "",
+    "Tool intake:",
+    `- Tool name: ${intake.toolName.trim() || "Choose a concise product name based on the request"}`,
+    `- Core request: ${intake.details.trim() || "Not provided"}`,
+    `- Primary workflow: ${intake.workflow.trim() || "Infer the main workflow and ask concise clarification questions if needed"}`,
+    `- Integrations or external systems: ${intake.integrations.trim() || "None specified"}`,
+    `- Constraints or special notes: ${intake.constraints.trim() || "None specified"}`,
+    ...requestedCapabilities.map((item) => `- ${item}`),
+    "",
+    "Delivery guidance:",
+    "- First clarify any missing or risky requirements.",
+    "- Then refine this intake into an implementation-ready build brief with explicit assumptions and acceptance criteria before coding.",
+    "- Keep the resulting product modern, polished, and dark-themed by default unless the user later asks for a different theme."
+  ];
+
+  return sections.join("\n");
+}
+
+function ToolBuilderIntakeModal({
+  open,
+  value,
+  onChange,
+  onClose,
+  onApply
+}: {
+  open: boolean;
+  value: ToolBuilderIntakeState;
+  onChange: (next: ToolBuilderIntakeState) => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  const updateField = <K extends keyof ToolBuilderIntakeState>(field: K, nextValue: ToolBuilderIntakeState[K]): void => {
+    onChange({
+      ...value,
+      [field]: nextValue
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 backdrop-blur-sm md:items-center md:px-4 md:py-6">
+      <button
+        type="button"
+        aria-label="Close prompt intake form"
+        onClick={onClose}
+        className="absolute inset-0"
+      />
+      <div className="relative z-[71] my-auto flex w-full max-w-3xl flex-col overflow-hidden rounded-[1.75rem] border border-amber/20 bg-[#11100d] shadow-[0_28px_90px_-30px_rgba(0,0,0,0.95)] max-md:min-h-[calc(100dvh-1.5rem)] max-md:max-h-[calc(100dvh-1.5rem)] md:max-h-[calc(100dvh-3rem)]">
+        <div className="shrink-0 border-b border-amber/15 bg-[radial-gradient(circle_at_top,#2a2116_0%,#16120d_52%,#0d0b09_100%)] px-4 py-4 md:px-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">Tool Builder Intake</p>
+              <h2 className="mt-1 text-xl font-semibold text-[color:var(--text-main)]">Shape the request before you send it</h2>
+              <p className="mt-2 max-w-2xl text-sm text-muted">
+                This form turns rough ideas into a structured build brief. Tool Builder will still clarify gaps and refine the brief before the actual build starts.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/35 text-muted transition hover:border-amber/35 hover:text-[color:var(--text-main)]"
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M6 6l12 12" />
+                <path d="M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 md:px-5 md:py-5">
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="block">
+              <span className="mb-1.5 block text-sm text-muted">Tool name</span>
+              <input
+                value={value.toolName}
+                onChange={(event) => updateField("toolName", event.target.value)}
+                className="w-full rounded-2xl border border-amber/20 bg-black/35 px-3 py-2.5 text-sm text-[color:var(--text-main)] outline-none transition focus:border-amber/45"
+                placeholder="Price Watch Console"
+              />
+            </label>
+            <div className="rounded-2xl border border-amber/15 bg-black/30 px-4 py-3">
+              <p className="text-sm font-medium text-[color:var(--text-main)]">Stack hints</p>
+              <p className="mt-1 text-xs text-muted">Use these to steer the generated tool without hand-writing every implementation detail.</p>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                {TOOL_BUILDER_STACK_HINTS.map(({ field, label }) => {
+                  const checked = value[field];
+                  return (
+                    <label
+                      key={field}
+                      className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 transition ${
+                        checked
+                          ? "border-amber/40 bg-amber/10 text-[color:var(--text-main)]"
+                          : "border-white/10 bg-black/25 text-muted hover:border-amber/25"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) => updateField(field, event.target.checked)}
+                        className="h-4 w-4 rounded border-white/20 bg-transparent accent-[#f1c66a]"
+                      />
+                      <span>{label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4">
+            <label className="block">
+              <span className="mb-1.5 block text-sm text-muted">What should the tool do?</span>
+              <textarea
+                value={value.details}
+                onChange={(event) => updateField("details", event.target.value)}
+                rows={5}
+                className="w-full rounded-2xl border border-amber/20 bg-black/35 px-3 py-3 text-sm text-[color:var(--text-main)] outline-none transition focus:border-amber/45"
+                placeholder="Describe the main job of the tool, the key entities it manages, and the outcome the user expects."
+              />
+            </label>
+
+            <label className="block">
+              <span className="mb-1.5 block text-sm text-muted">Primary workflow</span>
+              <textarea
+                value={value.workflow}
+                onChange={(event) => updateField("workflow", event.target.value)}
+                rows={4}
+                className="w-full rounded-2xl border border-amber/20 bg-black/35 px-3 py-3 text-sm text-[color:var(--text-main)] outline-none transition focus:border-amber/45"
+                placeholder="Example: user adds a product URL, sets a target price, runs a manual check, and later sees saved price history and alerts."
+              />
+            </label>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="block">
+                <span className="mb-1.5 block text-sm text-muted">Integrations or data sources</span>
+                <textarea
+                  value={value.integrations}
+                  onChange={(event) => updateField("integrations", event.target.value)}
+                  rows={4}
+                  className="w-full rounded-2xl border border-amber/20 bg-black/35 px-3 py-3 text-sm text-[color:var(--text-main)] outline-none transition focus:border-amber/45"
+                  placeholder="External APIs, websites, email providers, webhooks, or third-party systems."
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-sm text-muted">Constraints or notes</span>
+                <textarea
+                  value={value.constraints}
+                  onChange={(event) => updateField("constraints", event.target.value)}
+                  rows={4}
+                  className="w-full rounded-2xl border border-amber/20 bg-black/35 px-3 py-3 text-sm text-[color:var(--text-main)] outline-none transition focus:border-amber/45"
+                  placeholder="Mention limits like lightweight stack, backend-only, auth needs, admin access, or expected scale."
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div className="shrink-0 border-t border-amber/15 bg-[#100e0c]/96 px-4 py-3 backdrop-blur md:px-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber/15 bg-black/25 px-4 py-3">
+            <p className="max-w-xl text-xs text-muted">
+              After you insert this draft into chat, Tool Builder will ask follow-up questions if needed and then refine it into a model-friendly implementation brief before building.
+            </p>
+            <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
+              <button type="button" onClick={onClose} className="btn-ghost px-3 py-2 text-sm">
+                Cancel
+              </button>
+              <button type="button" onClick={onApply} className="btn-primary px-4 py-2 text-sm">
+                Insert Into Chat
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ThinkingCompanionPanel({
@@ -740,6 +1058,8 @@ function ChatPageContent() {
   const [prompt, setPrompt] = useState("");
   const [composerMode, setComposerMode] = useState<SelectableMode>("general");
   const [composerModel, setComposerModel] = useState<string | null>(null);
+  const [toolBuilderIntakeOpen, setToolBuilderIntakeOpen] = useState(false);
+  const [toolBuilderIntake, setToolBuilderIntake] = useState<ToolBuilderIntakeState>(DEFAULT_TOOL_BUILDER_INTAKE);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -773,6 +1093,7 @@ function ChatPageContent() {
   const streamTokenRef = useRef(0);
   const sendingChatIdRef = useRef<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const shortWheelCooldownRef = useRef(0);
   const shortFeedRequestInFlightRef = useRef(false);
   const shortFeedExhaustedRef = useRef(false);
@@ -791,6 +1112,7 @@ function ChatPageContent() {
   }, []);
 
   const activeChat = useMemo(() => chats.find((chat) => chat.id === activeChatId) ?? null, [chats, activeChatId]);
+  const isToolBuilderMode = composerMode === "tool_builder";
 
   const requestedChatId = searchParams.get("chatId") ?? searchParams.get("sessionId");
   const newChatToken = searchParams.get("new");
@@ -982,6 +1304,18 @@ function ChatPageContent() {
   }, [activeChatId]);
 
   useEffect(() => {
+    const textarea = promptTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "0px";
+    const nextHeight = Math.min(textarea.scrollHeight, CHAT_INPUT_MAX_HEIGHT_PX);
+    textarea.style.height = `${Math.max(nextHeight, 44)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > CHAT_INPUT_MAX_HEIGHT_PX ? "auto" : "hidden";
+  }, [prompt]);
+
+  useEffect(() => {
     if (!activeChat) {
       return;
     }
@@ -997,6 +1331,17 @@ function ChatPageContent() {
   useEffect(() => {
     clearPendingImage();
   }, [activeChatId]);
+
+  useEffect(() => {
+    if (!toolBuilderIntakeOpen) {
+      return;
+    }
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, [toolBuilderIntakeOpen]);
   const handleCompanionResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>): void => {
       event.preventDefault();
@@ -1362,6 +1707,20 @@ function ChatPageContent() {
     }
   }
 
+  function handleUseToolBuilderExample(example: ToolBuilderPromptExample): void {
+    setPrompt(example.prompt);
+    setToolBuilderIntake({
+      ...DEFAULT_TOOL_BUILDER_INTAKE,
+      details: example.prompt
+    });
+  }
+
+  function handleApplyToolBuilderIntake(): void {
+    const generatedPrompt = buildToolBuilderIntakePrompt(toolBuilderIntake);
+    setPrompt(generatedPrompt);
+    setToolBuilderIntakeOpen(false);
+  }
+
   async function handleModelChange(nextModel: string): Promise<void> {
     setComposerModel(nextModel);
     if (!activeChat || updatingModel) {
@@ -1605,8 +1964,54 @@ function ChatPageContent() {
 
             {showCenteredWelcome && (
               <div className="flex h-full min-h-[46vh] flex-col items-center justify-center text-center">
-                <h2 className="text-4xl font-medium tracking-tight text-[color:var(--text-main)] md:text-5xl">What can I help with?</h2>
-                <p className="mt-3 max-w-lg text-sm text-muted">Start a new chat and pick the mode below to guide how ToolHub should respond.</p>
+                <h2 className="text-4xl font-medium tracking-tight text-[color:var(--text-main)] md:text-5xl">
+                  {isToolBuilderMode ? "What should we build?" : "What can I help with?"}
+                </h2>
+                <p className="mt-3 max-w-2xl text-sm text-muted">
+                  {isToolBuilderMode
+                    ? "Use sample prompts or the intake form to turn rough ideas into a cleaner build brief. Tool Builder will still clarify gaps and refine the brief before coding."
+                    : "Start a new chat and pick the mode below to guide how ToolHub should respond."}
+                </p>
+                {isToolBuilderMode && (
+                  <div className="mt-6 w-full max-w-4xl rounded-[1.8rem] border border-amber/18 bg-[radial-gradient(circle_at_top,#231a10_0%,#15110d_55%,#0c0a08_100%)] p-4 text-left shadow-[0_30px_80px_-36px_rgba(0,0,0,0.92)]">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">Prompt Studio</p>
+                        <h3 className="mt-1 text-lg font-semibold text-[color:var(--text-main)]">Start from examples or open the intake form</h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setToolBuilderIntakeOpen(true)}
+                        className="btn-primary px-4 py-2 text-sm"
+                      >
+                        Open Intake Form
+                      </button>
+                    </div>
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {TOOL_BUILDER_PROMPT_EXAMPLES.map((example) => (
+                        <button
+                          key={example.id}
+                          type="button"
+                          onClick={() => handleUseToolBuilderExample(example)}
+                          className="rounded-[1.3rem] border border-amber/15 bg-black/25 p-4 text-left transition hover:border-amber/35 hover:bg-black/35"
+                        >
+                          <div className="flex flex-wrap gap-2">
+                            {example.tags.map((tag) => (
+                              <span
+                                key={`${example.id}-${tag}`}
+                                className="rounded-full border border-amber/15 bg-amber/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-amber/80"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                          <h4 className="mt-3 text-base font-semibold text-[color:var(--text-main)]">{example.title}</h4>
+                          <p className="mt-2 text-sm leading-6 text-muted">{example.summary}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1667,7 +2072,7 @@ function ChatPageContent() {
           </div>
 
           <form className="chat-page-composer shrink-0 border-t border-amber/15 bg-[#0e0d0b]/88 px-2 pb-3 pt-3 backdrop-blur lg:px-4 lg:pb-4" onSubmit={handleSend}>
-            <div className="mx-auto w-full max-w-4xl">
+            <div className={`mx-auto w-full ${CHAT_COMPOSER_MAX_WIDTH_CLASS}`}>
               <div className="chat-page-modes mb-2 flex flex-wrap items-center gap-2">
                 {MODE_OPTIONS.map((option) => {
                   const active = composerMode === option.value;
@@ -1726,6 +2131,54 @@ function ChatPageContent() {
                 </div>
               </div>
 
+              {isToolBuilderMode && (
+                <div className="mb-3 rounded-[1.6rem] border border-amber/18 bg-[radial-gradient(circle_at_top,#21180f_0%,#14110d_56%,#0d0b09_100%)] p-3 shadow-[0_24px_70px_-36px_rgba(0,0,0,0.92)]">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="max-w-2xl">
+                      <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">Tool Builder Studio</p>
+                      <p className="mt-1 text-sm text-[color:var(--text-main)]">
+                        Make the prompt easier to write with examples or a structured intake form.
+                      </p>
+                      <p className="mt-1 text-xs text-muted">
+                        After you send it, Tool Builder still asks clarifying questions if needed and refines the brief into a model-friendly build request before the build starts.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setToolBuilderIntakeOpen(true)}
+                      disabled={!activeChat || sending}
+                      className="btn-primary px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Intake Form
+                    </button>
+                  </div>
+                  <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                    {TOOL_BUILDER_PROMPT_EXAMPLES.map((example) => (
+                      <button
+                        key={example.id}
+                        type="button"
+                        onClick={() => handleUseToolBuilderExample(example)}
+                        disabled={!activeChat || sending}
+                        className="min-w-[220px] rounded-[1.2rem] border border-amber/15 bg-black/25 p-3 text-left transition hover:border-amber/35 hover:bg-black/35 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <div className="flex flex-wrap gap-1.5">
+                          {example.tags.map((tag) => (
+                            <span
+                              key={`${example.id}-${tag}`}
+                              className="rounded-full border border-amber/15 bg-amber/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-amber/80"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="mt-2 text-sm font-medium text-[color:var(--text-main)]">{example.title}</p>
+                        <p className="mt-1 text-xs leading-5 text-muted">{example.summary}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {pendingImage && (
                 <div className="mb-2 flex items-center gap-3 rounded-2xl border border-amber/25 bg-black/35 px-3 py-2">
                   <img src={pendingImage.previewUrl} alt={pendingImage.file.name} className="h-16 w-16 rounded-lg object-cover" />
@@ -1743,6 +2196,7 @@ function ChatPageContent() {
 
               <div className="flex items-end gap-2 rounded-3xl border border-amber/22 bg-[#1a1813]/90 px-3 py-2">
                 <textarea
+                  ref={promptTextareaRef}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   onKeyDown={(event) => {
@@ -1751,8 +2205,8 @@ function ChatPageContent() {
                       void submitPrompt();
                     }
                   }}
-                  rows={2}
-                  className="w-full resize-none bg-transparent py-2 text-sm text-[color:var(--text-main)] outline-none placeholder:text-muted/90"
+                  rows={1}
+                  className="min-h-[44px] max-h-[240px] w-full resize-none overflow-y-hidden bg-transparent py-2 text-sm leading-6 text-[color:var(--text-main)] outline-none placeholder:text-muted/90"
                   placeholder="Ask anything"
                   disabled={!activeChat || sending}
                 />
@@ -1786,10 +2240,22 @@ function ChatPageContent() {
 
               <p className="mt-2 text-xs text-muted">Enter to send, Shift + Enter for a new line.</p>
             </div>
-            {error && <div className="mx-auto mt-2 w-full max-w-4xl border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</div>}
+            {error && (
+              <div className={`mx-auto mt-2 w-full ${CHAT_COMPOSER_MAX_WIDTH_CLASS} border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral`}>
+                {error}
+              </div>
+            )}
           </form>
         </section>
       </div>
+
+      <ToolBuilderIntakeModal
+        open={toolBuilderIntakeOpen}
+        value={toolBuilderIntake}
+        onChange={setToolBuilderIntake}
+        onClose={() => setToolBuilderIntakeOpen(false)}
+        onApply={handleApplyToolBuilderIntake}
+      />
 
       {companionEnabled && companionOpen && thinkingPanelContentMode && (
         <>

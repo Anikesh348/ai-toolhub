@@ -2,12 +2,15 @@ import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
+  buildJobLogArtifactDownloadUrl,
   JobSummary,
+  JobLogArtifact,
   TOOL_BACKEND_BASE_URL,
   TOOL_FRONTEND_BASE_URL,
   ToolRecord,
   createToolBuilderSessionForTool,
   deleteJob,
+  fetchJobLogArtifacts,
   fetchJobs,
   fetchTools,
   formatDate,
@@ -21,6 +24,16 @@ import { ACTIVE_STATUSES, STATUS_COLORS } from "@/lib/status";
 const FRONTEND_SERVICE_HINTS = ["frontend", "web", "ui", "client", "dashboard", "site", "next", "vite"];
 const BACKEND_SERVICE_HINTS = ["backend", "api", "server", "worker", "gateway", "graphql", "rest"];
 const TERMINAL_REQUEST_STATUSES = new Set(["RUNNING", "FAILED"]);
+
+function formatArtifactSize(sizeBytes: number): string {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 function buildRuntimeUrl(baseUrl: string, port: number): string {
   return `${baseUrl}:${port}`;
@@ -61,6 +74,9 @@ export default function RequestsPage() {
   );
   const [chatLoadingToolId, setChatLoadingToolId] = useState<string | null>(null);
   const [deleteLoadingJobId, setDeleteLoadingJobId] = useState<string | null>(null);
+  const [logsLoadingJobId, setLogsLoadingJobId] = useState<string | null>(null);
+  const [activeLogsJob, setActiveLogsJob] = useState<JobSummary | null>(null);
+  const [activeLogArtifacts, setActiveLogArtifacts] = useState<JobLogArtifact[]>([]);
   const pollingRef = useRef(false);
 
   const visibleJobs = useMemo(() => {
@@ -229,6 +245,20 @@ export default function RequestsPage() {
     }
   }
 
+  async function handleOpenLogs(job: JobSummary): Promise<void> {
+    setError(null);
+    setLogsLoadingJobId(job.id);
+    try {
+      const artifacts = await fetchJobLogArtifacts(job.id);
+      setActiveLogsJob(job);
+      setActiveLogArtifacts(artifacts);
+    } catch (logError) {
+      setError(logError instanceof Error ? logError.message : "Unable to load log artifacts");
+    } finally {
+      setLogsLoadingJobId(null);
+    }
+  }
+
   function toolDisplayName(job: JobSummary): string {
     if (job.toolName) {
       return job.toolName;
@@ -274,6 +304,7 @@ export default function RequestsPage() {
                 <th className="px-3 py-3">Status</th>
                 <th className="px-3 py-3">Ports</th>
                 <th className="px-3 py-3">Actions</th>
+                <th className="px-3 py-3">Logs</th>
                 <th className="px-3 py-3">Last Update</th>
                 <th className="px-3 py-3">Delete</th>
               </tr>
@@ -390,6 +421,16 @@ export default function RequestsPage() {
                     )}
                   </td>
                   <td className="px-3 py-3">
+                    <button
+                      type="button"
+                      onClick={() => void handleOpenLogs(job)}
+                      disabled={logsLoadingJobId === job.id}
+                      className="btn-ghost border-amber/30 bg-black/35 px-2.5 py-1 text-xs text-[color:var(--text-main)]"
+                    >
+                      {logsLoadingJobId === job.id ? "Loading..." : "Logs"}
+                    </button>
+                  </td>
+                  <td className="px-3 py-3">
                     <p className="text-xs text-muted">{job.lastMessage ?? "-"}</p>
                     <p className="mt-1 text-[11px] text-muted">{formatDate(job.lastLogAt ?? job.updatedAt)}</p>
                   </td>
@@ -407,7 +448,7 @@ export default function RequestsPage() {
               ))}
               {visibleJobs.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-8 text-center text-sm text-muted">
+                  <td colSpan={7} className="px-3 py-8 text-center text-sm text-muted">
                     No generated tools yet.
                   </td>
                 </tr>
@@ -416,6 +457,77 @@ export default function RequestsPage() {
           </table>
         </div>
       </section>
+
+      {activeLogsJob && (
+        <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 backdrop-blur-sm md:items-center md:px-4 md:py-6">
+          <button
+            type="button"
+            aria-label="Close logs panel"
+            onClick={() => {
+              setActiveLogsJob(null);
+              setActiveLogArtifacts([]);
+            }}
+            className="absolute inset-0"
+          />
+          <div className="relative z-[71] my-auto flex w-full max-w-3xl flex-col overflow-hidden rounded-[1.75rem] border border-amber/20 bg-[#11100d] shadow-[0_28px_90px_-30px_rgba(0,0,0,0.95)] max-md:min-h-[calc(100dvh-1.5rem)] max-md:max-h-[calc(100dvh-1.5rem)] md:max-h-[calc(100dvh-3rem)]">
+            <div className="shrink-0 border-b border-amber/15 bg-[radial-gradient(circle_at_top,#2a2116_0%,#16120d_52%,#0d0b09_100%)] px-4 py-4 md:px-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">Build Log Files</p>
+                  <h2 className="mt-1 text-xl font-semibold text-[color:var(--text-main)]">{toolDisplayName(activeLogsJob)}</h2>
+                  <p className="mt-2 text-sm text-muted">
+                    Request `{activeLogsJob.id.slice(0, 8)}`. These artifacts are stored in MongoDB and can be downloaded individually.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveLogsJob(null);
+                    setActiveLogArtifacts([]);
+                  }}
+                  className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/35 text-muted transition hover:border-amber/35 hover:text-[color:var(--text-main)]"
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M6 6l12 12" />
+                    <path d="M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 md:px-5 md:py-5">
+              {activeLogArtifacts.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-amber/25 bg-black/25 px-4 py-5 text-sm text-muted">
+                  No stored log artifacts for this job yet.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {activeLogArtifacts.map((artifact) => (
+                    <div
+                      key={artifact.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber/15 bg-black/25 px-4 py-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold text-[color:var(--text-main)]">{artifact.fileName}</p>
+                        <p className="mt-1 font-[var(--font-mono)] text-[11px] text-muted">{artifact.step}</p>
+                        <p className="mt-1 text-[11px] text-muted">
+                          {formatArtifactSize(artifact.sizeBytes)} • {formatDate(artifact.createdAt)}
+                        </p>
+                      </div>
+                      <a
+                        href={buildJobLogArtifactDownloadUrl(activeLogsJob.id, artifact.id)}
+                        className="btn-ghost border-skyline/45 bg-skyline/10 px-3 py-2 text-sm text-skyline"
+                      >
+                        Download
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

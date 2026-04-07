@@ -1,8 +1,8 @@
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.services.chat_service import ChatService
+from app.utils.time import now_ist
 
 
 def test_docker_summary_query_for_status_request() -> None:
@@ -91,6 +91,16 @@ def test_tool_builder_status_query_ignores_modification_prompt_that_mentions_url
     assert ChatService._is_tool_builder_status_query(prompt) is False
 
 
+def test_tool_builder_information_query_matches_tool_question() -> None:
+    prompt = "How does this tool store price history?"
+    assert ChatService._is_tool_builder_information_query(prompt) is True
+
+
+def test_tool_builder_information_query_ignores_change_request() -> None:
+    prompt = "Add price history filters to the dashboard."
+    assert ChatService._is_tool_builder_information_query(prompt) is False
+
+
 def test_sanitize_operator_output_removes_fenced_code_by_default() -> None:
     output = (
         "Completed the fix.\n\n"
@@ -150,6 +160,17 @@ def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
     assert "Add CSV export for job history." in prompt
     assert "focused modification request" in prompt
     assert "Do not rewrite existing scraping/data-source logic" in prompt
+    assert "default to a dark theme" in prompt
+    assert "Asia/Kolkata" in prompt
+    assert "TZ=Asia/Kolkata" in prompt
+
+
+def test_build_tool_initial_prompt_defaults_ui_to_dark_theme() -> None:
+    prompt = ChatService._build_tool_initial_prompt("Build a monitoring dashboard.")
+    assert "Make the UI feel modern and polished." in prompt
+    assert "Default the UI to a dark theme" in prompt
+    assert "Asia/Kolkata" in prompt
+    assert "TZ=Asia/Kolkata" in prompt
 
 
 def test_tool_builder_clarification_targets_live_movie_alert_gaps() -> None:
@@ -387,11 +408,92 @@ def test_modify_chat_clarification_reply_starts_rebuild() -> None:
     assert context == {"requestId": "request-1", "toolId": "tool-1", "toolName": "Movie Alerts", "phase": "building"}
     tool_builder_service.start_generation.assert_called_once()
     assert tool_builder_service.start_generation.call_args.kwargs["model"] == "gpt-5.4-mini"
+    assert (
+        tool_builder_service.start_generation.call_args.kwargs["prompt"]
+        == "Add an option to delete an existing movie watcher while preserving historical alert logs."
+    )
+    assert (
+        "Apply the requested change to the existing tool codebase."
+        in tool_builder_service.start_generation.call_args.kwargs["workflow_prompt"]
+    )
+
+
+def test_modify_chat_tool_question_answers_without_starting_rebuild() -> None:
+    codex_service = Mock()
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs="The tool stores price history in MongoDB collections and reads connection settings from environment variables.",
+    )
+    tool_builder_service = Mock()
+    tool_builder_service.get_tool.return_value = {
+        "toolId": "tool-1",
+        "requestId": "request-1",
+        "name": "Price Tracker",
+        "status": "RUNNING",
+        "uiPort": 3010,
+        "ports": {"app": 3010},
+    }
+    tool_builder_service.get_job_state.return_value = {
+        "prompt": "Build a price tracker tool.",
+        "refinedPrompt": "Persist products and price history in MongoDB.",
+        "status": "RUNNING",
+        "error": None,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+    )
+    service._resolve_tool_builder_context = Mock(  # type: ignore[method-assign]
+        return_value={
+            "requestId": "request-1",
+            "toolId": "tool-1",
+            "toolName": "Price Tracker",
+            "phase": "running",
+        }
+    )
+
+    message, context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content="How does this tool store price history?",
+        selected_model="gpt-5.4-mini",
+    )
+
+    assert "MongoDB collections" in message
+    assert context == {
+        "requestId": "request-1",
+        "toolId": "tool-1",
+        "toolName": "Price Tracker",
+        "phase": "running",
+    }
+    tool_builder_service.start_generation.assert_not_called()
+    codex_service.run_chat.assert_called_once()
+    assert codex_service.run_chat.call_args.kwargs["model"] == "gpt-5.4-mini"
+
+
+def test_summarize_tool_builder_request_text_extracts_nested_change_request() -> None:
+    value = (
+        "You are generating a production-ready Python tool for container deployment.\n"
+        "Mandatory requirements:\n- Keep tests passing.\n\n"
+        "User request:\n"
+        "Apply the requested change to the existing tool codebase.\n"
+        "Inspect the current workspace first, then make targeted updates.\n\n"
+        "Existing tool context:\n- Tool name: Price Tracker\n\n"
+        "Change request:\n"
+        "Add bulk actions to archive tracked products from the dashboard.\n\n"
+        "Requirements:\n"
+        "- Treat this as a focused modification request.\n"
+    )
+
+    summarized = ChatService._summarize_tool_builder_request_text(value)
+
+    assert summarized == "Add bulk actions to archive tracked products from the dashboard."
 
 
 class _StubSessionRepository:
     def __init__(self) -> None:
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         self._session = {
             "id": "session-1",
             "title": "Operator Session",
@@ -417,7 +519,7 @@ class _StubSessionRepository:
             return None
         if title is not None:
             self._session["title"] = title
-        self._session["updatedAt"] = datetime.now(tz=timezone.utc)
+        self._session["updatedAt"] = now_ist()
         return dict(self._session)
 
     def list_recent(self, limit: int = 100) -> list[dict]:
@@ -432,7 +534,7 @@ class _StubMessageRepository:
 
     def list_recent_for_session(self, session_id: str, limit: int = 20) -> list[dict]:
         _ = limit
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         if self.created:
             return [dict(item) for item in self.created]
         return [
@@ -460,7 +562,7 @@ class _StubMessageRepository:
             "role": role,
             "content": content,
             "metadata": metadata or {},
-            "createdAt": datetime.now(tz=timezone.utc),
+            "createdAt": now_ist(),
         }
         self.created.append(message)
         return message

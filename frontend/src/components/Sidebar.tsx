@@ -2,7 +2,7 @@ import type { MouseEvent } from "react";
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
-import { ChatSession, deleteChatSession, fetchChatSessions } from "@/lib/api";
+import { ChatSession, deleteChatSession, fetchChatSessions, formatDateOnly } from "@/lib/api";
 
 const NAV_ITEMS = [
   { href: "/chat", label: "Chat", subtitle: "Conversation" },
@@ -205,7 +205,7 @@ export function Sidebar({ sidebarWidth, onResizeStart, mobile = false, onNavigat
                   }`}
                 >
                   <p className="truncate text-sm">{chat.title}</p>
-                  <p className="mt-0.5 text-[11px] text-muted">{new Date(chat.updatedAt).toLocaleDateString()}</p>
+                  <p className="mt-0.5 text-[11px] text-muted">{formatDateOnly(chat.updatedAt)}</p>
                 </button>
 
                 <button

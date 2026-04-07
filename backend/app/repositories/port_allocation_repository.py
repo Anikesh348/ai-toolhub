@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
 from typing import Any
 
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
+
+from app.utils.time import now_ist
 
 
 class PortAllocationRepository:
@@ -20,10 +21,9 @@ class PortAllocationRepository:
                     "port": port,
                     "toolId": tool_id,
                     "requestId": request_id,
-                    "assignedAt": datetime.now(tz=timezone.utc),
+                    "assignedAt": now_ist(),
                 }
             )
             return True
         except DuplicateKeyError:
             return False
-

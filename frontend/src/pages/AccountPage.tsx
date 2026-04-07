@@ -2,10 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuth, useClerk, useUser } from "@clerk/clerk-react";
 
 import {
+  currentIstTimestamp,
   CodexAuthStatus,
   CodexLoginStreamEvent,
   fetchCodexAuthStatus,
   fetchGitSshPublicKey,
+  formatDate,
   GitSshPublicKeyStatus,
   GitSshVerification,
   logoutCodexAuth,
@@ -285,7 +287,7 @@ export default function AccountPage() {
     setGitVerifying(true);
     try {
       const result = await verifyGitSshConnection(normalizedHost, normalizedUsername);
-      const checkedAt = new Date().toISOString();
+      const checkedAt = currentIstTimestamp();
       setGitVerification(result);
       setGitVerificationCheckedAt(checkedAt);
       try {
@@ -475,7 +477,7 @@ export default function AccountPage() {
                   Target: {gitVerification.username}@{gitVerification.host} | Exit code: {gitVerification.exitCode}
                 </p>
                 {gitVerificationCheckedAt && (
-                  <p className="mt-1 text-[11px] text-muted">Last checked: {new Date(gitVerificationCheckedAt).toLocaleString()}</p>
+                  <p className="mt-1 text-[11px] text-muted">Last checked: {formatDate(gitVerificationCheckedAt)}</p>
                 )}
                 <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap font-[var(--font-mono)] text-[12px] leading-5 text-[color:var(--text-main)]">
                   {gitVerification.logs || "No terminal output captured."}

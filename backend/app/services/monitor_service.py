@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from app.models.status import BuildStatus, ToolStatus
 from app.repositories.request_repository import RequestRepository
@@ -9,6 +9,7 @@ from app.services.alert_service import AlertService
 from app.services.docker_service import DockerService
 from app.utils.config import Settings
 from app.utils.logger import get_logger
+from app.utils.time import now_ist
 
 
 class ToolMonitorService:
@@ -31,7 +32,7 @@ class ToolMonitorService:
 
     def _monitor_grace_until(self) -> datetime:
         seconds = max(0, int(getattr(self._settings, "monitor_startup_grace_seconds", 90)))
-        return datetime.now(tz=timezone.utc) + timedelta(seconds=seconds)
+        return now_ist() + timedelta(seconds=seconds)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():

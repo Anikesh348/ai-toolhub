@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
 from typing import Any
 
 from bson import ObjectId
 from pymongo.collection import Collection
+
+from app.utils.time import now_ist
 
 
 class ChatMessageRepository:
@@ -16,7 +17,7 @@ class ChatMessageRepository:
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         document: dict[str, Any] = {
             "sessionId": session_id,
             "role": role,

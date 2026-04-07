@@ -8,6 +8,7 @@ from pymongo import MongoClient
 from app.api.chat_routes import router as chat_router
 from app.api.tool_routes import router as tool_router
 from app.repositories.build_log_repository import BuildLogRepository
+from app.repositories.build_log_artifact_repository import BuildLogArtifactRepository
 from app.repositories.chat_message_repository import ChatMessageRepository
 from app.repositories.chat_session_repository import ChatSessionRepository
 from app.repositories.port_allocation_repository import PortAllocationRepository
@@ -28,6 +29,7 @@ from app.services.tool_builder_service import ToolBuilderService
 from app.services.youtube_service import YouTubeService
 from app.utils.config import get_settings
 from app.utils.logger import configure_logging
+from app.utils.time import IST_CODEC_OPTIONS
 from app.workflows.tool_build_workflow import ToolBuildWorkflow
 
 
@@ -68,9 +70,10 @@ def create_app() -> FastAPI:
     def startup_event() -> None:
         mongo_client = MongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000)
         mongo_client.admin.command("ping")
-        db = mongo_client[settings.mongo_db_name]
+        db = mongo_client.get_database(settings.mongo_db_name, codec_options=IST_CODEC_OPTIONS)
         requests_collection_name = f"{settings.mongo_collection_prefix}_tool_requests"
         logs_collection_name = f"{settings.mongo_collection_prefix}_tool_build_logs"
+        log_artifacts_collection_name = f"{settings.mongo_collection_prefix}_tool_build_log_artifacts"
         tools_collection_name = f"{settings.mongo_collection_prefix}_tools"
         ports_collection_name = f"{settings.mongo_collection_prefix}_tool_port_allocations"
         chat_sessions_collection_name = f"{settings.mongo_collection_prefix}_chat_sessions"
@@ -79,6 +82,8 @@ def create_app() -> FastAPI:
         db[requests_collection_name].create_index("status")
         db[requests_collection_name].create_index([("createdAt", -1)])
         db[logs_collection_name].create_index([("requestId", 1), ("timestamp", 1)])
+        db[log_artifacts_collection_name].create_index([("requestId", 1), ("createdAt", -1)])
+        db[log_artifacts_collection_name].create_index([("requestId", 1), ("step", 1)])
         db[tools_collection_name].create_index("toolId", unique=True)
         db[tools_collection_name].create_index("status")
         db[tools_collection_name].create_index("requestId")
@@ -96,6 +101,7 @@ def create_app() -> FastAPI:
 
         request_repository = RequestRepository(db[requests_collection_name])
         build_log_repository = BuildLogRepository(db[logs_collection_name])
+        build_log_artifact_repository = BuildLogArtifactRepository(db[log_artifacts_collection_name])
         tool_repository = ToolRepository(db[tools_collection_name])
         port_allocation_repository = PortAllocationRepository(db[ports_collection_name])
         chat_session_repository = ChatSessionRepository(db[chat_sessions_collection_name])
@@ -116,6 +122,7 @@ def create_app() -> FastAPI:
             settings=settings,
             request_repository=request_repository,
             build_log_repository=build_log_repository,
+            build_log_artifact_repository=build_log_artifact_repository,
             tool_repository=tool_repository,
             prompt_service=prompt_service,
             codex_service=codex_service,
@@ -127,6 +134,7 @@ def create_app() -> FastAPI:
         tool_builder_service = ToolBuilderService(
             request_repository=request_repository,
             build_log_repository=build_log_repository,
+            build_log_artifact_repository=build_log_artifact_repository,
             tool_repository=tool_repository,
             docker_service=docker_service,
             testing_service=testing_service,

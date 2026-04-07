@@ -85,11 +85,13 @@ def test_workflow_uses_default_tool_builder_model_for_generation() -> None:
     codex_service = Mock()
     codex_service.run_generation.return_value = CommandResult(success=False, exit_code=1, logs="generation failed")
     codex_service.clean_cli_output.return_value = "generation failed"
+    build_log_artifact_repository = Mock()
 
     workflow = ToolBuildWorkflow(
         settings=settings,  # type: ignore[arg-type]
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=build_log_artifact_repository,  # type: ignore[arg-type]
         tool_repository=Mock(),  # type: ignore[arg-type]
         prompt_service=prompt_service,  # type: ignore[arg-type]
         codex_service=codex_service,  # type: ignore[arg-type]
@@ -102,6 +104,13 @@ def test_workflow_uses_default_tool_builder_model_for_generation() -> None:
     workflow._run(request_id="req-model", tool_name_hint=None)  # pylint: disable=protected-access
 
     assert codex_service.run_generation.call_args.kwargs["model"] == "gpt-5.3-codex"
+    build_log_artifact_repository.add_artifact.assert_any_call(
+        request_id="req-model",
+        step="generate_attempt_1",
+        file_name="generate-attempt-1.log",
+        content="generation failed",
+        content_type="text/plain; charset=utf-8",
+    )
 
 
 def test_workflow_fails_when_api_verification_fails() -> None:
@@ -143,6 +152,7 @@ def test_workflow_fails_when_api_verification_fails() -> None:
         settings=settings,  # type: ignore[arg-type]
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         prompt_service=prompt_service,  # type: ignore[arg-type]
         codex_service=codex_service,  # type: ignore[arg-type]
@@ -210,6 +220,7 @@ def test_workflow_fails_when_dynamic_data_reliability_check_fails() -> None:
         settings=settings,  # type: ignore[arg-type]
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         prompt_service=prompt_service,  # type: ignore[arg-type]
         codex_service=codex_service,  # type: ignore[arg-type]
@@ -261,6 +272,7 @@ def test_workflow_fails_fast_on_non_retryable_generation_error() -> None:
         settings=settings,  # type: ignore[arg-type]
         request_repository=request_repository,  # type: ignore[arg-type]
         build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=tool_repository,  # type: ignore[arg-type]
         prompt_service=prompt_service,  # type: ignore[arg-type]
         codex_service=codex_service,  # type: ignore[arg-type]
@@ -290,6 +302,7 @@ def test_scrape_verification_allows_inconclusive_web_result() -> None:
         settings=settings,  # type: ignore[arg-type]
         request_repository=Mock(),  # type: ignore[arg-type]
         build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=Mock(),  # type: ignore[arg-type]
         prompt_service=Mock(),  # type: ignore[arg-type]
         codex_service=Mock(),  # type: ignore[arg-type]
@@ -329,6 +342,7 @@ def test_scrape_verification_fails_only_on_strong_mismatch() -> None:
         settings=settings,  # type: ignore[arg-type]
         request_repository=Mock(),  # type: ignore[arg-type]
         build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=Mock(),  # type: ignore[arg-type]
         prompt_service=Mock(),  # type: ignore[arg-type]
         codex_service=codex_service,  # type: ignore[arg-type]
@@ -367,6 +381,7 @@ def test_scrape_verification_allows_minor_differences() -> None:
         settings=settings,  # type: ignore[arg-type]
         request_repository=Mock(),  # type: ignore[arg-type]
         build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
         tool_repository=Mock(),  # type: ignore[arg-type]
         prompt_service=Mock(),  # type: ignore[arg-type]
         codex_service=codex_service,  # type: ignore[arg-type]

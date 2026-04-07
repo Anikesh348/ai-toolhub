@@ -4,6 +4,7 @@ from pathlib import Path, PurePosixPath
 import time
 from typing import Any, Iterable, Optional
 import re
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import docker
 import yaml
@@ -49,6 +50,8 @@ class RuntimePlan:
 
 class DockerService:
     _COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-(.*?))?}")
+    _CONTAINER_EXTRA_HOSTS = {"host.docker.internal": "host-gateway"}
+    _LOCAL_MONGO_HOSTS = {"mongo", "localhost", "127.0.0.1"}
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -567,11 +570,14 @@ class DockerService:
                 detach=True,
                 auto_remove=False,
                 ports={f"{self._settings.tool_internal_port}/tcp": host_port},
+                environment=self._tool_runtime_environment() or None,
+                extra_hosts=self._CONTAINER_EXTRA_HOSTS,
                 mem_limit=self._settings.tool_memory_limit,
                 nano_cpus=self._to_nano_cpus(self._settings.tool_cpu_limit),
                 restart_policy={"Name": "unless-stopped"},
                 labels=labels,
             )
+            self._connect_container_to_shared_mongo_networks(container)
             return True, container.id, ""
         except DockerException as exc:
             return False, None, str(exc)
@@ -599,10 +605,13 @@ class DockerService:
                 detach=True,
                 auto_remove=False,
                 ports={f"{self._settings.tool_internal_port}/tcp": host_port},
+                environment=self._tool_runtime_environment() or None,
+                extra_hosts=self._CONTAINER_EXTRA_HOSTS,
                 mem_limit=self._settings.tool_memory_limit,
                 nano_cpus=self._to_nano_cpus(self._settings.tool_cpu_limit),
                 labels=labels,
             )
+            self._connect_container_to_shared_mongo_networks(container)
             return True, container.id, ""
         except DockerException as exc:
             return False, None, str(exc)
@@ -775,6 +784,7 @@ class DockerService:
                     auto_remove=False,
                     ports=ports,
                     environment=environment if environment else None,
+                    extra_hosts=self._CONTAINER_EXTRA_HOSTS,
                     command=service_config.get("command"),
                     entrypoint=service_config.get("entrypoint"),
                     working_dir=service_config.get("working_dir"),
@@ -785,6 +795,7 @@ class DockerService:
                 )
                 runtime_network = self._client.networks.get(project_name)
                 runtime_network.connect(container, aliases=[service_name])
+                self._connect_container_to_shared_mongo_networks(container)
                 created_container_ids.append(container.id)
         except DockerException as exc:
             self._stop_compose_project(project_name)
@@ -853,10 +864,10 @@ class DockerService:
 
     def _build_service_environment(self, service_config: dict[str, Any], compose_env: dict[str, str]) -> dict[str, str]:
         environment = service_config.get("environment")
+        resolved: dict[str, str] = self._tool_runtime_environment()
         if environment is None:
-            return {}
+            return resolved
 
-        resolved: dict[str, str] = {}
         if isinstance(environment, dict):
             for key, value in environment.items():
                 if not isinstance(key, str):
@@ -877,6 +888,65 @@ class DockerService:
                 else:
                     resolved[item] = compose_env.get(item, "")
         return resolved
+
+    def _tool_runtime_environment(self) -> dict[str, str]:
+        environment: dict[str, str] = {}
+
+        mongo_uri = self._tool_runtime_mongo_uri()
+        if mongo_uri:
+            environment["MONGO_URI"] = mongo_uri
+
+        mongo_db_name = str(getattr(self._settings, "mongo_db_name", "") or "").strip()
+        if mongo_db_name:
+            environment["MONGO_DB_NAME"] = mongo_db_name
+
+        mongo_port = str(os.environ.get("MONGO_PORT", "") or "").strip()
+        if mongo_port:
+            environment["MONGO_PORT"] = mongo_port
+
+        environment["TZ"] = "Asia/Kolkata"
+
+        return environment
+
+    def _tool_runtime_mongo_uri(self) -> str:
+        raw_uri = str(getattr(self._settings, "mongo_uri", "") or "").strip()
+        if not raw_uri:
+            return ""
+
+        parsed = urlsplit(raw_uri)
+        if not parsed.scheme or parsed.scheme == "mongodb+srv":
+            return raw_uri
+
+        hostname = (parsed.hostname or "").strip().lower()
+        if hostname not in self._LOCAL_MONGO_HOSTS:
+            return raw_uri
+
+        username = parsed.username
+        password = parsed.password
+        auth = ""
+        if username is not None:
+            auth = quote(username, safe="")
+            if password is not None:
+                auth = f"{auth}:{quote(password, safe='')}"
+            auth = f"{auth}@"
+
+        host_port = str(os.environ.get("MONGO_PORT") or parsed.port or 27017)
+        netloc = f"{auth}host.docker.internal:{host_port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+    def _connect_container_to_shared_mongo_networks(self, container: Any) -> None:
+        try:
+            mongo_container = self._client.containers.get("tool-builder-mongo")
+        except (DockerException, NotFound):
+            return
+
+        networks = (((mongo_container.attrs or {}).get("NetworkSettings") or {}).get("Networks") or {})
+        for network_name in networks:
+            try:
+                network = self._client.networks.get(network_name)
+                network.connect(container)
+            except DockerException:
+                continue
 
     @staticmethod
     def _find_compose_file(root: Path) -> Path | None:

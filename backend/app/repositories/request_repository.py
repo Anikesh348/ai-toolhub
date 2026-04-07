@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -6,6 +5,7 @@ from pymongo.collection import Collection
 from pymongo import ReturnDocument
 
 from app.models.status import BuildStatus
+from app.utils.time import now_ist
 
 
 class RequestRepository:
@@ -14,7 +14,7 @@ class RequestRepository:
 
     def create(self, prompt: str) -> dict:
         request_id = uuid4().hex
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         document = {
             "_id": request_id,
             "prompt": prompt,
@@ -41,13 +41,13 @@ class RequestRepository:
             {
                 "$set": {
                     "refinedPrompt": refined_prompt,
-                    "updatedAt": datetime.now(tz=timezone.utc),
+                    "updatedAt": now_ist(),
                 }
             },
         )
 
     def prepare_for_rebuild(self, request_id: str, prompt: str) -> Optional[dict]:
-        now = datetime.now(tz=timezone.utc)
+        now = now_ist()
         updated = self._collection.find_one_and_update(
             {"_id": request_id},
             {
@@ -66,7 +66,7 @@ class RequestRepository:
     def update_status(self, request_id: str, status: BuildStatus, error: Optional[str] = None) -> None:
         update_fields: dict[str, Any] = {
             "status": status.value,
-            "updatedAt": datetime.now(tz=timezone.utc),
+            "updatedAt": now_ist(),
             "error": error,
         }
         self._collection.update_one({"_id": request_id}, {"$set": update_fields})

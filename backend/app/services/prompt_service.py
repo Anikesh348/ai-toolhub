@@ -32,6 +32,14 @@ Mandatory requirements:
 - Keep dependencies minimal and CPU/memory efficient.
 - Ensure logs are meaningful and non-verbose.
 - Avoid writing outside the current project directory.
+- When the tool includes a UI, make it feel modern, polished, and production-ready rather than barebones.
+- Default generated UIs to a dark theme unless the user explicitly requests a different visual direction.
+- Default all user-facing dates, times, schedules, and cron behavior to IST using the `Asia/Kolkata` timezone unless the user explicitly requests a different timezone.
+- Configure the generated app/runtime to honor `TZ=Asia/Kolkata` by default and keep frontend/backend time handling aligned with that timezone.
+- If the tool needs persistent application data, reuse the platform MongoDB instead of adding a separate database service.
+- Read Mongo connection settings from environment variables `MONGO_URI` and `MONGO_DB_NAME`.
+- Create tool-specific collections in that shared MongoDB for durable state (for example, a price tracker should persist prices/history/alerts in MongoDB collections).
+- Do not rely on in-memory storage or local-only files for data that must survive container reloads or crashes.
 """.strip()
         if self._should_require_web_ui(prompt):
             if self._should_use_node_frontend(prompt):
@@ -40,6 +48,7 @@ Mandatory requirements:
                     "UI requirements:\n"
                     "- Build a user-facing web UI.\n"
                     "- User explicitly asked for a JS framework; honor that request.\n"
+                    "- Use a modern dark-themed visual design unless the user explicitly requests another theme.\n"
                     "- Keep Docker build/runtime lightweight with multi-stage builds and minimal production dependencies.\n"
                     "- Keep backend service in root and preserve `GET /status` on port 3000 for platform smoke tests.\n"
                     "- In `docker-compose.yml`, include required service ports and valid YAML structure.\n"
@@ -51,6 +60,7 @@ Mandatory requirements:
                     "UI requirements:\n"
                     "- Build a user-facing web UI.\n"
                     "- Use a lightweight frontend approach (static HTML/CSS/vanilla JS) without Node build tooling.\n"
+                    "- Use a modern dark-themed visual design unless the user explicitly requests another theme.\n"
                     "- Default to a single Python service for UI + API when practical to reduce Docker build time.\n"
                     "- Serve UI from the Python app (or equivalent lightweight setup) while keeping `GET /status` on port 3000.\n"
                     "- Include docker-compose with required service ports and valid YAML structure.\n"

@@ -131,6 +131,8 @@ scripts/
 
 - MongoDB data is stored on the host using the `MONGO_DATA_DIR` and `MONGO_CONFIG_DIR` mounts.
 - That means data survives `docker compose stop`, `docker compose down`, container recreation, and host restarts as long as those paths are preserved.
+- Generated tools can reuse this same MongoDB via `MONGO_URI` and `MONGO_DB_NAME`; persistent tools should create their own collections inside the shared database instead of launching another database container.
+- Generated tool runtimes also receive `TZ=Asia/Kolkata` by default, and Tool Builder prompts instruct generated apps to keep user-facing dates, times, schedules, and cron behavior on IST unless a different timezone is explicitly requested.
 - Default paths are repo-local (`./docker-data/mongodb` and `./docker-data/mongodb-config`) so local self-hosting works out of the box.
 - If you want an Immich/Jellyfin-style external storage location, set absolute paths in `.env`, for example:
   ```bash
