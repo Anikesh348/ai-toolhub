@@ -202,6 +202,20 @@ class TestingService:
             guidance.append(
                 "If scraping/external data is used, improve extraction/parsing accuracy and handle empty/malformed upstream responses."
             )
+        if (
+            "mongoserverselectionerror" in lowered
+            or "server selection timed out" in lowered
+            or ("econnrefused" in lowered and "mongo" in lowered)
+        ):
+            guidance.append(
+                "Do not connect to Mongo synchronously at import time or in a way that crashes the server before `/status` responds."
+            )
+            guidance.append(
+                "Use bounded retry or lazy database initialization, and surface dependency issues through logs/history endpoints instead of terminating the process."
+            )
+            guidance.append(
+                "Keep persistence on the platform-provided `MONGO_URI` and `MONGO_DB_NAME`; do not replace Mongo with local files or in-memory storage."
+            )
         if "config/search consistency probe failed" in lowered:
             guidance.append(
                 "Ensure POST /api/config persists changes and subsequent /api/search reads the latest saved config."

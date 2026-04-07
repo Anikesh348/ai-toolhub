@@ -235,3 +235,15 @@ def test_preflight_validate_requires_requirement_and_test_case_artifacts(tmp_pat
     assert ok is False
     assert "Requirements summary artifact is missing" in message
     assert "Test cases artifact is missing" in message
+
+
+def test_build_fix_guidance_handles_mongo_startup_crash() -> None:
+    service, _docker_service = _build_service(tmp_path=Path("/tmp"))
+
+    guidance = service.build_fix_guidance(
+        "Smoke test failed.\nMongoServerSelectionError: Server selection timed out after 5000 ms\nconnect ECONNREFUSED"
+    )
+
+    assert "Do not connect to Mongo synchronously" in guidance
+    assert "bounded retry or lazy database initialization" in guidance
+    assert "`MONGO_URI` and `MONGO_DB_NAME`" in guidance

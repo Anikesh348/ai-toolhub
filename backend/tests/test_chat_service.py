@@ -202,6 +202,36 @@ def test_build_tool_initial_prompt_defaults_ui_to_dark_theme() -> None:
     assert "TZ=Asia/Kolkata" in prompt
 
 
+def test_build_tool_initial_prompt_requires_python_pytest_and_mongo_contract() -> None:
+    prompt = ChatService._build_tool_initial_prompt("Build a movie alert tool.")
+
+    assert "Use Python 3.11." in prompt
+    assert "Include `requirements.txt`." in prompt
+    assert "python -m pytest -q" in prompt
+    assert "Place tests in `tests/`" in prompt
+    assert "`MONGO_URI` and `MONGO_DB_NAME`" in prompt
+    assert "do not crash the HTTP server" in prompt
+
+
+def test_build_tool_modification_prompt_preserves_runtime_contracts() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    prompt = service._build_tool_modification_prompt(
+        user_content="Add delete support.",
+        tool=None,
+        request_state=None,
+    )
+
+    assert "requirements.txt" in prompt
+    assert "python -m pytest -q" in prompt
+    assert "`MONGO_URI` and `MONGO_DB_NAME`" in prompt
+    assert "Do not let synchronous Mongo startup failures crash the HTTP server" in prompt
+
+
 def test_tool_builder_clarification_targets_live_movie_alert_gaps() -> None:
     clarification = ChatService._build_tool_builder_clarification(
         "Build a tool that tracks movie show availability in Chennai and Bangalore and sends alerts."

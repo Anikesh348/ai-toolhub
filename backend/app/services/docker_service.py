@@ -52,6 +52,8 @@ class DockerService:
     _COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-(.*?))?}")
     _CONTAINER_EXTRA_HOSTS = {"host.docker.internal": "host-gateway"}
     _LOCAL_MONGO_HOSTS = {"mongo", "localhost", "127.0.0.1"}
+    _SHARED_MONGO_CONTAINER_NAME = "tool-builder-mongo"
+    _SHARED_MONGO_RUNTIME_HOST = "tool-builder-mongo"
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -553,6 +555,10 @@ class DockerService:
             "tool.id": tool_id,
             "tool.request_id": request_id,
         }
+        mongo_network_name = self._shared_mongo_network_name()
+        run_kwargs: dict[str, Any] = {}
+        if mongo_network_name:
+            run_kwargs["network"] = mongo_network_name
         try:
             # Remove an existing container with the same name to avoid naming collisions.
             try:
@@ -576,8 +582,12 @@ class DockerService:
                 nano_cpus=self._to_nano_cpus(self._settings.tool_cpu_limit),
                 restart_policy={"Name": "unless-stopped"},
                 labels=labels,
+                **run_kwargs,
             )
-            self._connect_container_to_shared_mongo_networks(container)
+            self._connect_container_to_shared_mongo_networks(
+                container,
+                skip_networks={mongo_network_name} if mongo_network_name else None,
+            )
             return True, container.id, ""
         except DockerException as exc:
             return False, None, str(exc)
@@ -593,6 +603,10 @@ class DockerService:
         labels: dict[str, str] = {"tool.runtime": "probe"}
         if request_id:
             labels["tool.request_id"] = request_id
+        mongo_network_name = self._shared_mongo_network_name()
+        run_kwargs: dict[str, Any] = {}
+        if mongo_network_name:
+            run_kwargs["network"] = mongo_network_name
         try:
             try:
                 existing = self._client.containers.get(probe_name)
@@ -610,8 +624,12 @@ class DockerService:
                 mem_limit=self._settings.tool_memory_limit,
                 nano_cpus=self._to_nano_cpus(self._settings.tool_cpu_limit),
                 labels=labels,
+                **run_kwargs,
             )
-            self._connect_container_to_shared_mongo_networks(container)
+            self._connect_container_to_shared_mongo_networks(
+                container,
+                skip_networks={mongo_network_name} if mongo_network_name else None,
+            )
             return True, container.id, ""
         except DockerException as exc:
             return False, None, str(exc)
@@ -744,6 +762,10 @@ class DockerService:
 
         try:
             ordered_services = self._order_services(service_names=service_names, compose_services=compose_services)
+            mongo_network_name = self._shared_mongo_network_name()
+            run_kwargs: dict[str, Any] = {}
+            if mongo_network_name:
+                run_kwargs["network"] = mongo_network_name
             for service_name in ordered_services:
                 service_config = compose_services[service_name]
                 if not isinstance(service_config, dict):
@@ -792,10 +814,14 @@ class DockerService:
                     mem_limit=self._settings.tool_memory_limit,
                     nano_cpus=self._to_nano_cpus(self._settings.tool_cpu_limit),
                     restart_policy={"Name": "unless-stopped"},
+                    **run_kwargs,
                 )
                 runtime_network = self._client.networks.get(project_name)
                 runtime_network.connect(container, aliases=[service_name])
-                self._connect_container_to_shared_mongo_networks(container)
+                self._connect_container_to_shared_mongo_networks(
+                    container,
+                    skip_networks={mongo_network_name} if mongo_network_name else None,
+                )
                 created_container_ids.append(container.id)
         except DockerException as exc:
             self._stop_compose_project(project_name)
@@ -930,18 +956,37 @@ class DockerService:
                 auth = f"{auth}:{quote(password, safe='')}"
             auth = f"{auth}@"
 
-        host_port = str(os.environ.get("MONGO_PORT") or parsed.port or 27017)
-        netloc = f"{auth}host.docker.internal:{host_port}"
+        if hostname == "mongo":
+            host_port = str(parsed.port or 27017)
+            netloc = f"{auth}{self._SHARED_MONGO_RUNTIME_HOST}:{host_port}"
+        else:
+            host_port = str(os.environ.get("MONGO_PORT") or parsed.port or 27017)
+            netloc = f"{auth}host.docker.internal:{host_port}"
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
-    def _connect_container_to_shared_mongo_networks(self, container: Any) -> None:
+    def _shared_mongo_network_name(self) -> str | None:
+        network_names = self._shared_mongo_network_names()
+        return network_names[0] if network_names else None
+
+    def _shared_mongo_network_names(self) -> list[str]:
         try:
-            mongo_container = self._client.containers.get("tool-builder-mongo")
+            mongo_container = self._client.containers.get(self._SHARED_MONGO_CONTAINER_NAME)
         except (DockerException, NotFound):
-            return
+            return []
 
         networks = (((mongo_container.attrs or {}).get("NetworkSettings") or {}).get("Networks") or {})
+        return [network_name for network_name in networks if isinstance(network_name, str) and network_name]
+
+    def _connect_container_to_shared_mongo_networks(
+        self,
+        container: Any,
+        skip_networks: set[str] | None = None,
+    ) -> None:
+        skipped = skip_networks or set()
+        networks = self._shared_mongo_network_names()
         for network_name in networks:
+            if network_name in skipped:
+                continue
             try:
                 network = self._client.networks.get(network_name)
                 network.connect(container)
