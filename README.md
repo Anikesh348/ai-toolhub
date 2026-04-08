@@ -126,6 +126,11 @@ scripts/
 11. Optional reliability tuning:
    - `API_VERIFICATION_MAX_CALLS`, `API_VERIFICATION_TIMEOUT_SECONDS` (controls endpoint probe breadth/cost).
    - `SCRAPING_WEB_VERIFY_ENABLED`, `SCRAPING_WEB_VERIFY_TIMEOUT_SECONDS` (controls scrape/web cross-check behavior).
+12. Optional INR conversion tuning for chat usage estimates:
+   - `USD_INR_RATE_API_URL` (exchange-rate endpoint used for live USD->INR conversion, default `https://open.er-api.com/v6/latest/USD`).
+   - `USD_INR_RATE_TIMEOUT_SECONDS` (HTTP timeout for FX lookup, default `4.0`).
+   - `USD_INR_RATE_CACHE_TTL_SECONDS` (seconds to reuse cached live rate before refreshing, default `1800`).
+   - `USD_INR_RATE_FALLBACK` (fallback USD->INR value when live fetch is unavailable, default `83.0`).
 
 ## Database Persistence
 

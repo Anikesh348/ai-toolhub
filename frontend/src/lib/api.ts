@@ -237,6 +237,61 @@ export type ChatAttachment = {
   url: string;
 };
 
+export type ChatExecutionLog = {
+  id: string;
+  sessionId: string;
+  mode: ChatMode;
+  model: string | null;
+  userMessageId: string | null;
+  assistantMessageId: string | null;
+  userContent: string;
+  assistantContent: string;
+  rawLogs: string;
+  success: boolean;
+  exitCode: number;
+  quickPath: boolean;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number;
+  tokenSource: "parsed" | "estimated" | "mixed";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ChatUsageMode = {
+  mode: ChatMode;
+  requestCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  parsedCount: number;
+  estimatedCount: number;
+  mixedCount: number;
+};
+
+export type ChatUsageCostEstimate = {
+  usd: number;
+  inr: number;
+  usdPerMillionTokens: number;
+  usdToInrRate: number;
+  usdToInrSource: string;
+  usdToInrLive: boolean;
+  usdToInrUpdatedAt: string | null;
+  note: string;
+};
+
+export type ChatUsageSummary = {
+  requestCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  parsedCount: number;
+  estimatedCount: number;
+  mixedCount: number;
+  modes: ChatUsageMode[];
+  costEstimate: ChatUsageCostEstimate;
+};
+
 function normalizePublicBaseUrl(value: string | undefined, fallback: string): string {
   const cleaned = (value || "").trim();
   if (!cleaned) {
@@ -445,6 +500,10 @@ export function buildJobLogArtifactDownloadUrl(jobId: string, artifactId: string
   return `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/log-artifacts/${encodeURIComponent(artifactId)}/download`;
 }
 
+export function buildJobLogArtifactViewUrl(jobId: string, artifactId: string): string {
+  return `${API_BASE_URL}/jobs/${encodeURIComponent(jobId)}/log-artifacts/${encodeURIComponent(artifactId)}/view`;
+}
+
 export async function deleteJob(jobId: string): Promise<DeleteJobResponse> {
   const response = await fetch(`${API_BASE_URL}/jobs/${jobId}`, {
     method: "DELETE"
@@ -618,6 +677,53 @@ export async function fetchChatSessions(): Promise<ChatSession[]> {
     throw new Error(`Unable to fetch chats: ${response.status}`);
   }
   return (await response.json()) as ChatSession[];
+}
+
+export async function fetchChatExecutionLogs(options?: {
+  limit?: number;
+  sessionId?: string | null;
+  modes?: ChatMode[];
+}): Promise<ChatExecutionLog[]> {
+  const params = new URLSearchParams();
+  const normalizedLimit = Math.max(1, Math.min(1000, Math.round(options?.limit ?? 200)));
+  params.set("limit", String(normalizedLimit));
+  if (options?.sessionId) {
+    params.set("sessionId", options.sessionId);
+  }
+  for (const mode of options?.modes ?? []) {
+    params.append("mode", mode);
+  }
+
+  const response = await fetch(`${API_BASE_URL}/chat/logs?${params.toString()}`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch chat logs: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ChatExecutionLog[];
+}
+
+export async function fetchChatUsageSummary(options?: {
+  sessionId?: string | null;
+  modes?: ChatMode[];
+}): Promise<ChatUsageSummary> {
+  const params = new URLSearchParams();
+  if (options?.sessionId) {
+    params.set("sessionId", options.sessionId);
+  }
+  for (const mode of options?.modes ?? []) {
+    params.append("mode", mode);
+  }
+
+  const query = params.toString();
+  const response = await fetch(
+    `${API_BASE_URL}/chat/usage${query ? `?${query}` : ""}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch chat usage summary: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ChatUsageSummary;
 }
 
 export async function fetchChatModels(): Promise<ChatModelsResponse> {

@@ -130,6 +130,10 @@ class Settings(BaseSettings):
 
     tool_frontend_base_url: str = Field(default="http://localhost", alias="TOOL_FRONTEND_BASE_URL")
     tool_backend_base_url: str = Field(default="http://localhost", alias="TOOL_BACKEND_BASE_URL")
+    usd_inr_rate_api_url: str = Field(default="https://open.er-api.com/v6/latest/USD", alias="USD_INR_RATE_API_URL")
+    usd_inr_rate_timeout_seconds: float = Field(default=4.0, alias="USD_INR_RATE_TIMEOUT_SECONDS")
+    usd_inr_rate_cache_ttl_seconds: int = Field(default=1800, alias="USD_INR_RATE_CACHE_TTL_SECONDS")
+    usd_inr_rate_fallback: float = Field(default=83.0, alias="USD_INR_RATE_FALLBACK")
     instagram_browser_image: str = Field(
         default="lscr.io/linuxserver/chromium:latest",
         alias="INSTAGRAM_BROWSER_IMAGE",

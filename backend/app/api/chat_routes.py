@@ -6,7 +6,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.schemas import (
     ChatAttachmentResponse,
+    ChatExecutionLogResponse,
+    ChatUsageSummaryResponse,
     ChatMessageResponse,
+    ChatMode,
     ChatModelsResponse,
     ChatSessionResponse,
     CreateChatMessageRequest,
@@ -98,6 +101,27 @@ def list_chat_models(
 ) -> ChatModelsResponse:
     models = service.list_models()
     return ChatModelsResponse(**models)
+
+
+@router.get("/logs", response_model=list[ChatExecutionLogResponse])
+def list_chat_execution_logs(
+    limit: int = Query(default=200, ge=1, le=1000),
+    session_id: str | None = Query(default=None, alias="sessionId"),
+    mode: list[ChatMode] | None = Query(default=None),
+    service: ChatService = Depends(get_chat_service),
+) -> list[ChatExecutionLogResponse]:
+    logs = service.list_execution_logs(limit=limit, session_id=session_id, modes=list(mode or []))
+    return [ChatExecutionLogResponse(**item) for item in logs]
+
+
+@router.get("/usage", response_model=ChatUsageSummaryResponse)
+def summarize_chat_usage(
+    session_id: str | None = Query(default=None, alias="sessionId"),
+    mode: list[ChatMode] | None = Query(default=None),
+    service: ChatService = Depends(get_chat_service),
+) -> ChatUsageSummaryResponse:
+    summary = service.summarize_usage(session_id=session_id, modes=list(mode or []))
+    return ChatUsageSummaryResponse(**summary)
 
 
 @router.post("/sessions/{session_id}/attachments", response_model=ChatAttachmentResponse, status_code=status.HTTP_201_CREATED)

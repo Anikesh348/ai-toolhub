@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth, useClerk, useUser } from "@clerk/clerk-react";
+import { useNavigate } from "react-router-dom";
 
 import {
+  ChatExecutionLog,
+  ChatUsageSummary,
   currentIstTimestamp,
   CodexAuthStatus,
   CodexLoginStreamEvent,
+  fetchChatExecutionLogs,
+  fetchChatUsageSummary,
   fetchCodexAuthStatus,
   fetchGitSshPublicKey,
   formatDate,
@@ -23,6 +28,7 @@ import {
 const GIT_SSH_HOST_STORAGE_KEY = "toolhub.git.ssh.host";
 const GIT_SSH_USERNAME_STORAGE_KEY = "toolhub.git.ssh.username";
 const GIT_SSH_VERIFICATION_STORAGE_KEY = "toolhub.git.ssh.verification";
+const INTEGER_FORMATTER = new Intl.NumberFormat("en-IN");
 const THINKING_PANEL_OPTIONS: Array<{
   value: ThinkingPanelMode;
   label: string;
@@ -45,7 +51,26 @@ const THINKING_PANEL_OPTIONS: Array<{
   }
 ];
 
+function formatCount(value: number | null | undefined): string {
+  return INTEGER_FORMATTER.format(Math.max(0, Math.round(value || 0)));
+}
+
+function formatUsd(value: number): string {
+  if (value < 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  return `$${value.toFixed(2)}`;
+}
+
+function formatInr(value: number): string {
+  if (value < 1) {
+    return `₹${value.toFixed(2)}`;
+  }
+  return `₹${INTEGER_FORMATTER.format(Number(value.toFixed(0)))}`;
+}
+
 export default function AccountPage() {
+  const navigate = useNavigate();
   const { isLoaded: googleLoaded, isSignedIn } = useAuth();
   const { user } = useUser();
   const { signOut } = useClerk();
@@ -64,6 +89,10 @@ export default function AccountPage() {
   const [gitVerifying, setGitVerifying] = useState(false);
   const [gitVerification, setGitVerification] = useState<GitSshVerification | null>(null);
   const [gitVerificationCheckedAt, setGitVerificationCheckedAt] = useState<string | null>(null);
+  const [chatLogs, setChatLogs] = useState<ChatExecutionLog[]>([]);
+  const [chatUsage, setChatUsage] = useState<ChatUsageSummary | null>(null);
+  const [chatLogsLoading, setChatLogsLoading] = useState(false);
+  const [activeChatLog, setActiveChatLog] = useState<ChatExecutionLog | null>(null);
   const [thinkingPanelMode, setThinkingPanelMode] = useState<ThinkingPanelMode>("none");
   const [error, setError] = useState<string | null>(null);
 
@@ -127,6 +156,10 @@ export default function AccountPage() {
     return `${words[0][0]}${words[1][0]}`.toUpperCase();
   }, [profileName]);
 
+  const chatUsageModes = useMemo(() => {
+    return [...(chatUsage?.modes ?? [])].sort((lhs, rhs) => rhs.totalTokens - lhs.totalTokens);
+  }, [chatUsage]);
+
   async function loadAuthStatus(): Promise<void> {
     setLoadingAuth(true);
     try {
@@ -149,6 +182,22 @@ export default function AccountPage() {
       setError(loadError instanceof Error ? loadError.message : "Unable to load Git SSH key");
     } finally {
       setLoadingGitSshKey(false);
+    }
+  }
+
+  async function loadChatLogs(): Promise<void> {
+    setChatLogsLoading(true);
+    try {
+      const [logs, usage] = await Promise.all([
+        fetchChatExecutionLogs({ limit: 300, modes: ["general", "operator", "tool_builder"] }),
+        fetchChatUsageSummary({ modes: ["general", "operator", "tool_builder"] })
+      ]);
+      setChatLogs(logs);
+      setChatUsage(usage);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load chat logs");
+    } finally {
+      setChatLogsLoading(false);
     }
   }
 
@@ -178,6 +227,7 @@ export default function AccountPage() {
 
     void loadAuthStatus();
     void loadGitSshKey();
+    void loadChatLogs();
   }, []);
 
   useEffect(() => {
@@ -309,6 +359,10 @@ export default function AccountPage() {
     setError(null);
     setThinkingPanelMode(mode);
     saveThinkingPanelMode(mode);
+  }
+
+  function openChatFromLog(sessionId: string): void {
+    navigate(`/chat?chatId=${sessionId}`);
   }
 
   return (
@@ -497,6 +551,129 @@ export default function AccountPage() {
         </section>
       )}
 
+      <section className="border border-amber/20 bg-black/45 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-[color:var(--text-main)]">Chat Query Logs</p>
+            <p className="mt-1 text-xs text-muted">
+              Token usage is tracked across General, Operator, and Tool Builder modes.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadChatLogs()}
+            disabled={chatLogsLoading}
+            className="btn-ghost border-amber/35 bg-black/35 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {chatLogsLoading ? "Refreshing..." : "Refresh Logs"}
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <article className="border border-amber/14 bg-black/35 px-3 py-3">
+            <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Total Tokens</p>
+            <p className="mt-1 text-lg font-semibold text-[color:var(--text-main)]">{formatCount(chatUsage?.totalTokens)}</p>
+            <p className="mt-1 text-[11px] text-muted">{formatCount(chatUsage?.requestCount)} tracked chat runs</p>
+          </article>
+          <article className="border border-amber/14 bg-black/35 px-3 py-3">
+            <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Prompt / Completion</p>
+            <p className="mt-1 text-sm font-medium text-[color:var(--text-main)]">
+              {formatCount(chatUsage?.promptTokens)} / {formatCount(chatUsage?.completionTokens)}
+            </p>
+            <p className="mt-1 text-[11px] text-muted">
+              Parsed: {formatCount(chatUsage?.parsedCount)} | Mixed: {formatCount(chatUsage?.mixedCount)}
+            </p>
+          </article>
+          <article className="border border-amber/14 bg-black/35 px-3 py-3">
+            <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Est. Cost (USD)</p>
+            <p className="mt-1 text-lg font-semibold text-[color:var(--text-main)]">
+              {formatUsd(chatUsage?.costEstimate.usd ?? 0)}
+            </p>
+            <p className="mt-1 text-[11px] text-muted">Token-based estimate only</p>
+          </article>
+          <article className="border border-amber/14 bg-black/35 px-3 py-3">
+            <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Est. Cost (INR)</p>
+            <p className="mt-1 text-lg font-semibold text-[color:var(--text-main)]">
+              {formatInr(chatUsage?.costEstimate.inr ?? 0)}
+            </p>
+            <p className="mt-1 text-[11px] text-muted">
+              {chatUsage
+                ? `$${chatUsage.costEstimate.usdPerMillionTokens}/1M @ ₹${chatUsage.costEstimate.usdToInrRate.toFixed(2)}/USD`
+                : "Awaiting usage data"}
+            </p>
+            <p className="mt-1 text-[11px] text-muted">
+              {chatUsage
+                ? chatUsage.costEstimate.note
+                : "Live INR conversion will appear once usage is available."}
+            </p>
+          </article>
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          {chatUsageModes.length === 0 ? (
+            <span className="rounded-full border border-amber/15 bg-black/30 px-3 py-1 text-[11px] text-muted">
+              No mode usage yet
+            </span>
+          ) : (
+            chatUsageModes.map((modeSummary) => (
+              <span
+                key={modeSummary.mode}
+                className="rounded-full border border-amber/18 bg-black/30 px-3 py-1 text-[11px] text-muted"
+              >
+                {modeSummary.mode}: {formatCount(modeSummary.totalTokens)} tokens ({formatCount(modeSummary.requestCount)} runs)
+              </span>
+            ))
+          )}
+        </div>
+
+        <div className="mt-4 max-h-[24rem] overflow-auto border border-amber/14 bg-black/30">
+          {chatLogs.length === 0 ? (
+            <div className="px-4 py-5 text-sm text-muted">
+              {chatLogsLoading ? "Loading chat logs..." : "No chat logs captured yet."}
+            </div>
+          ) : (
+            <div className="divide-y divide-amber/12">
+              {chatLogs.map((log) => (
+                <article key={log.id} className="px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="rounded-full bg-black/45 px-2 py-1 font-[var(--font-mono)] text-amber">
+                        {log.mode}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => openChatFromLog(log.sessionId)}
+                        className="font-[var(--font-mono)] text-skyline underline underline-offset-2"
+                      >
+                        chat:{log.sessionId.slice(0, 8)}
+                      </button>
+                      <span className="text-muted">{formatDate(log.createdAt)}</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`rounded-full px-2 py-1 text-[11px] ${log.success ? "bg-mint/20 text-mint" : "bg-coral/15 text-coral"}`}>
+                        {log.success ? "success" : `exit ${log.exitCode}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveChatLog(log)}
+                        className="btn-ghost border-skyline/45 bg-skyline/10 px-3 py-1.5 text-xs text-skyline"
+                      >
+                        View Logs
+                      </button>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-xs text-muted">Q: {log.userContent || "(empty query)"}</p>
+                  <p className="mt-1 text-xs text-muted">A: {log.assistantContent || "(empty response)"}</p>
+                  <p className="mt-1 text-xs text-muted">
+                    Tokens: {formatCount(log.totalTokens)} ({log.tokenSource})
+                  </p>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
       {error && <p className="border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
 
       <section className="border border-amber/20 bg-black/45 p-5">
@@ -530,6 +707,60 @@ export default function AccountPage() {
           })}
         </div>
       </section>
+
+      {activeChatLog && (
+        <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 backdrop-blur-sm md:items-center md:px-4 md:py-6">
+          <button
+            type="button"
+            aria-label="Close chat log panel"
+            onClick={() => setActiveChatLog(null)}
+            className="absolute inset-0"
+          />
+          <div className="relative z-[71] my-auto flex w-full max-w-4xl flex-col overflow-hidden border border-amber/20 bg-[#11100d] max-md:min-h-[calc(100dvh-1.5rem)] max-md:max-h-[calc(100dvh-1.5rem)] md:max-h-[calc(100dvh-3rem)]">
+            <div className="shrink-0 border-b border-amber/15 px-4 py-4 md:px-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">Chat Execution Log</p>
+                  <p className="mt-1 text-sm text-[color:var(--text-main)]">
+                    chat:{activeChatLog.sessionId} • {activeChatLog.mode} • {formatDate(activeChatLog.createdAt)}
+                  </p>
+                  <p className="mt-1 text-[11px] text-muted">
+                    Tokens: {formatCount(activeChatLog.totalTokens)} ({activeChatLog.tokenSource})
+                    {activeChatLog.promptTokens !== null && activeChatLog.completionTokens !== null
+                      ? ` • prompt ${formatCount(activeChatLog.promptTokens)} / completion ${formatCount(activeChatLog.completionTokens)}`
+                      : ""}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveChatLog(null)}
+                  className="flex h-9 w-9 items-center justify-center border border-white/10 bg-black/35 text-muted transition hover:border-amber/35 hover:text-[color:var(--text-main)]"
+                >
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M6 6l12 12" />
+                    <path d="M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-5 md:py-5">
+              <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Query</p>
+              <pre className="mt-2 whitespace-pre-wrap border border-amber/14 bg-black/25 p-3 font-[var(--font-mono)] text-[12px] leading-5 text-[color:var(--text-main)]">
+                {activeChatLog.userContent || "(empty query)"}
+              </pre>
+              <p className="mt-4 text-[11px] uppercase tracking-[0.14em] text-muted">Response</p>
+              <pre className="mt-2 whitespace-pre-wrap border border-amber/14 bg-black/25 p-3 font-[var(--font-mono)] text-[12px] leading-5 text-[color:var(--text-main)]">
+                {activeChatLog.assistantContent || "(empty response)"}
+              </pre>
+              <p className="mt-4 text-[11px] uppercase tracking-[0.14em] text-muted">Raw Model Logs</p>
+              <pre className="mt-2 max-h-[24rem] overflow-auto whitespace-pre-wrap border border-amber/14 bg-black/25 p-3 font-[var(--font-mono)] text-[12px] leading-5 text-[color:var(--text-main)]">
+                {activeChatLog.rawLogs || "(no raw logs captured for this quick response path)"}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

@@ -88,6 +88,52 @@ def test_effective_request_context_prompt_preserves_original_request_and_changes
     assert "Latest user request:" in prompt
 
 
+def test_workflow_records_agent_handoff_artifacts() -> None:
+    settings = SimpleNamespace(
+        max_build_attempts=1,
+        smoke_test_host="127.0.0.1",
+        scraping_web_verify_timeout_seconds=30,
+        tool_builder_model="gpt-5.3-codex",
+    )
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "req-agents",
+        "prompt": "Build a movie alert tool",
+        "status": BuildStatus.PENDING.value,
+    }
+    prompt_service = Mock()
+    prompt_service.refine_prompt.return_value = "refined prompt"
+    codex_service = Mock()
+    codex_service.run_generation.return_value = CommandResult(success=False, exit_code=1, logs="generation failed")
+    codex_service.clean_cli_output.return_value = "generation failed"
+    build_log_artifact_repository = Mock()
+
+    workflow = ToolBuildWorkflow(
+        settings=settings,  # type: ignore[arg-type]
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=build_log_artifact_repository,  # type: ignore[arg-type]
+        tool_repository=Mock(),  # type: ignore[arg-type]
+        prompt_service=prompt_service,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        testing_service=Mock(),  # type: ignore[arg-type]
+        docker_service=Mock(),  # type: ignore[arg-type]
+        port_allocator_service=Mock(),  # type: ignore[arg-type]
+        alert_service=Mock(),  # type: ignore[arg-type]
+    )
+
+    workflow._run(request_id="req-agents", tool_name_hint=None)  # pylint: disable=protected-access
+
+    recorded_steps = [call.kwargs["step"] for call in build_log_artifact_repository.add_artifact.call_args_list]
+    assert "agent_visionary" in recorded_steps
+    assert "agent_blueprint" in recorded_steps
+    assert "agent_backend_engineer" in recorded_steps
+    assert "agent_frontend_engineer" in recorded_steps
+    assert "agent_guardian" in recorded_steps
+    assert "agent_shipmaster" in recorded_steps
+    assert "agent_craftsman_input" in recorded_steps
+
+
 def test_workflow_uses_default_tool_builder_model_for_generation() -> None:
     settings = SimpleNamespace(
         max_build_attempts=1,
@@ -132,6 +178,50 @@ def test_workflow_uses_default_tool_builder_model_for_generation() -> None:
         content="generation failed",
         content_type="text/plain; charset=utf-8",
     )
+
+
+def test_workflow_forwards_image_paths_to_generation_attempts() -> None:
+    settings = SimpleNamespace(
+        max_build_attempts=1,
+        smoke_test_host="127.0.0.1",
+        scraping_web_verify_timeout_seconds=30,
+        tool_builder_model="gpt-5.3-codex",
+    )
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "req-images",
+        "prompt": "Build a dashboard",
+        "status": BuildStatus.PENDING.value,
+    }
+    prompt_service = Mock()
+    prompt_service.refine_prompt.return_value = "refined prompt"
+    codex_service = Mock()
+    codex_service.run_generation.return_value = CommandResult(success=False, exit_code=1, logs="generation failed")
+    codex_service.clean_cli_output.return_value = "generation failed"
+
+    workflow = ToolBuildWorkflow(
+        settings=settings,  # type: ignore[arg-type]
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
+        tool_repository=Mock(),  # type: ignore[arg-type]
+        prompt_service=prompt_service,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        testing_service=Mock(),  # type: ignore[arg-type]
+        docker_service=Mock(),  # type: ignore[arg-type]
+        port_allocator_service=Mock(),  # type: ignore[arg-type]
+        alert_service=Mock(),  # type: ignore[arg-type]
+    )
+
+    workflow._run(  # pylint: disable=protected-access
+        request_id="req-images",
+        tool_name_hint=None,
+        image_paths=["/workspace/chat-session/attachments/reference-ui.png"],
+    )
+
+    assert codex_service.run_generation.call_args.kwargs["image_paths"] == [
+        "/workspace/chat-session/attachments/reference-ui.png"
+    ]
 
 
 def test_workflow_skips_prompt_refinement_when_prompt_is_already_refined() -> None:

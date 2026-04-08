@@ -23,7 +23,13 @@ class CodexService:
         self._settings = settings
         self._docker_service = docker_service
 
-    def run_generation(self, request_id: str, prompt: str, model: str | None = None) -> CommandResult:
+    def run_generation(
+        self,
+        request_id: str,
+        prompt: str,
+        model: str | None = None,
+        image_paths: list[str] | None = None,
+    ) -> CommandResult:
         host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
         prompt_file_host = host_job_path / "prompt.txt"
         prompt_file_host.write_text(prompt, encoding="utf-8")
@@ -36,6 +42,7 @@ class CodexService:
             request_id=request_id,
         )
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
+        shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
         return self._docker_service.run_builder_container(
             request_id=request_id,
             shell_command=shell_command,
@@ -188,6 +195,7 @@ class CodexService:
         container_cwd: str,
         extra_volumes: dict[str, dict[str, str]],
         timeout_seconds: int | None = None,
+        model: str | None = None,
     ) -> CommandResult:
         request_id = f"chat-{session_id}"
         host_job_path, _ = self._docker_service.ensure_job_workspace(request_id)
@@ -200,6 +208,7 @@ class CodexService:
             "codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "
             f"\"$(cat {prompt_file_container})\""
         )
+        shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         return self._docker_service.run_builder_container_with_options(
             request_id=request_id,
             shell_command=shell_command,

@@ -2,9 +2,12 @@ import json
 import mimetypes
 import re
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+import requests
+from app.repositories.chat_execution_log_repository import ChatExecutionLogRepository
 from app.repositories.chat_message_repository import ChatMessageRepository
 from app.repositories.chat_session_repository import ChatSessionRepository
 from app.services.codex_service import CodexService
@@ -13,6 +16,7 @@ from app.services.operator_access_service import OperatorAccessService
 from app.services.system_context_service import SystemContextService
 from app.services.tool_builder_service import ToolBuilderService
 from app.utils.logger import get_logger
+from app.utils.time import now_ist
 
 CHAT_MODES = {"general", "tool_builder", "operator", "pi_operator"}
 MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024
@@ -22,6 +26,17 @@ MAX_MESSAGE_ATTACHMENTS = 4
 class ChatService:
     _FRONTEND_SERVICE_HINTS = ("frontend", "web", "ui", "client", "dashboard", "site", "next", "vite")
     _BACKEND_SERVICE_HINTS = ("backend", "api", "server", "worker", "gateway", "graphql", "rest")
+    _FAST_OPERATOR_MODEL_CANDIDATES = ("gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex-mini")
+    _CHAT_EXECUTION_LOG_LIMIT = 200_000
+    _TOKEN_SOURCE_PARSED = "parsed"
+    _TOKEN_SOURCE_ESTIMATED = "estimated"
+    _TOKEN_SOURCE_MIXED = "mixed"
+    _ESTIMATED_USD_PER_1M_TOKENS = 2.0
+    _ESTIMATED_USD_TO_INR_RATE = 83.0
+    _USD_INR_SOURCE_LIVE_API = "live_api"
+    _USD_INR_SOURCE_LIVE_CACHE = "live_cache"
+    _USD_INR_SOURCE_CACHE_STALE = "cache_stale"
+    _USD_INR_SOURCE_FALLBACK_DEFAULT = "fallback_default"
 
     def __init__(
         self,
@@ -32,8 +47,13 @@ class ChatService:
         operator_access_service: OperatorAccessService | None = None,
         system_context_service: SystemContextService | None = None,
         tool_builder_service: ToolBuilderService | None = None,
+        chat_execution_log_repository: ChatExecutionLogRepository | None = None,
         tool_frontend_base_url: str = "http://localhost",
         tool_backend_base_url: str = "http://localhost",
+        usd_inr_rate_api_url: str = "https://open.er-api.com/v6/latest/USD",
+        usd_inr_rate_timeout_seconds: float = 4.0,
+        usd_inr_rate_cache_ttl_seconds: int = 1800,
+        usd_inr_rate_fallback: float = _ESTIMATED_USD_TO_INR_RATE,
     ) -> None:
         self._session_repository = session_repository
         self._message_repository = message_repository
@@ -42,11 +62,19 @@ class ChatService:
         self._operator_access_service = operator_access_service
         self._system_context_service = system_context_service
         self._tool_builder_service = tool_builder_service
+        self._chat_execution_log_repository = chat_execution_log_repository
         self._tool_frontend_base_url = self._normalize_runtime_base_url(tool_frontend_base_url)
         self._tool_backend_base_url = self._normalize_runtime_base_url(tool_backend_base_url)
+        self._usd_inr_rate_api_url = (usd_inr_rate_api_url or "").strip()
+        self._usd_inr_rate_timeout_seconds = max(float(usd_inr_rate_timeout_seconds or 0), 0.5)
+        self._usd_inr_rate_cache_ttl_seconds = max(int(usd_inr_rate_cache_ttl_seconds or 0), 30)
+        self._usd_inr_rate_fallback = max(float(usd_inr_rate_fallback or self._ESTIMATED_USD_TO_INR_RATE), 0.01)
         self._logger = get_logger(__name__)
         self._cancelled_stream_sessions: set[str] = set()
         self._cancelled_stream_lock = threading.Lock()
+        self._usd_inr_rate_lock = threading.Lock()
+        self._usd_inr_rate_cached_value: float | None = None
+        self._usd_inr_rate_cached_at: datetime | None = None
 
     def create_session(self, title: str | None, mode: str, model: str | None = None) -> dict:
         normalized_mode = self._normalize_mode(mode)
@@ -105,29 +133,41 @@ class ChatService:
             or self._resolve_model(model=session.get("model"), fallback_to_default=False)
             or self._resolve_model(model=None, fallback_to_default=True)
         )
+        normalized_mode = self._normalize_mode(session["mode"])
         image_paths = [str(item.get("containerPath")) for item in attachments if item.get("containerPath")]
         prompt = self._build_chat_prompt(
-            mode=self._normalize_mode(session["mode"]),
+            mode=normalized_mode,
             messages=recent_messages,
         )
-        quick_answer = self._try_direct_operator_answer(
-            mode=self._normalize_mode(session["mode"]),
-            user_content=content,
-        )
+        quick_answer = None
+        if self._should_use_operator_quick_reply(mode=normalized_mode, user_content=content):
+            quick_answer = self._try_direct_operator_answer(
+                mode=normalized_mode,
+                user_content=content,
+            )
         assistant_metadata: dict[str, Any] = {}
+        raw_execution_logs = ""
+        quick_path = quick_answer is not None
         if quick_answer is not None:
             assistant_text = quick_answer
             success = True
             exit_code = 0
-        elif self._normalize_mode(session["mode"]) == "operator":
-            assistant_text = self._run_operator_task(session_id=session_id, user_content=content)
-            success = True
-            exit_code = 0
-        elif self._normalize_mode(session["mode"]) == "tool_builder":
+        elif normalized_mode == "operator":
+            operator_result = self._run_operator_task(
+                session_id=session_id,
+                user_content=content,
+                selected_model=selected_model,
+            )
+            assistant_text = str(operator_result.get("assistantText") or "")
+            success = bool(operator_result.get("success", False))
+            exit_code = int(operator_result.get("exitCode", 1))
+            raw_execution_logs = str(operator_result.get("rawLogs") or "")
+        elif normalized_mode == "tool_builder":
             assistant_text, tool_builder_context = self._run_tool_builder_task(
                 session_id=session_id,
                 user_content=content,
                 selected_model=selected_model,
+                attachments=attachments,
             )
             success = True
             exit_code = 0
@@ -143,6 +183,7 @@ class ChatService:
             assistant_text = self._build_assistant_text(completion.logs, completion.success)
             success = completion.success
             exit_code = completion.exit_code
+            raw_execution_logs = completion.logs
             if not completion.success:
                 self._logger.warning(
                     "Chat completion failed for session %s: exit=%s",
@@ -157,6 +198,19 @@ class ChatService:
             role="assistant",
             content=assistant_text,
             metadata=assistant_metadata,
+        )
+        self._record_chat_execution_log(
+            session_id=session_id,
+            mode=normalized_mode,
+            model=selected_model,
+            user_message_id=str(user_message.get("id") or ""),
+            assistant_message_id=str(assistant_message.get("id") or ""),
+            user_content=content.strip(),
+            assistant_content=assistant_text,
+            raw_logs=raw_execution_logs,
+            success=success,
+            exit_code=exit_code,
+            quick_path=quick_path,
         )
         self._session_repository.touch(session_id)
         return user_message, assistant_message, None
@@ -209,31 +263,43 @@ class ChatService:
             or self._resolve_model(model=session.get("model"), fallback_to_default=False)
             or self._resolve_model(model=None, fallback_to_default=True)
         )
+        normalized_mode = self._normalize_mode(session["mode"])
         image_paths = [str(item.get("containerPath")) for item in attachments if item.get("containerPath")]
         prompt = self._build_chat_prompt(
-            mode=self._normalize_mode(session["mode"]),
+            mode=normalized_mode,
             messages=recent_messages,
         )
-        quick_answer = self._try_direct_operator_answer(
-            mode=self._normalize_mode(session["mode"]),
-            user_content=user_content,
-        )
+        quick_answer = None
+        if self._should_use_operator_quick_reply(mode=normalized_mode, user_content=user_content):
+            quick_answer = self._try_direct_operator_answer(
+                mode=normalized_mode,
+                user_content=user_content,
+            )
         streamed_assistant = ""
         stream_status = "thinking"
         assistant_metadata: dict[str, Any] = {}
+        raw_execution_logs = ""
+        quick_path = quick_answer is not None
         if quick_answer is not None:
             assistant_text = quick_answer
             success = True
             exit_code = 0
-        elif self._normalize_mode(session["mode"]) == "operator":
-            assistant_text = self._run_operator_task(session_id=session_id, user_content=user_content)
-            success = True
-            exit_code = 0
-        elif self._normalize_mode(session["mode"]) == "tool_builder":
+        elif normalized_mode == "operator":
+            operator_result = self._run_operator_task(
+                session_id=session_id,
+                user_content=user_content,
+                selected_model=selected_model,
+            )
+            assistant_text = str(operator_result.get("assistantText") or "")
+            success = bool(operator_result.get("success", False))
+            exit_code = int(operator_result.get("exitCode", 1))
+            raw_execution_logs = str(operator_result.get("rawLogs") or "")
+        elif normalized_mode == "tool_builder":
             assistant_text, tool_builder_context = self._run_tool_builder_task(
                 session_id=session_id,
                 user_content=user_content,
                 selected_model=selected_model,
+                attachments=attachments,
             )
             success = True
             exit_code = 0
@@ -272,10 +338,12 @@ class ChatService:
                 assistant_text = "I could not generate a response right now. Please retry."
                 success = False
                 exit_code = 1
+                raw_execution_logs = raw_logs
             else:
                 assistant_text = self._build_assistant_text(completion.logs, completion.success)
                 success = completion.success
                 exit_code = completion.exit_code
+                raw_execution_logs = completion.logs
             stream_cancelled = self._consume_stream_cancelled(session_id)
             if stream_cancelled:
                 if not assistant_text.strip():
@@ -283,6 +351,10 @@ class ChatService:
                 success = False
                 exit_code = 130
                 assistant_metadata["stopped"] = True
+                if raw_execution_logs:
+                    raw_execution_logs = f"{raw_execution_logs}\n\n[stream cancelled by user]"
+                else:
+                    raw_execution_logs = "[stream cancelled by user]"
             if completion is not None and not completion.success:
                 self._logger.warning(
                     "Chat stream completion failed for session %s: exit=%s",
@@ -297,6 +369,19 @@ class ChatService:
             role="assistant",
             content=assistant_text,
             metadata=assistant_metadata,
+        )
+        self._record_chat_execution_log(
+            session_id=session_id,
+            mode=normalized_mode,
+            model=selected_model,
+            user_message_id=str(user_message.get("id") or ""),
+            assistant_message_id=str(assistant_message.get("id") or ""),
+            user_content=user_content,
+            assistant_content=assistant_text,
+            raw_logs=raw_execution_logs,
+            success=success,
+            exit_code=exit_code,
+            quick_path=quick_path,
         )
         self._session_repository.touch(session_id)
         updated_session = self._session_repository.get_by_id(session_id)
@@ -337,6 +422,410 @@ class ChatService:
             "models": self._codex_service.list_chat_models(),
             "defaultModel": self._codex_service.default_chat_model(),
         }
+
+    def list_execution_logs(
+        self,
+        limit: int = 200,
+        session_id: str | None = None,
+        modes: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._chat_execution_log_repository is None:
+            return []
+
+        normalized_modes = [
+            normalized
+            for normalized in {
+                self._normalize_mode(mode)
+                for mode in (modes or [])
+                if (mode or "").strip()
+            }
+            if normalized in {"general", "operator", "tool_builder"}
+        ]
+        return self._chat_execution_log_repository.list_recent(
+            limit=max(int(limit), 1),
+            session_id=(session_id or "").strip() or None,
+            modes=normalized_modes or None,
+        )
+
+    def summarize_usage(
+        self,
+        session_id: str | None = None,
+        modes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if self._chat_execution_log_repository is None:
+            return {
+                "requestCount": 0,
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "totalTokens": 0,
+                "parsedCount": 0,
+                "estimatedCount": 0,
+                "mixedCount": 0,
+                "modes": [],
+                "costEstimate": self._usage_cost_estimate(total_tokens=0),
+            }
+
+        normalized_modes = [
+            normalized
+            for normalized in {
+                self._normalize_mode(mode)
+                for mode in (modes or [])
+                if (mode or "").strip()
+            }
+            if normalized in {"general", "operator", "tool_builder"}
+        ]
+        summary = self._chat_execution_log_repository.summarize_usage(
+            session_id=(session_id or "").strip() or None,
+            modes=normalized_modes or None,
+        )
+        totals = summary.get("totals") if isinstance(summary, dict) else None
+        if not isinstance(totals, dict):
+            totals = {}
+
+        request_count = int(totals.get("requests") or 0)
+        prompt_tokens = int(totals.get("promptTokens") or 0)
+        completion_tokens = int(totals.get("completionTokens") or 0)
+        total_tokens = int(totals.get("totalTokens") or 0)
+        parsed_count = int(totals.get("parsedCount") or 0)
+        estimated_count = int(totals.get("estimatedCount") or 0)
+        mixed_count = int(totals.get("mixedCount") or 0)
+        mode_rows = summary.get("modes") if isinstance(summary, dict) else []
+        normalized_rows: list[dict[str, Any]] = []
+        if isinstance(mode_rows, list):
+            for raw_row in mode_rows:
+                if not isinstance(raw_row, dict):
+                    continue
+                normalized_rows.append(
+                    {
+                        "mode": self._normalize_mode(str(raw_row.get("mode") or "general")),
+                        "requestCount": int(raw_row.get("requests") or 0),
+                        "promptTokens": int(raw_row.get("promptTokens") or 0),
+                        "completionTokens": int(raw_row.get("completionTokens") or 0),
+                        "totalTokens": int(raw_row.get("totalTokens") or 0),
+                        "parsedCount": int(raw_row.get("parsedCount") or 0),
+                        "estimatedCount": int(raw_row.get("estimatedCount") or 0),
+                        "mixedCount": int(raw_row.get("mixedCount") or 0),
+                    }
+                )
+
+        return {
+            "requestCount": request_count,
+            "promptTokens": prompt_tokens,
+            "completionTokens": completion_tokens,
+            "totalTokens": total_tokens,
+            "parsedCount": parsed_count,
+            "estimatedCount": estimated_count,
+            "mixedCount": mixed_count,
+            "modes": normalized_rows,
+            "costEstimate": self._usage_cost_estimate(total_tokens=total_tokens),
+        }
+
+    @staticmethod
+    def _should_capture_execution_logs(mode: str) -> bool:
+        return mode in {"general", "operator", "tool_builder"}
+
+    @classmethod
+    def _truncate_chat_execution_logs(cls, raw_logs: str) -> str:
+        normalized = (raw_logs or "").replace("\r\n", "\n").replace("\r", "\n")
+        if len(normalized) <= cls._CHAT_EXECUTION_LOG_LIMIT:
+            return normalized
+        truncated = normalized[-cls._CHAT_EXECUTION_LOG_LIMIT:]
+        return f"[truncated to last {cls._CHAT_EXECUTION_LOG_LIMIT} chars]\n{truncated}"
+
+    def _usage_cost_estimate(self, total_tokens: int) -> dict[str, Any]:
+        resolved_total = max(int(total_tokens), 0)
+        quote = self._resolve_usd_inr_rate_quote()
+        usd_to_inr_rate = float(quote["rate"])
+        usd = round((resolved_total / 1_000_000) * self._ESTIMATED_USD_PER_1M_TOKENS, 6)
+        inr = round(usd * usd_to_inr_rate, 4)
+        note = self._usage_cost_note_from_quote(
+            source=str(quote["source"]),
+            fetched_at=quote.get("updatedAt"),
+        )
+        return {
+            "usd": usd,
+            "inr": inr,
+            "usdPerMillionTokens": self._ESTIMATED_USD_PER_1M_TOKENS,
+            "usdToInrRate": usd_to_inr_rate,
+            "usdToInrSource": str(quote["source"]),
+            "usdToInrLive": bool(quote["live"]),
+            "usdToInrUpdatedAt": quote.get("updatedAt"),
+            "note": note,
+        }
+
+    def _resolve_usd_inr_rate_quote(self) -> dict[str, Any]:
+        now = now_ist()
+        with self._usd_inr_rate_lock:
+            cached_value = self._usd_inr_rate_cached_value
+            cached_at = self._usd_inr_rate_cached_at
+
+        if cached_value is not None and cached_at is not None:
+            age_seconds = (now - cached_at).total_seconds()
+            if age_seconds <= self._usd_inr_rate_cache_ttl_seconds:
+                return {
+                    "rate": cached_value,
+                    "source": self._USD_INR_SOURCE_LIVE_CACHE,
+                    "live": True,
+                    "updatedAt": cached_at,
+                }
+
+        if self._usd_inr_rate_api_url:
+            try:
+                response = requests.get(
+                    self._usd_inr_rate_api_url,
+                    timeout=self._usd_inr_rate_timeout_seconds,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                resolved_rate = self._extract_usd_inr_rate(payload)
+                if resolved_rate is not None:
+                    fetched_at = now_ist()
+                    with self._usd_inr_rate_lock:
+                        self._usd_inr_rate_cached_value = resolved_rate
+                        self._usd_inr_rate_cached_at = fetched_at
+                    return {
+                        "rate": resolved_rate,
+                        "source": self._USD_INR_SOURCE_LIVE_API,
+                        "live": True,
+                        "updatedAt": fetched_at,
+                    }
+                self._logger.warning("USD/INR rate payload did not include a valid INR quote.")
+            except Exception as exc:  # pylint: disable=broad-except
+                self._logger.warning("Unable to fetch USD/INR rate: %s", exc)
+
+        if cached_value is not None:
+            return {
+                "rate": cached_value,
+                "source": self._USD_INR_SOURCE_CACHE_STALE,
+                "live": False,
+                "updatedAt": cached_at,
+            }
+
+        return {
+            "rate": self._usd_inr_rate_fallback,
+            "source": self._USD_INR_SOURCE_FALLBACK_DEFAULT,
+            "live": False,
+            "updatedAt": None,
+        }
+
+    @classmethod
+    def _extract_usd_inr_rate(cls, payload: object) -> float | None:
+        if not isinstance(payload, dict):
+            return None
+
+        candidate_maps = (
+            payload.get("rates"),
+            payload.get("conversion_rates"),
+            payload.get("data"),
+        )
+        for candidate_map in candidate_maps:
+            if not isinstance(candidate_map, dict):
+                continue
+            resolved = cls._parse_positive_float(candidate_map.get("INR") or candidate_map.get("inr"))
+            if resolved is not None:
+                return resolved
+
+        return cls._parse_positive_float(payload.get("INR") or payload.get("inr") or payload.get("usd_inr"))
+
+    @staticmethod
+    def _parse_positive_float(value: object) -> float | None:
+        try:
+            resolved = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if resolved <= 0:
+            return None
+        return resolved
+
+    def _usage_cost_note_from_quote(self, source: str, fetched_at: datetime | None) -> str:
+        timestamp = fetched_at.strftime("%d %b %Y, %I:%M %p IST") if fetched_at else None
+        if source == self._USD_INR_SOURCE_LIVE_API:
+            if timestamp:
+                return f"Estimated using live USD/INR from exchange API ({timestamp})."
+            return "Estimated using live USD/INR from exchange API."
+        if source == self._USD_INR_SOURCE_LIVE_CACHE:
+            if timestamp:
+                return f"Estimated using recently cached live USD/INR ({timestamp})."
+            return "Estimated using recently cached live USD/INR."
+        if source == self._USD_INR_SOURCE_CACHE_STALE:
+            if timestamp:
+                return f"Live FX refresh failed; estimated using last cached USD/INR ({timestamp})."
+            return "Live FX refresh failed; estimated using last cached USD/INR."
+        return f"Live FX unavailable; estimated using fallback USD/INR (₹{self._usd_inr_rate_fallback:.2f}/USD)."
+
+    def _record_chat_execution_log(
+        self,
+        session_id: str,
+        mode: str,
+        model: str | None,
+        user_message_id: str | None,
+        assistant_message_id: str | None,
+        user_content: str,
+        assistant_content: str,
+        raw_logs: str,
+        success: bool,
+        exit_code: int,
+        quick_path: bool,
+    ) -> None:
+        if self._chat_execution_log_repository is None:
+            return
+        if not self._should_capture_execution_logs(mode):
+            return
+
+        token_usage = self._derive_token_usage(
+            raw_logs=raw_logs,
+            user_content=user_content,
+            assistant_content=assistant_content,
+        )
+        try:
+            self._chat_execution_log_repository.create(
+                session_id=session_id,
+                mode=mode,
+                model=(model or "").strip() or None,
+                user_message_id=(user_message_id or "").strip() or None,
+                assistant_message_id=(assistant_message_id or "").strip() or None,
+                user_content=user_content.strip(),
+                assistant_content=assistant_content.strip(),
+                raw_logs=self._truncate_chat_execution_logs(raw_logs),
+                success=success,
+                exit_code=exit_code,
+                quick_path=quick_path,
+                prompt_tokens=token_usage["promptTokens"],
+                completion_tokens=token_usage["completionTokens"],
+                total_tokens=token_usage["totalTokens"],
+                token_source=token_usage["tokenSource"],
+            )
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Unable to persist chat execution log for session %s", session_id)
+
+    @classmethod
+    def _derive_token_usage(
+        cls,
+        raw_logs: str,
+        user_content: str,
+        assistant_content: str,
+    ) -> dict[str, Any]:
+        parsed = cls._parse_token_usage_from_logs(raw_logs=raw_logs)
+        prompt_tokens = parsed.get("promptTokens")
+        completion_tokens = parsed.get("completionTokens")
+        total_tokens = parsed.get("totalTokens")
+
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        if total_tokens is None:
+            estimated_prompt = cls._estimate_tokens_from_text(user_content)
+            estimated_completion = cls._estimate_tokens_from_text(assistant_content)
+            if prompt_tokens is None:
+                prompt_tokens = estimated_prompt
+            if completion_tokens is None:
+                completion_tokens = estimated_completion
+            total_tokens = max((prompt_tokens or 0) + (completion_tokens or 0), 0)
+            if parsed.get("promptTokens") is None and parsed.get("completionTokens") is None:
+                source = cls._TOKEN_SOURCE_ESTIMATED
+            else:
+                source = cls._TOKEN_SOURCE_MIXED
+        else:
+            source = cls._TOKEN_SOURCE_PARSED
+            total_tokens = max(int(total_tokens), 0)
+
+        return {
+            "promptTokens": max(int(prompt_tokens), 0) if prompt_tokens is not None else None,
+            "completionTokens": max(int(completion_tokens), 0) if completion_tokens is not None else None,
+            "totalTokens": max(int(total_tokens), 0),
+            "tokenSource": source,
+        }
+
+    @classmethod
+    def _parse_token_usage_from_logs(cls, raw_logs: str) -> dict[str, int | None]:
+        normalized = (raw_logs or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.strip():
+            return {"promptTokens": None, "completionTokens": None, "totalTokens": None}
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        total_tokens: int | None = None
+
+        inline_patterns = (
+            r"tokens\s*used\s*:\s*([0-9][0-9,]*)\s*input\b[^0-9]+([0-9][0-9,]*)\s*output\b",
+            r"tokens\s*used\s*:\s*input[^0-9]*([0-9][0-9,]*)[^0-9]+output[^0-9]*([0-9][0-9,]*)",
+            r"tokens\s*used\s*:\s*([0-9][0-9,]*)\s*prompt\b[^0-9]+([0-9][0-9,]*)\s*(?:output|completion)\b",
+        )
+        for pattern in inline_patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            prompt_tokens = cls._parse_token_count(match.group(1))
+            completion_tokens = cls._parse_token_count(match.group(2))
+            if prompt_tokens is not None and completion_tokens is not None:
+                break
+
+        if prompt_tokens is None:
+            prompt_tokens = cls._first_token_match(
+                normalized,
+                patterns=(
+                    r"\b(?:prompt|input)\s*tokens?\s*[:=]\s*([0-9][0-9,]*)",
+                    r"\binput\s*[:=]\s*([0-9][0-9,]*)\s*tokens?\b",
+                    r"\btokens\s*used\s*:[^\n]*?([0-9][0-9,]*)\s*input\b",
+                ),
+            )
+        if completion_tokens is None:
+            completion_tokens = cls._first_token_match(
+                normalized,
+                patterns=(
+                    r"\b(?:completion|output)\s*tokens?\s*[:=]\s*([0-9][0-9,]*)",
+                    r"\boutput\s*[:=]\s*([0-9][0-9,]*)\s*tokens?\b",
+                    r"\btokens\s*used\s*:[^\n]*?([0-9][0-9,]*)\s*output\b",
+                ),
+            )
+
+        total_tokens = cls._first_token_match(
+            normalized,
+            patterns=(
+                r"\btotal\s*tokens?\s*[:=]\s*([0-9][0-9,]*)",
+                r"\btokens\s*used\s*[:=]\s*([0-9][0-9,]*)\s*(?:$|\n)",
+                r"\btokens\s*used\s*\n\s*([0-9][0-9,]*)\b",
+            ),
+        )
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "promptTokens": prompt_tokens,
+            "completionTokens": completion_tokens,
+            "totalTokens": total_tokens,
+        }
+
+    @classmethod
+    def _first_token_match(cls, value: str, patterns: tuple[str, ...]) -> int | None:
+        for pattern in patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if not match:
+                continue
+            token_count = cls._parse_token_count(match.group(1))
+            if token_count is not None:
+                return token_count
+        return None
+
+    @staticmethod
+    def _parse_token_count(value: str | None) -> int | None:
+        cleaned = re.sub(r"[^\d]", "", str(value or ""))
+        if not cleaned:
+            return None
+        try:
+            return int(cleaned)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _estimate_tokens_from_text(value: str) -> int:
+        cleaned = re.sub(r"\s+", " ", value or "").strip()
+        if not cleaned:
+            return 0
+        words = len(re.findall(r"\w+", cleaned))
+        char_estimate = max(1, round(len(cleaned) / 4))
+        word_estimate = max(1, round(words * 1.3))
+        return max(char_estimate, word_estimate)
 
     def create_image_attachment(
         self,
@@ -554,17 +1043,180 @@ class ChatService:
             r"\b("
             r"deploy|redeploy|rebuild|build|spin\s+up|start(?:\s+up)?|launch|run|"
             r"bring\s+up|restart|stop|shutdown|remove|delete|create|"
-            r"compose\s+up|up\s+-d|docker\s+up"
+            r"compose\s+up|up\s+-d|docker\s+up|fix|debug|troubleshoot|investigate|repair"
             r")\b"
         )
         return action_pattern.search(lowered) is None
+
+    @staticmethod
+    def _should_use_operator_quick_reply(mode: str, user_content: str) -> bool:
+        _ = (mode, user_content)
+        # Force operator requests through full operator planning/execution for
+        # better accuracy and consistency (no direct quick-path replies).
+        return False
+
+    @staticmethod
+    def _is_operator_action_request(lowered_user_content: str) -> bool:
+        action_pattern = re.compile(
+            r"\b("
+            r"fix|debug|troubleshoot|investigate|analy[sz]e|profile|optimi[sz]e|improve|"
+            r"reduce|increase|free|clear|kill|restart|reboot|deploy|rebuild|build|run|execute|"
+            r"configure|install|update|upgrade|patch|change|modify|edit|refactor|"
+            r"create|delete|remove|stop|start|launch|open|close|log|logs|tail"
+            r")\b"
+        )
+        return action_pattern.search(lowered_user_content) is not None
+
+    @staticmethod
+    def _is_explicit_system_resource_query(user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return False
+
+        resource_terms = ("battery", "ram", "memory", "cpu", "disk", "storage", "uptime")
+        if not any(term in lowered for term in resource_terms):
+            return False
+        if ChatService._is_operator_action_request(lowered):
+            return False
+
+        # Avoid quick-returning telemetry for diagnosis phrasing that usually needs
+        # deeper operator investigation instead of a read-only snapshot.
+        diagnostic_markers = ("issue", "problem", "slow", "lag", "leak", "spike", "throttl", "overheat", "error", "fail")
+        if any(marker in lowered for marker in diagnostic_markers):
+            return False
+
+        question_prefixes = (
+            "show",
+            "check",
+            "what",
+            "what's",
+            "what is",
+            "how",
+            "status",
+            "current",
+            "tell me",
+            "give me",
+            "is ",
+        )
+        if "?" in lowered:
+            return True
+        if any(lowered.startswith(prefix) for prefix in question_prefixes):
+            return True
+
+        status_markers = ("usage", "used", "free", "available", "status", "current", "temperature", "temp", "percent", "load")
+        word_count = len(re.findall(r"\w+", lowered))
+        if word_count <= 10 and any(marker in lowered for marker in status_markers):
+            return True
+        return False
+
+    @staticmethod
+    def _is_simple_operator_task(user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return False
+        if ChatService._is_operator_action_request(lowered):
+            return False
+        if ChatService._has_operator_context_reference(lowered):
+            return False
+        word_count = len(re.findall(r"\w+", lowered))
+        return word_count <= 18
+
+    @staticmethod
+    def _operator_task_complexity(user_content: str) -> str:
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return "standard"
+
+        score = 0
+        word_count = len(re.findall(r"\w+", lowered))
+
+        if ChatService._is_operator_action_request(lowered):
+            score += 2
+        if ChatService._has_operator_context_reference(lowered):
+            score += 2
+
+        heavyweight_markers = (
+            "benchmark",
+            "profile",
+            "migrate",
+            "migration",
+            "refactor",
+            "rebuild",
+            "deploy",
+            "investigate",
+            "troubleshoot",
+            "debug",
+            "incident",
+            "regression",
+            "test",
+            "tests",
+            "logs",
+            "trace",
+            "stack",
+            "root cause",
+        )
+        score += sum(
+            1
+            for marker in heavyweight_markers
+            if re.search(
+                r"\b" + re.escape(marker).replace("\\ ", r"\s+") + r"\b",
+                lowered,
+            )
+        )
+
+        if word_count > 45:
+            score += 2
+        elif word_count > 22:
+            score += 1
+
+        if score >= 4:
+            return "complex"
+        if score <= 1 and ChatService._is_simple_operator_task(user_content):
+            return "simple"
+        return "standard"
+
+    @staticmethod
+    def _has_operator_context_reference(lowered_user_content: str) -> bool:
+        reference_markers = (
+            "continue",
+            "as discussed",
+            "as before",
+            "previous",
+            "last time",
+            "same repo",
+            "same project",
+            "that repo",
+            "that project",
+            "earlier",
+            "follow up",
+            "follow-up",
+        )
+        return any(marker in lowered_user_content for marker in reference_markers)
+
+    @staticmethod
+    def _operator_context_limit(user_content: str) -> int:
+        complexity = ChatService._operator_task_complexity(user_content)
+        if complexity == "complex":
+            return 24
+        if complexity == "simple":
+            return 10
+        return 18
+
+    @staticmethod
+    def _operator_needs_cross_session_context(user_content: str, current_session_messages: list[dict[str, Any]]) -> bool:
+        if len(current_session_messages) > 4:
+            return False
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        return ChatService._has_operator_context_reference(lowered)
 
     def _try_direct_operator_answer(self, mode: str, user_content: str) -> str | None:
         if mode != "operator" or self._system_context_service is None:
             if mode != "operator":
                 return None
 
-        lowered = user_content.lower()
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return None
 
         # Docker runtime summaries
         if self._docker_service is not None and self._is_docker_summary_query(user_content):
@@ -589,17 +1241,15 @@ class ChatService:
         if self._docker_service is not None:
             health_match = re.search(r"check if ([a-zA-Z0-9_.-]+) container is healthy", lowered)
             if health_match:
+                if self._is_operator_action_request(lowered):
+                    return None
                 target_name = health_match.group(1)
-                should_restart = "restart" in lowered
-                if should_restart:
-                    result = self._docker_service.check_container_health_and_restart(target_name)
-                else:
-                    result = self._docker_service.get_container_health(target_name)
+                result = self._docker_service.get_container_health(target_name)
                 return str(result.get("message", "Unable to check container health."))
 
         if self._system_context_service is None:
             return None
-        if not any(keyword in lowered for keyword in ("battery", "ram", "memory", "cpu", "disk", "storage", "uptime")):
+        if not self._is_explicit_system_resource_query(user_content):
             return None
 
         snapshot = self._system_context_service.snapshot()
@@ -633,9 +1283,19 @@ class ChatService:
 
         return "\n".join(details) if details else None
 
-    def _run_operator_task(self, session_id: str, user_content: str) -> str:
+    def _run_operator_task(
+        self,
+        session_id: str,
+        user_content: str,
+        selected_model: str | None = None,
+    ) -> dict[str, Any]:
         if self._operator_access_service is None:
-            return "Operator policy is not configured. Please set OPERATOR_ALLOWED_PATHS / OPERATOR_DENIED_PATHS."
+            return {
+                "assistantText": "Operator policy is not configured. Please set OPERATOR_ALLOWED_PATHS / OPERATOR_DENIED_PATHS.",
+                "rawLogs": "",
+                "success": False,
+                "exitCode": 1,
+            }
 
         session = self._session_repository.get_by_id(session_id)
         project_hint = self._extract_project_hint(user_content)
@@ -650,12 +1310,16 @@ class ChatService:
                 "mode": "rw",
             }
         branch_instruction = self._operator_branch_instruction(user_content=user_content)
-        recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=24)
+        complexity = self._operator_task_complexity(user_content)
+        context_limit = self._operator_context_limit(user_content=user_content)
+        recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=context_limit)
         conversation_context = self._format_operator_conversation_context(recent_messages)
-        cross_session_context = self._recent_operator_session_context(
-            current_session_id=session_id,
-            current_session_messages=recent_messages,
-        )
+        cross_session_context = ""
+        if self._operator_needs_cross_session_context(user_content=user_content, current_session_messages=recent_messages):
+            cross_session_context = self._recent_operator_session_context(
+                current_session_id=session_id,
+                current_session_messages=recent_messages,
+            )
         extra_context_block = ""
         if cross_session_context:
             extra_context_block = (
@@ -672,8 +1336,15 @@ class ChatService:
             f"{conversation_context}\n\n"
             f"{extra_context_block}"
             f"Current user task:\n{user_content}\n\n"
+            "Operator team protocol:\n"
+            "- Visionary: restate intent, assumptions, and success criteria before action.\n"
+            "- Blueprint: design the minimal safe execution plan and command order.\n"
+            "- Craftsman: execute file edits, commands, and container operations.\n"
+            "- Guardian: validate with checks/logs and surface any risk or regression.\n"
+            "- Shipmaster: finalize runtime/deployment state and report accessible endpoints.\n\n"
             "Execution requirements:\n"
             f"- Work under: {container_cwd}\n"
+            f"- Task complexity: {complexity}. Calibrate planning depth and validation effort accordingly.\n"
             f"{branch_instruction}\n"
             "- For code changes, implement the requested update and run tests/lint/build checks only when needed for confidence.\n"
             "- If this is non-code ops query, provide concise factual summary.\n"
@@ -685,6 +1356,8 @@ class ChatService:
             "- Resolve follow-up references (for example: 'that repo', 'continue', 'as discussed') using conversation context.\n"
             "- If context is still ambiguous, state the ambiguity briefly and proceed with the most likely interpretation.\n"
         )
+        timeout_seconds = self._operator_timeout_seconds_for_task(user_content=user_content)
+        effective_model = self._operator_model_for_task(selected_model=selected_model, user_content=user_content)
 
         try:
             completion = self._codex_service.run_operator(
@@ -692,16 +1365,78 @@ class ChatService:
                 prompt=operator_prompt,
                 container_cwd=container_cwd,
                 extra_volumes=mounts,
+                timeout_seconds=timeout_seconds,
+                model=effective_model,
             )
         except Exception as exc:  # pylint: disable=broad-except
             self._logger.exception("Operator task execution failed for session %s", session_id)
-            return f"Operator task failed to start: {exc}"
+            return {
+                "assistantText": f"Operator task failed to start: {exc}",
+                "rawLogs": "",
+                "success": False,
+                "exitCode": 1,
+            }
 
         output = self._build_assistant_text(completion.logs, completion.success)
         output = self._sanitize_operator_output(user_content=user_content, output=output)
         if not completion.success:
-            return f"{output}\n\n(Operator execution exited with code {completion.exit_code})"
-        return output
+            return {
+                "assistantText": f"{output}\n\n(Operator execution exited with code {completion.exit_code})",
+                "rawLogs": completion.logs,
+                "success": False,
+                "exitCode": int(completion.exit_code),
+            }
+        return {
+            "assistantText": output,
+            "rawLogs": completion.logs,
+            "success": True,
+            "exitCode": int(completion.exit_code),
+        }
+
+    def _operator_timeout_seconds_for_task(self, user_content: str) -> int:
+        complexity = self._operator_task_complexity(user_content)
+        if complexity == "simple":
+            # Keep short read-only requests responsive.
+            return 480
+        if complexity == "complex":
+            return 1800
+
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if self._has_operator_context_reference(lowered):
+            return 1500
+        if self._is_operator_action_request(lowered):
+            return 1200
+        return 900
+
+    def _operator_model_for_task(self, selected_model: str | None, user_content: str) -> str | None:
+        cleaned_selected = (selected_model or "").strip() or None
+        complexity = self._operator_task_complexity(user_content)
+        if complexity != "simple":
+            return cleaned_selected
+
+        if cleaned_selected and "mini" in cleaned_selected.lower():
+            return cleaned_selected
+
+        default_model = self._resolve_model(model=None, fallback_to_default=True)
+        if cleaned_selected and cleaned_selected != default_model:
+            # Respect explicit non-default session/user selection.
+            return cleaned_selected
+
+        available_models: list[str] = []
+        list_models = getattr(self._codex_service, "list_chat_models", None)
+        if callable(list_models):
+            try:
+                available_models = [str(item).strip() for item in list_models() if str(item).strip()]
+            except Exception:  # pylint: disable=broad-except
+                available_models = []
+
+        normalized_lookup = {item.lower(): item for item in available_models}
+        for candidate in self._FAST_OPERATOR_MODEL_CANDIDATES:
+            resolved = normalized_lookup.get(candidate.lower())
+            if resolved:
+                return resolved
+
+        return cleaned_selected or default_model
 
     @staticmethod
     def _sanitize_operator_output(user_content: str, output: str) -> str:
@@ -859,9 +1594,35 @@ class ChatService:
         session_id: str,
         user_content: str,
         selected_model: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
         if self._tool_builder_service is None:
             return "Tool builder workflow is not configured yet. Please check backend startup dependencies.", None
+
+        image_paths: list[str] = []
+        seen_image_paths: set[str] = set()
+        for item in attachments or []:
+            if not isinstance(item, dict):
+                continue
+            container_path = str(item.get("containerPath") or "").strip()
+            if not container_path or container_path in seen_image_paths:
+                continue
+            seen_image_paths.add(container_path)
+            image_paths.append(container_path)
+        generation_image_paths = image_paths or None
+        image_context_cache: str | None = None
+
+        def resolved_user_request() -> str:
+            nonlocal image_context_cache
+            if image_context_cache is None:
+                image_context_cache = self._augment_tool_builder_request_with_images(
+                    session_id=session_id,
+                    user_content=user_content,
+                    attachments=attachments or [],
+                    image_paths=image_paths,
+                    model=selected_model,
+                )
+            return image_context_cache
 
         context = self._resolve_tool_builder_context(session_id)
         if context and context.get("phase") == "modification_clarification":
@@ -875,10 +1636,11 @@ class ChatService:
                 tool = self._tool_builder_service.get_tool_for_request(request_id=base_request_id)
 
             if draft_change_request and base_request_id:
+                request_payload = resolved_user_request()
                 combined_change_request = (
                     f"{draft_change_request}\n\n"
                     "Additional clarification from user:\n"
-                    f"{user_content.strip()}"
+                    f"{request_payload.strip()}"
                 )
                 clarification, clarification_result = self._tool_builder_modification_clarification_from_codex(
                     session_id=session_id,
@@ -887,6 +1649,7 @@ class ChatService:
                     request_state=request_state,
                     prior_questions=context.get("pendingQuestions"),
                     model=selected_model,
+                    image_paths=image_paths,
                 )
                 if clarification:
                     return clarification, {
@@ -918,6 +1681,7 @@ class ChatService:
                     model=selected_model,
                     workflow_prompt=modification_prompt,
                     prompt_already_refined=True,
+                    image_paths=generation_image_paths,
                 )
                 next_context = {
                     "requestId": job["id"],
@@ -937,16 +1701,18 @@ class ChatService:
         if context and context.get("phase") == "clarification":
             draft_prompt = str(context.get("draftPrompt") or "").strip()
             if draft_prompt:
+                request_payload = resolved_user_request()
                 combined_request = (
                     f"{draft_prompt}\n\n"
                     "Clarifications from user:\n"
-                    f"{user_content.strip()}"
+                    f"{request_payload.strip()}"
                 )
                 clarification, clarification_result = self._tool_builder_clarification_from_codex(
                     session_id=session_id,
                     request_text=combined_request,
                     prior_questions=context.get("pendingQuestions"),
                     model=selected_model,
+                    image_paths=image_paths,
                 )
                 if clarification:
                     next_context = {
@@ -970,6 +1736,7 @@ class ChatService:
                     model=selected_model,
                     workflow_prompt=initial_prompt,
                     prompt_already_refined=True,
+                    image_paths=generation_image_paths,
                 )
                 next_context = {"requestId": job["id"], "phase": "building"}
                 message = (
@@ -1030,19 +1797,21 @@ class ChatService:
 
             rebuild_tool_id = str(context.get("toolId") or "").strip() or None
             tool_name = str(context.get("toolName") or "").strip() or None
+            change_request = resolved_user_request()
             clarification, clarification_result = self._tool_builder_modification_clarification_from_codex(
                 session_id=session_id,
-                change_request=user_content,
+                change_request=change_request,
                 tool=tool,
                 request_state=request_state,
                 model=selected_model,
+                image_paths=image_paths,
             )
             if clarification:
                 draft_change_request = (
                     str(clarification_result.get("clarifiedRequest") or "").strip()
                     if isinstance(clarification_result, dict)
                     else ""
-                ) or user_content.strip()
+                ) or change_request.strip()
                 return clarification, {
                     "phase": "modification_clarification",
                     "requestId": base_request_id,
@@ -1053,7 +1822,7 @@ class ChatService:
                 }
 
             finalized_change_request = self._finalize_tool_builder_request(
-                original_request=user_content,
+                original_request=change_request,
                 clarification_result=clarification_result,
             )
             modification_prompt = self._build_tool_modification_prompt(
@@ -1069,6 +1838,7 @@ class ChatService:
                 model=selected_model,
                 workflow_prompt=modification_prompt,
                 prompt_already_refined=True,
+                image_paths=generation_image_paths,
             )
             next_context = {
                 "requestId": job["id"],
@@ -1085,17 +1855,19 @@ class ChatService:
             )
             return message, next_context
 
+        initial_request = resolved_user_request()
         clarification, clarification_result = self._tool_builder_clarification_from_codex(
             session_id=session_id,
-            request_text=user_content,
+            request_text=initial_request,
             model=selected_model,
+            image_paths=image_paths,
         )
         if clarification:
             draft_prompt = (
                 str(clarification_result.get("clarifiedRequest") or "").strip()
                 if isinstance(clarification_result, dict)
                 else ""
-            ) or user_content.strip()
+            ) or initial_request.strip()
             return clarification, {
                 "phase": "clarification",
                 "draftPrompt": draft_prompt,
@@ -1103,7 +1875,7 @@ class ChatService:
             }
 
         finalized_request = self._finalize_tool_builder_request(
-            original_request=user_content,
+            original_request=initial_request,
             clarification_result=clarification_result,
         )
         initial_prompt = self._build_tool_initial_prompt(finalized_request)
@@ -1113,6 +1885,7 @@ class ChatService:
             model=selected_model,
             workflow_prompt=initial_prompt,
             prompt_already_refined=True,
+            image_paths=generation_image_paths,
         )
         next_context = {"requestId": job["id"], "phase": "building"}
         message = (
@@ -1124,6 +1897,96 @@ class ChatService:
             "- You can keep chatting here to request further changes; I’ll rebuild from the last successful version."
         )
         return message, next_context
+
+    def _augment_tool_builder_request_with_images(
+        self,
+        session_id: str,
+        user_content: str,
+        attachments: list[dict[str, Any]],
+        image_paths: list[str],
+        model: str | None = None,
+    ) -> str:
+        base_request = user_content.strip()
+        if not base_request:
+            base_request = "Build or update the tool using the uploaded image as the primary UI reference."
+        if not image_paths:
+            return base_request
+
+        fallback_attachment_names = [
+            str(item.get("fileName") or "image").strip()
+            for item in attachments
+            if isinstance(item, dict)
+        ]
+        fallback_names = ", ".join(name for name in fallback_attachment_names if name) or "uploaded image(s)"
+        fallback_summary = (
+            f"Reference images: {fallback_names}. "
+            "Match layout hierarchy, spacing rhythm, typography tone, color treatment, "
+            "and component styling as closely as practical while keeping the requested functionality."
+        )
+
+        analysis_prompt = self._build_tool_builder_visual_analysis_prompt(
+            user_content=base_request,
+            attachments=attachments,
+        )
+        try:
+            result = self._codex_service.run_chat(
+                session_id=f"{session_id}-tool-visual-brief",
+                prompt=analysis_prompt,
+                model=model,
+                image_paths=image_paths,
+                timeout_seconds=120,
+            )
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Failed to analyze tool-builder image references for session %s", session_id)
+            summary = fallback_summary
+        else:
+            if result.success:
+                parsed_summary = self._build_assistant_text(result.logs, result.success).strip()
+                summary = parsed_summary or fallback_summary
+            else:
+                summary = fallback_summary
+
+        summary = self._truncate_prompt_for_context(summary, limit=2600)
+        return (
+            f"{base_request}\n\n"
+            "Visual reference requirements (derived from uploaded image attachments):\n"
+            f"{summary}\n\n"
+            "Treat these visual requirements as mandatory for UI styling and layout unless they conflict "
+            "with explicit user functionality constraints."
+        )
+
+    @staticmethod
+    def _build_tool_builder_visual_analysis_prompt(
+        user_content: str,
+        attachments: list[dict[str, Any]],
+    ) -> str:
+        attachment_names: list[str] = []
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("fileName") or "").strip()
+            if name:
+                attachment_names.append(name)
+
+        lines = [
+            "You are analyzing uploaded UI reference image(s) for a tool-building workflow.",
+            "Extract implementation-ready visual requirements that help an engineer recreate the look and feel.",
+            "Focus on concrete design signals from the image(s), not generic design advice.",
+            "If a detail is uncertain, state it briefly instead of inventing specifics.",
+            "Output concise Markdown with these headings exactly:",
+            "1. Visual Direction",
+            "2. Layout Structure",
+            "3. Component Patterns",
+            "4. Interaction and Motion",
+            "5. Accessibility and Responsiveness",
+            "6. Non-goals / Uncertain Details",
+            "",
+            "User request:",
+            user_content.strip(),
+        ]
+        if attachment_names:
+            lines.extend(["", "Attached files:", ", ".join(attachment_names[:6])])
+        return "\n".join(lines).strip()
 
     def _resolve_tool_builder_context(self, session_id: str) -> dict[str, Any] | None:
         recent = self._message_repository.list_recent_for_session(session_id=session_id, limit=36)
@@ -1166,15 +2029,23 @@ class ChatService:
         request_text: str,
         prior_questions: object | None = None,
         model: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]:
         clarification_prompt = self._build_tool_builder_clarification_analysis_prompt(
             request_text=request_text,
             prior_questions=prior_questions,
         )
+        if image_paths:
+            clarification_prompt = (
+                f"{clarification_prompt}\n\n"
+                "Reference image attachments are provided. Include concrete visual/layout requirements inferred "
+                "from those images inside clarifiedRequest."
+            )
         result = self._codex_service.run_chat(
             session_id=f"{session_id}-tool-clarify",
             prompt=clarification_prompt,
             model=model,
+            image_paths=image_paths,
             timeout_seconds=90,
         )
         if result.success:
@@ -1210,6 +2081,7 @@ class ChatService:
         request_state: dict[str, Any] | None,
         prior_questions: object | None = None,
         model: str | None = None,
+        image_paths: list[str] | None = None,
     ) -> tuple[str | None, dict[str, Any] | None]:
         clarification_prompt = self._build_tool_builder_modification_clarification_analysis_prompt(
             change_request=change_request,
@@ -1217,10 +2089,17 @@ class ChatService:
             request_state=request_state,
             prior_questions=prior_questions,
         )
+        if image_paths:
+            clarification_prompt = (
+                f"{clarification_prompt}\n\n"
+                "Reference image attachments are provided. Preserve relevant visual/layout directions from those "
+                "images inside clarifiedRequest."
+            )
         result = self._codex_service.run_chat(
             session_id=f"{session_id}-tool-modify-clarify",
             prompt=clarification_prompt,
             model=model,
+            image_paths=image_paths,
             timeout_seconds=90,
         )
         if result.success:
@@ -1911,14 +2790,14 @@ class ChatService:
         if len(current_session_messages) > 4:
             return ""
 
-        sessions = self._session_repository.list_recent(limit=16)
+        sessions = self._session_repository.list_recent(limit=8)
         for session in sessions:
             if session.get("id") == current_session_id:
                 continue
             if self._normalize_mode(session.get("mode")) != "operator":
                 continue
 
-            messages = self._message_repository.list_recent_for_session(session_id=session["id"], limit=8)
+            messages = self._message_repository.list_recent_for_session(session_id=session["id"], limit=6)
             formatted = self._format_operator_conversation_context(messages)
             if not formatted or formatted == "(no prior conversation context)":
                 continue

@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, ClipboardEvent as ReactClipboardEvent, FormEvent, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import {
@@ -294,6 +294,7 @@ const SHORTS_FETCH_BATCH_SIZE = 24;
 const SHORTS_PREFETCH_THRESHOLD = 12;
 const MOBILE_BREAKPOINT_QUERY = "(max-width: 1023px)";
 const DISPLAY_MODE_STANDALONE_QUERY = "(display-mode: standalone)";
+const CHAT_DRAFT_STORAGE_PREFIX = "toolhub.chat.draft.v1";
 const TOOL_BUILDER_PROMPT_EXAMPLES: ToolBuilderPromptExample[] = [
   {
     id: "price-tracker",
@@ -1049,6 +1050,31 @@ function sortChatsForSidebar(list: ChatSession[]): ChatSession[] {
   });
 }
 
+function chatDraftStorageKey(chatId: string | null): string {
+  return `${CHAT_DRAFT_STORAGE_PREFIX}:${chatId ?? "new-chat"}`;
+}
+
+function loadChatDraft(chatId: string | null): string {
+  try {
+    return window.localStorage.getItem(chatDraftStorageKey(chatId)) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function persistChatDraft(chatId: string | null, value: string): void {
+  try {
+    const key = chatDraftStorageKey(chatId);
+    if (value.length === 0) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore localStorage failures for chat drafts.
+  }
+}
+
 function ChatPageContent() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -1072,6 +1098,7 @@ function ChatPageContent() {
   const [updatingModel, setUpdatingModel] = useState(false);
   const [streamActivity, setStreamActivity] = useState<StreamActivity>("ready");
   const [streamingAssistant, setStreamingAssistant] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingImage, setPendingImage] = useState<{ file: File; previewUrl: string } | null>(null);
   const [thinkingPanelMode, setThinkingPanelMode] = useState<ThinkingPanelMode>("none");
@@ -1096,6 +1123,7 @@ function ChatPageContent() {
   const sendingChatIdRef = useRef<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const copyFeedbackTimeoutRef = useRef<number | null>(null);
   const shortWheelCooldownRef = useRef(0);
   const shortFeedRequestInFlightRef = useRef(false);
   const shortFeedExhaustedRef = useRef(false);
@@ -1115,12 +1143,64 @@ function ChatPageContent() {
 
   const activeChat = useMemo(() => chats.find((chat) => chat.id === activeChatId) ?? null, [chats, activeChatId]);
   const isToolBuilderMode = composerMode === "tool_builder";
+  const shouldSubmitOnEnter = !isPhoneViewport && !isStandalonePwa;
 
   const requestedChatId = searchParams.get("chatId") ?? searchParams.get("sessionId");
   const newChatToken = searchParams.get("new");
 
   function resolveModelForRequest(): string | null {
     return composerModel ?? activeChat?.model ?? defaultModel ?? availableModels[0] ?? null;
+  }
+
+  function clearCopyFeedbackTimeout(): void {
+    if (copyFeedbackTimeoutRef.current === null) {
+      return;
+    }
+    window.clearTimeout(copyFeedbackTimeoutRef.current);
+    copyFeedbackTimeoutRef.current = null;
+  }
+
+  function showCopiedMessageFeedback(messageId: string): void {
+    setCopiedMessageId(messageId);
+    clearCopyFeedbackTimeout();
+    copyFeedbackTimeoutRef.current = window.setTimeout(() => {
+      setCopiedMessageId((current) => (current === messageId ? null : current));
+      copyFeedbackTimeoutRef.current = null;
+    }, 1800);
+  }
+
+  async function handleCopyMessage(message: ChatMessage): Promise<void> {
+    const text = (message.content || "").trim();
+    if (!text) {
+      setError("Message is empty and could not be copied.");
+      return;
+    }
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "true");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        textarea.style.pointerEvents = "none";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const copied = document.execCommand("copy");
+        document.body.removeChild(textarea);
+        if (!copied) {
+          throw new Error("Clipboard copy command failed.");
+        }
+      }
+      setError(null);
+      showCopiedMessageFeedback(message.id);
+    } catch {
+      setError("Unable to copy this message automatically.");
+    }
   }
 
   const loadMoreShorts = useCallback(async (batchSize = SHORTS_FETCH_BATCH_SIZE): Promise<void> => {
@@ -1353,6 +1433,19 @@ function ChatPageContent() {
   }, [activeChatId]);
 
   useEffect(() => {
+    setCopiedMessageId(null);
+    clearCopyFeedbackTimeout();
+  }, [activeChatId]);
+
+  useEffect(() => {
+    setPrompt(loadChatDraft(activeChatId));
+  }, [activeChatId]);
+
+  useEffect(() => {
+    persistChatDraft(activeChatId, prompt);
+  }, [prompt]);
+
+  useEffect(() => {
     if (!toolBuilderIntakeOpen) {
       return;
     }
@@ -1504,6 +1597,12 @@ function ChatPageContent() {
       }
     };
   }, [pendingImage]);
+
+  useEffect(() => {
+    return () => {
+      clearCopyFeedbackTimeout();
+    };
+  }, []);
 
   useEffect(() => {
     const refreshPreference = (): void => {
@@ -1776,24 +1875,14 @@ function ChatPageContent() {
     }
   }
 
-  function handleImageSelection(event: ChangeEvent<HTMLInputElement>): void {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
+  function setPendingImageFromFile(file: File): boolean {
     if (!file.type.startsWith("image/")) {
       setError("Please select an image file.");
-      if (imageInputRef.current) {
-        imageInputRef.current.value = "";
-      }
-      return;
+      return false;
     }
     if (file.size > 10 * 1024 * 1024) {
       setError("Image is too large. Maximum size is 10MB.");
-      if (imageInputRef.current) {
-        imageInputRef.current.value = "";
-      }
-      return;
+      return false;
     }
 
     setError(null);
@@ -1804,6 +1893,113 @@ function ChatPageContent() {
       }
       return { file, previewUrl };
     });
+    return true;
+  }
+
+  function firstImageFileFromClipboardData(data: DataTransfer | null): File | null {
+    if (!data) {
+      return null;
+    }
+
+    const files = Array.from(data.files || []);
+    const fileMatch = files.find((file) => file.type.startsWith("image/"));
+    if (fileMatch) {
+      return fileMatch;
+    }
+
+    const items = Array.from(data.items || []);
+    for (const item of items) {
+      if (!item.type.startsWith("image/")) {
+        continue;
+      }
+      const file = item.getAsFile();
+      if (file) {
+        return file;
+      }
+    }
+    return null;
+  }
+
+  async function readImageFromNavigatorClipboard(): Promise<File | null> {
+    if (!("clipboard" in navigator) || typeof navigator.clipboard.read !== "function") {
+      return null;
+    }
+
+    try {
+      const clipboardItems = await navigator.clipboard.read();
+      for (const item of clipboardItems) {
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (!imageType) {
+          continue;
+        }
+        const blob = await item.getType(imageType);
+        const extensionRaw = imageType.split("/")[1] || "png";
+        const extension = extensionRaw.replace(/[^a-z0-9.+-]/gi, "") || "png";
+        return new File([blob], `pasted-image-${Date.now()}.${extension}`, {
+          type: imageType,
+          lastModified: Date.now()
+        });
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
+  function attachPastedImage(file: File): void {
+    const hasName = file.name && file.name.trim().length > 0;
+    const normalized = hasName
+      ? file
+      : new File([file], `pasted-image-${Date.now()}.png`, {
+          type: file.type || "image/png",
+          lastModified: Date.now()
+        });
+    const attached = setPendingImageFromFile(normalized);
+    if (!attached && imageInputRef.current) {
+      imageInputRef.current.value = "";
+    }
+  }
+
+  function handleImageSelection(event: ChangeEvent<HTMLInputElement>): void {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    const attached = setPendingImageFromFile(file);
+    if (!attached && imageInputRef.current) {
+      imageInputRef.current.value = "";
+    }
+  }
+
+  function handleComposerPaste(event: ReactClipboardEvent<HTMLTextAreaElement>): void {
+    if (!activeChat || sending) {
+      return;
+    }
+
+    const pastedFromEvent = firstImageFileFromClipboardData(event.clipboardData);
+    if (pastedFromEvent) {
+      event.preventDefault();
+      attachPastedImage(pastedFromEvent);
+      return;
+    }
+
+    const clipboardTypes = Array.from(event.clipboardData?.types || []).map((type) => type.toLowerCase());
+    const maybeImageClipboard =
+      clipboardTypes.includes("files") || clipboardTypes.some((type) => type.startsWith("image/"));
+    if (!maybeImageClipboard) {
+      return;
+    }
+
+    event.preventDefault();
+    void (async () => {
+      const fallbackImage = await readImageFromNavigatorClipboard();
+      if (!fallbackImage) {
+        setError("Clipboard image was detected but could not be read. Try using the Image button.");
+        return;
+      }
+      attachPastedImage(fallbackImage);
+    })();
   }
 
   async function submitPrompt(): Promise<void> {
@@ -1812,23 +2008,27 @@ function ChatPageContent() {
     }
 
     const streamChatId = activeChatId;
+    const imageToUpload = pendingImage;
     sendingChatIdRef.current = streamChatId;
     setError(null);
     setSending(true);
     setStopping(false);
-    const content = prompt.trim() || "Please analyze the attached image.";
+    const content = prompt.trim() || "Use the attached image as the primary visual reference and apply its UI style/layout.";
     const streamToken = streamTokenRef.current + 1;
     setThinkingPanelCycle((current) => current + 1);
     streamTokenRef.current = streamToken;
     setPrompt("");
+    if (imageToUpload) {
+      clearPendingImage();
+    }
 
     try {
       setStreamActivity("thinking");
       setStreamingAssistant("");
       const selectedModel = resolveModelForRequest();
       const attachmentIds: string[] = [];
-      if (pendingImage) {
-        const uploaded = await uploadChatAttachment(streamChatId, pendingImage.file);
+      if (imageToUpload) {
+        const uploaded = await uploadChatAttachment(streamChatId, imageToUpload.file);
         attachmentIds.push(uploaded.id);
       }
       await streamChatMessage(
@@ -1839,9 +2039,6 @@ function ChatPageContent() {
         (event) => handleStreamEvent(event, streamToken, streamChatId)
       );
       await loadChats();
-      if (pendingImage) {
-        clearPendingImage();
-      }
     } catch (sendError) {
       setPrompt(content);
       streamTokenRef.current += 1;
@@ -1998,10 +2195,11 @@ function ChatPageContent() {
             <div className="mx-auto w-full max-w-4xl space-y-4">
               {messages.map((message) => {
                 const messageAttachments = parseMessageAttachments(message.metadata ?? {});
+                const isCopied = copiedMessageId === message.id;
                 return (
                   <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                     <div
-                      className={`max-w-[88%] px-3 py-2.5 ${
+                      className={`group relative max-w-[88%] px-3 py-2.5 ${
                         message.role === "user"
                           ? "rounded-3xl bg-amber/15 text-[color:var(--text-main)]"
                           : "text-[color:var(--text-main)]"
@@ -2027,7 +2225,31 @@ function ChatPageContent() {
                           ))}
                         </div>
                       )}
-                      <p className="mt-2 text-[11px] text-muted">{formatDate(message.createdAt)}</p>
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <p className="text-[11px] text-muted">{formatDate(message.createdAt)}</p>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyMessage(message)}
+                          className={`btn-ghost h-7 w-7 shrink-0 p-0 transition ${
+                            isCopied
+                              ? "border-mint/45 bg-mint/10 text-mint opacity-100"
+                              : "opacity-70 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100"
+                          }`}
+                          aria-label={isCopied ? "Copied" : "Copy message"}
+                          title={isCopied ? "Copied" : "Copy message"}
+                        >
+                          {isCopied ? (
+                            <svg viewBox="0 0 20 20" fill="none" className="mx-auto h-4 w-4" aria-hidden="true">
+                              <path d="M4.5 10.25L8.1 13.85L15.5 6.45" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          ) : (
+                            <svg viewBox="0 0 20 20" fill="none" className="mx-auto h-4 w-4" aria-hidden="true">
+                              <rect x="7" y="3.5" width="9" height="12.5" rx="1.8" stroke="currentColor" strokeWidth="1.4" />
+                              <path d="M4 12.5V5.8C4 4.81 4.81 4 5.8 4H12.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -2192,8 +2414,12 @@ function ChatPageContent() {
                   ref={promptTextareaRef}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
+                  onPaste={handleComposerPaste}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (event.nativeEvent.isComposing) {
+                      return;
+                    }
+                    if (shouldSubmitOnEnter && event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
                       void submitPrompt();
                     }
@@ -2231,7 +2457,11 @@ function ChatPageContent() {
                 )}
               </div>
 
-              <p className="mt-2 text-xs text-muted">Enter to send, Shift + Enter for a new line.</p>
+              <p className="mt-2 text-xs text-muted">
+                {shouldSubmitOnEnter ? "Enter to send, Shift + Enter for a new line." : "Enter for a new line. Tap Send to submit."}
+                {" "}
+                Paste an image from clipboard to attach.
+              </p>
             </div>
             {error && (
               <div className={`mx-auto mt-2 w-full ${CHAT_COMPOSER_MAX_WIDTH_CLASS} border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral`}>

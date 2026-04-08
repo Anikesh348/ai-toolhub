@@ -53,6 +53,7 @@ class ToolBuilderService:
         model: str | None = None,
         workflow_prompt: str | None = None,
         prompt_already_refined: bool = False,
+        image_paths: list[str] | None = None,
     ) -> dict:
         workflow_base_request_id = base_request_id
         request = None
@@ -83,6 +84,7 @@ class ToolBuilderService:
                 "model": model,
                 "prompt_override": generation_prompt,
                 "prompt_already_refined": prompt_already_refined,
+                "image_paths": image_paths,
             },
             daemon=True,
         )

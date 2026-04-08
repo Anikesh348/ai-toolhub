@@ -372,6 +372,24 @@ def download_job_log_artifact(
     return response
 
 
+@router.get("/jobs/{job_id}/log-artifacts/{artifact_id}/view")
+def view_job_log_artifact(
+    job_id: str,
+    artifact_id: str,
+    service: ToolBuilderService = Depends(get_tool_builder_service),
+) -> Response:
+    artifact = service.get_job_log_artifact(job_id, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Log artifact not found")
+
+    response = Response(
+        content=artifact.get("content") or "",
+        media_type=str(artifact.get("contentType") or "text/plain; charset=utf-8"),
+    )
+    response.headers["Content-Disposition"] = f'inline; filename="{artifact["fileName"]}"'
+    return response
+
+
 @router.get("/jobs/{job_id}/events")
 async def stream_job_events(
     job_id: str,

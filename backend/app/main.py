@@ -9,6 +9,7 @@ from app.api.chat_routes import router as chat_router
 from app.api.tool_routes import router as tool_router
 from app.repositories.build_log_repository import BuildLogRepository
 from app.repositories.build_log_artifact_repository import BuildLogArtifactRepository
+from app.repositories.chat_execution_log_repository import ChatExecutionLogRepository
 from app.repositories.chat_message_repository import ChatMessageRepository
 from app.repositories.chat_session_repository import ChatSessionRepository
 from app.repositories.port_allocation_repository import PortAllocationRepository
@@ -25,6 +26,7 @@ from app.services.port_allocator_service import PortAllocatorService
 from app.services.prompt_service import PromptService
 from app.services.system_context_service import SystemContextService
 from app.services.testing_service import TestingService
+from app.services.tool_builder_agent_team import ToolBuilderAgentTeam
 from app.services.tool_builder_service import ToolBuilderService
 from app.services.youtube_service import YouTubeService
 from app.utils.config import get_settings
@@ -78,6 +80,7 @@ def create_app() -> FastAPI:
         ports_collection_name = f"{settings.mongo_collection_prefix}_tool_port_allocations"
         chat_sessions_collection_name = f"{settings.mongo_collection_prefix}_chat_sessions"
         chat_messages_collection_name = f"{settings.mongo_collection_prefix}_chat_messages"
+        chat_execution_logs_collection_name = f"{settings.mongo_collection_prefix}_chat_execution_logs"
 
         db[requests_collection_name].create_index("status")
         db[requests_collection_name].create_index([("createdAt", -1)])
@@ -98,6 +101,8 @@ def create_app() -> FastAPI:
         db[chat_sessions_collection_name].create_index("archived")
         db[chat_sessions_collection_name].create_index([("archived", 1), ("updatedAt", -1)])
         db[chat_messages_collection_name].create_index([("sessionId", 1), ("createdAt", 1)])
+        db[chat_execution_logs_collection_name].create_index([("sessionId", 1), ("createdAt", -1)])
+        db[chat_execution_logs_collection_name].create_index([("mode", 1), ("createdAt", -1)])
 
         request_repository = RequestRepository(db[requests_collection_name])
         build_log_repository = BuildLogRepository(db[logs_collection_name])
@@ -106,6 +111,7 @@ def create_app() -> FastAPI:
         port_allocation_repository = PortAllocationRepository(db[ports_collection_name])
         chat_session_repository = ChatSessionRepository(db[chat_sessions_collection_name])
         chat_message_repository = ChatMessageRepository(db[chat_messages_collection_name])
+        chat_execution_log_repository = ChatExecutionLogRepository(db[chat_execution_logs_collection_name])
         instagram_service = InstagramService(settings=settings)
         youtube_service = YouTubeService(settings=settings)
 
@@ -115,8 +121,14 @@ def create_app() -> FastAPI:
         operator_access_service = OperatorAccessService(settings)
         system_context_service = SystemContextService()
         testing_service = TestingService(settings, docker_service)
-        port_allocator_service = PortAllocatorService(settings, tool_repository, port_allocation_repository)
+        port_allocator_service = PortAllocatorService(
+            settings,
+            tool_repository,
+            port_allocation_repository,
+            docker_service=docker_service,
+        )
         alert_service = AlertService(settings)
+        agent_team = ToolBuilderAgentTeam()
 
         workflow = ToolBuildWorkflow(
             settings=settings,
@@ -130,6 +142,7 @@ def create_app() -> FastAPI:
             docker_service=docker_service,
             port_allocator_service=port_allocator_service,
             alert_service=alert_service,
+            agent_team=agent_team,
         )
         tool_builder_service = ToolBuilderService(
             request_repository=request_repository,
@@ -157,8 +170,13 @@ def create_app() -> FastAPI:
             operator_access_service=operator_access_service,
             system_context_service=system_context_service,
             tool_builder_service=tool_builder_service,
+            chat_execution_log_repository=chat_execution_log_repository,
             tool_frontend_base_url=settings.tool_frontend_base_url,
             tool_backend_base_url=settings.tool_backend_base_url,
+            usd_inr_rate_api_url=settings.usd_inr_rate_api_url,
+            usd_inr_rate_timeout_seconds=settings.usd_inr_rate_timeout_seconds,
+            usd_inr_rate_cache_ttl_seconds=settings.usd_inr_rate_cache_ttl_seconds,
+            usd_inr_rate_fallback=settings.usd_inr_rate_fallback,
         )
 
         app_state.mongo_client = mongo_client

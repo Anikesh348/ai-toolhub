@@ -15,6 +15,7 @@ from app.services.docker_service import DockerService, RuntimePlan
 from app.services.port_allocator_service import PortAllocatorService
 from app.services.prompt_service import PromptService
 from app.services.testing_service import TestingService
+from app.services.tool_builder_agent_team import AgentTeamPackage, ToolBuilderAgentTeam
 from app.utils.config import Settings
 from app.utils.logger import get_logger
 from app.utils.time import now_ist
@@ -34,6 +35,7 @@ class ToolBuildWorkflow:
         docker_service: DockerService,
         port_allocator_service: PortAllocatorService,
         alert_service: AlertService,
+        agent_team: ToolBuilderAgentTeam | None = None,
     ) -> None:
         self._settings = settings
         self._request_repository = request_repository
@@ -46,6 +48,7 @@ class ToolBuildWorkflow:
         self._docker_service = docker_service
         self._port_allocator_service = port_allocator_service
         self._alert_service = alert_service
+        self._agent_team = agent_team or ToolBuilderAgentTeam()
         self._logger = get_logger(__name__)
 
     def run(
@@ -57,6 +60,7 @@ class ToolBuildWorkflow:
         model: str | None = None,
         prompt_override: str | None = None,
         prompt_already_refined: bool = False,
+        image_paths: list[str] | None = None,
     ) -> None:
         try:
             self._run(
@@ -67,6 +71,7 @@ class ToolBuildWorkflow:
                 model=model,
                 prompt_override=prompt_override,
                 prompt_already_refined=prompt_already_refined,
+                image_paths=image_paths,
             )
         except Exception as exc:  # pylint: disable=broad-except
             self._logger.exception("Workflow failed for request %s", request_id)
@@ -90,6 +95,7 @@ class ToolBuildWorkflow:
         model: str | None = None,
         prompt_override: str | None = None,
         prompt_already_refined: bool = False,
+        image_paths: list[str] | None = None,
     ) -> None:
         request = self._request_repository.get_by_id(request_id)
         if request is None:
@@ -100,7 +106,11 @@ class ToolBuildWorkflow:
 
         rebuild_tool = self._tool_repository.get_by_id(rebuild_tool_id) if rebuild_tool_id else None
         if base_request_id:
-            self._transition(request_id, BuildStatus.REFINING_PROMPT, "Preparing previous project as baseline")
+            self._transition(
+                request_id,
+                BuildStatus.VISIONARY_REFINING,
+                "🧠 Visionary is preparing previous project context as baseline...",
+            )
             seeded = self._seed_workspace_from_base(base_request_id=base_request_id, request_id=request_id)
             self._build_log_repository.add_log(
                 request_id,
@@ -108,12 +118,21 @@ class ToolBuildWorkflow:
                 f"Baseline workspace {'prepared' if seeded else 'not found; continuing from empty workspace'} from {base_request_id}",
             )
 
-        self._transition(request_id, BuildStatus.REFINING_PROMPT, "Refining prompt")
+        self._transition(request_id, BuildStatus.VISIONARY_REFINING, "🧠 Visionary is refining requirements...")
         source_prompt = (prompt_override or "").strip() or str(request["prompt"])
         refined_prompt = source_prompt if prompt_already_refined else self._prompt_service.refine_prompt(source_prompt)
         self._request_repository.set_refined_prompt(request_id, refined_prompt)
         generation_model = (model or "").strip() or str(getattr(self._settings, "tool_builder_model", "") or "").strip() or None
         request_context_prompt = self._effective_request_context_prompt(request)
+        prompt_for_agent_team = request_context_prompt or str(request.get("prompt") or source_prompt)
+
+        team_package = self._agent_team.prepare(
+            request_prompt=prompt_for_agent_team,
+            refined_prompt=refined_prompt,
+            request_context_prompt=request_context_prompt,
+        )
+        self._record_agent_outputs(request_id=request_id, team_package=team_package)
+        craftsman_base_prompt = team_package.craftsman_prompt
 
         last_failure = ""
         terminal_failure_reason: str | None = None
@@ -122,23 +141,32 @@ class ToolBuildWorkflow:
             if self._request_stopped_or_missing(request_id):
                 return
             if attempt == 1:
-                prompt = refined_prompt
-                self._transition(request_id, BuildStatus.GENERATING_CODE, f"Generating code (attempt {attempt})")
+                prompt = craftsman_base_prompt
+                self._transition(
+                    request_id,
+                    BuildStatus.CRAFTSMAN_IMPLEMENTING,
+                    f"👨‍💻 Craftsman is implementing the solution (attempt {attempt})",
+                )
             else:
                 guidance = self._testing_service.build_fix_guidance(last_failure)
                 feedback = (
-                    f"The previous attempt failed tests.\n"
+                    f"Guardian QA reported failing gates in attempt {attempt - 1}.\n"
                     f"Fix all issues and keep all requirements satisfied.\n"
                     f"Error logs:\n{last_failure[-6000:]}\n\n"
-                    f"Additional mandatory fixes:\n{guidance}"
+                    f"Additional mandatory fixes from Guardian:\n{guidance}"
                 )
-                prompt = f"{refined_prompt}\n\n{feedback}"
-                self._transition(request_id, BuildStatus.FIXING_ERRORS, f"Fixing code (attempt {attempt})")
+                prompt = f"{craftsman_base_prompt}\n\n{feedback}"
+                self._transition(
+                    request_id,
+                    BuildStatus.CRAFTSMAN_IMPLEMENTING,
+                    f"👨‍💻 Craftsman is fixing Guardian findings (attempt {attempt})",
+                )
 
             generation_result = self._codex_service.run_generation(
                 request_id=request_id,
                 prompt=prompt,
                 model=generation_model,
+                image_paths=image_paths,
             )
             if self._request_stopped_or_missing(request_id):
                 return
@@ -181,7 +209,11 @@ class ToolBuildWorkflow:
                 last_failure = preflight_message
                 continue
 
-            self._transition(request_id, BuildStatus.TESTING, f"Running tests (attempt {attempt})")
+            self._transition(
+                request_id,
+                BuildStatus.GUARDIAN_VALIDATING,
+                f"🧪 Guardian is running validation suite (attempt {attempt})",
+            )
             test_result = self._testing_service.run_tests(request_id=request_id)
             self._build_log_repository.add_log(request_id, f"test_attempt_{attempt}", test_result.logs[-12000:])
             self._store_log_artifact(
@@ -191,7 +223,11 @@ class ToolBuildWorkflow:
                 content=test_result.logs,
             )
             if test_result.success:
-                self._transition(request_id, BuildStatus.BUILDING_IMAGE, f"Building Docker image (attempt {attempt})")
+                self._transition(
+                    request_id,
+                    BuildStatus.SHIPMASTER_DEPLOYING,
+                    f"⚙️ Shipmaster is packaging runtime image (attempt {attempt})",
+                )
                 attempt_image_tag = f"generated-tool:{request_id}-a{attempt}"
                 image_build_result = self._docker_service.build_image(request_id=request_id, image_tag=attempt_image_tag)
                 if self._request_stopped_or_missing(request_id):
@@ -211,20 +247,40 @@ class ToolBuildWorkflow:
                     last_failure = f"Docker image build failed:\n{image_build_result.logs[-4000:]}"
                     continue
 
-                self._transition(request_id, BuildStatus.DEPLOYING, f"Runtime precheck (attempt {attempt})")
-                try:
-                    probe_port = self._port_allocator_service.allocate_port(reserve=False)
-                except RuntimeError as exc:
-                    last_failure = f"Port allocation failed during runtime precheck: {exc}"
-                    continue
-
-                probe_ok, probe_container_id, probe_error = self._docker_service.run_probe_container(
-                    name=f"{request_id[:10]}-{attempt}",
-                    image_tag=attempt_image_tag,
-                    host_port=probe_port,
-                    request_id=request_id,
+                self._transition(
+                    request_id,
+                    BuildStatus.SHIPMASTER_DEPLOYING,
+                    f"⚙️ Shipmaster is running runtime precheck (attempt {attempt})",
                 )
-                if not probe_ok or not probe_container_id:
+                probe_port: int | None = None
+                probe_container_id: str | None = None
+                probe_error = ""
+                for precheck_try in range(1, 4):
+                    try:
+                        probe_port = self._port_allocator_service.allocate_port(reserve=False)
+                    except RuntimeError as exc:
+                        probe_error = f"Port allocation failed during runtime precheck: {exc}"
+                        break
+
+                    probe_ok, probe_container_id, probe_error = self._docker_service.run_probe_container(
+                        name=f"{request_id[:10]}-{attempt}-{precheck_try}",
+                        image_tag=attempt_image_tag,
+                        host_port=probe_port,
+                        request_id=request_id,
+                    )
+                    if probe_ok and probe_container_id:
+                        break
+
+                    if "port is already allocated" in str(probe_error).lower() and precheck_try < 3:
+                        self._build_log_repository.add_log(
+                            request_id,
+                            f"precheck_retry_attempt_{attempt}_{precheck_try}",
+                            f"Runtime precheck port conflict on {probe_port}; retrying with another port.",
+                        )
+                        continue
+                    break
+
+                if probe_port is None or not probe_container_id:
                     last_failure = f"Runtime precheck container failed: {probe_error}"
                     continue
 
@@ -256,8 +312,8 @@ class ToolBuildWorkflow:
 
                     self._transition(
                         request_id,
-                        BuildStatus.VERIFYING_APIS,
-                        f"Verifying backend endpoints (attempt {attempt})",
+                        BuildStatus.GUARDIAN_VALIDATING,
+                        f"🧪 Guardian is verifying backend endpoints (attempt {attempt})",
                     )
                     api_ok, api_summary, api_report = self._testing_service.verify_runtime_apis(
                         request_id=request_id,
@@ -327,8 +383,8 @@ class ToolBuildWorkflow:
                     if should_cross_check_scraping:
                         self._transition(
                             request_id,
-                            BuildStatus.VERIFYING_APIS,
-                            f"Cross-checking scraping output with web search (attempt {attempt})",
+                            BuildStatus.GUARDIAN_VALIDATING,
+                            f"🧪 Guardian is cross-checking scraping output with web evidence (attempt {attempt})",
                         )
                         scrape_ok, scrape_message = self._verify_scraped_api_output_with_web(
                             request_id=request_id,
@@ -396,7 +452,7 @@ class ToolBuildWorkflow:
             )
         runtime_plan = self._docker_service.inspect_runtime_plan(request_id)
         allocation_order = self._allocation_order(runtime_plan)
-        self._transition(request_id, BuildStatus.DEPLOYING, "Deploying tool runtime")
+        self._transition(request_id, BuildStatus.SHIPMASTER_DEPLOYING, "⚙️ Shipmaster is deploying tool runtime")
         if self._request_stopped_or_missing(request_id):
             return
 
@@ -507,6 +563,117 @@ class ToolBuildWorkflow:
 
         combined = "\n\n".join(part for part in parts if part.strip()).strip()
         return combined or str(request.get("prompt") or "").strip()
+
+    def _record_agent_outputs(self, request_id: str, team_package: AgentTeamPackage) -> None:
+        self._transition(request_id, BuildStatus.VISIONARY_REFINING, "🧠 Visionary finalized requirements package")
+        visionary_markdown = team_package.visionary.to_markdown()
+        self._build_log_repository.add_log(
+            request_id,
+            "agent_visionary",
+            visionary_markdown[-12000:],
+        )
+        self._store_log_artifact(
+            request_id=request_id,
+            step="agent_visionary",
+            file_name="visionary-output.md",
+            content=visionary_markdown,
+            content_type="text/markdown; charset=utf-8",
+        )
+
+        self._transition(request_id, BuildStatus.BLUEPRINT_DESIGNING, "🏗️ Blueprint completed architecture design")
+        blueprint_markdown = team_package.blueprint.to_markdown()
+        self._build_log_repository.add_log(
+            request_id,
+            "agent_blueprint",
+            blueprint_markdown[-12000:],
+        )
+        self._store_log_artifact(
+            request_id=request_id,
+            step="agent_blueprint",
+            file_name="blueprint-output.md",
+            content=blueprint_markdown,
+            content_type="text/markdown; charset=utf-8",
+        )
+
+        backend_markdown = team_package.backend_engineer.to_markdown()
+        self._build_log_repository.add_log(
+            request_id,
+            "agent_backend_engineer",
+            backend_markdown[-12000:],
+        )
+        self._store_log_artifact(
+            request_id=request_id,
+            step="agent_backend_engineer",
+            file_name="backend-engineer-output.md",
+            content=backend_markdown,
+            content_type="text/markdown; charset=utf-8",
+        )
+
+        if team_package.frontend_engineer is not None:
+            frontend_markdown = team_package.frontend_engineer.to_markdown()
+            self._build_log_repository.add_log(
+                request_id,
+                "agent_frontend_engineer",
+                frontend_markdown[-12000:],
+            )
+            self._store_log_artifact(
+                request_id=request_id,
+                step="agent_frontend_engineer",
+                file_name="frontend-engineer-output.md",
+                content=frontend_markdown,
+                content_type="text/markdown; charset=utf-8",
+            )
+
+        self._transition(request_id, BuildStatus.GUARDIAN_VALIDATING, "🧪 Guardian completed QA plan")
+        guardian_markdown = team_package.guardian.to_markdown()
+        self._build_log_repository.add_log(
+            request_id,
+            "agent_guardian",
+            guardian_markdown[-12000:],
+        )
+        self._store_log_artifact(
+            request_id=request_id,
+            step="agent_guardian",
+            file_name="guardian-output.md",
+            content=guardian_markdown,
+            content_type="text/markdown; charset=utf-8",
+        )
+
+        self._transition(request_id, BuildStatus.SHIPMASTER_DEPLOYING, "⚙️ Shipmaster completed deployment plan")
+        shipmaster_markdown = team_package.shipmaster.to_markdown()
+        self._build_log_repository.add_log(
+            request_id,
+            "agent_shipmaster",
+            shipmaster_markdown[-12000:],
+        )
+        self._store_log_artifact(
+            request_id=request_id,
+            step="agent_shipmaster",
+            file_name="shipmaster-output.md",
+            content=shipmaster_markdown,
+            content_type="text/markdown; charset=utf-8",
+        )
+
+        self._transition(
+            request_id,
+            BuildStatus.CRAFTSMAN_IMPLEMENTING,
+            "👨‍💻 Craftsman received all handoff artifacts and is preparing implementation",
+        )
+        self._store_log_artifact(
+            request_id=request_id,
+            step="agent_craftsman_input",
+            file_name="craftsman-input.md",
+            content=team_package.craftsman_prompt,
+            content_type="text/markdown; charset=utf-8",
+        )
+        self._build_log_repository.add_log(
+            request_id,
+            "agent_handoff",
+            (
+                "Handoff complete: Visionary -> Blueprint -> Backend Engineer -> "
+                "Frontend Engineer (when UI exists) -> Craftsman -> Guardian -> Shipmaster pipeline is active."
+            ),
+        )
 
     def _request_stopped_or_missing(self, request_id: str) -> bool:
         request = self._request_repository.get_by_id(request_id)

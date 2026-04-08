@@ -228,3 +228,58 @@ class ChatAttachmentResponse(BaseModel):
     size: int
     containerPath: str
     url: str
+
+
+class ChatExecutionLogResponse(BaseModel):
+    id: str
+    sessionId: str
+    mode: ChatMode
+    model: Optional[str] = None
+    userMessageId: Optional[str] = None
+    assistantMessageId: Optional[str] = None
+    userContent: str
+    assistantContent: str
+    rawLogs: str
+    success: bool
+    exitCode: int
+    quickPath: bool
+    promptTokens: Optional[int] = None
+    completionTokens: Optional[int] = None
+    totalTokens: int = 0
+    tokenSource: Literal["parsed", "estimated", "mixed"] = "estimated"
+    createdAt: datetime
+    updatedAt: datetime
+
+
+class ChatUsageModeResponse(BaseModel):
+    mode: ChatMode
+    requestCount: int = 0
+    promptTokens: int = 0
+    completionTokens: int = 0
+    totalTokens: int = 0
+    parsedCount: int = 0
+    estimatedCount: int = 0
+    mixedCount: int = 0
+
+
+class ChatUsageCostEstimateResponse(BaseModel):
+    usd: float = 0.0
+    inr: float = 0.0
+    usdPerMillionTokens: float = 0.0
+    usdToInrRate: float = 0.0
+    usdToInrSource: str = "fallback_default"
+    usdToInrLive: bool = False
+    usdToInrUpdatedAt: Optional[datetime] = None
+    note: str = "Rough estimate for visibility only."
+
+
+class ChatUsageSummaryResponse(BaseModel):
+    requestCount: int = 0
+    promptTokens: int = 0
+    completionTokens: int = 0
+    totalTokens: int = 0
+    parsedCount: int = 0
+    estimatedCount: int = 0
+    mixedCount: int = 0
+    modes: list[ChatUsageModeResponse] = Field(default_factory=list)
+    costEstimate: ChatUsageCostEstimateResponse

@@ -328,6 +328,42 @@ class DockerService:
         summaries.sort(key=lambda row: row["name"])
         return summaries
 
+    def get_published_host_ports(self) -> set[int]:
+        try:
+            containers = self._client.containers.list(all=True)
+        except DockerException:
+            return set()
+
+        published_ports: set[int] = set()
+        for container in containers:
+            try:
+                container.reload()
+                attrs = container.attrs
+            except DockerException:
+                continue
+
+            ports_mapping = ((attrs.get("NetworkSettings") or {}).get("Ports") or {})
+            if not isinstance(ports_mapping, dict):
+                continue
+
+            for mappings in ports_mapping.values():
+                if not isinstance(mappings, list):
+                    continue
+                for mapping in mappings:
+                    if not isinstance(mapping, dict):
+                        continue
+                    host_port = mapping.get("HostPort")
+                    if host_port is None:
+                        continue
+                    try:
+                        resolved_port = int(host_port)
+                    except (TypeError, ValueError):
+                        continue
+                    if resolved_port > 0:
+                        published_ports.add(resolved_port)
+
+        return published_ports
+
     def check_container_health_and_restart(self, container_name: str) -> dict[str, Any]:
         target = self._find_container_by_name(container_name)
         if target is None:

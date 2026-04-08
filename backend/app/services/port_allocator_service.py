@@ -1,5 +1,6 @@
 import socket
 
+from app.services.docker_service import DockerService
 from app.repositories.port_allocation_repository import PortAllocationRepository
 from app.repositories.tool_repository import ToolRepository
 from app.utils.config import Settings
@@ -11,10 +12,12 @@ class PortAllocatorService:
         settings: Settings,
         tool_repository: ToolRepository,
         port_allocation_repository: PortAllocationRepository,
+        docker_service: DockerService | None = None,
     ) -> None:
         self._settings = settings
         self._tool_repository = tool_repository
         self._port_allocation_repository = port_allocation_repository
+        self._docker_service = docker_service
 
     def allocate_port(
         self,
@@ -44,12 +47,17 @@ class PortAllocatorService:
 
         used_ports = set(self._tool_repository.get_ports_in_use())
         reserved_ports = set(self._port_allocation_repository.get_reserved_ports())
+        docker_bound_ports = self._docker_service.get_published_host_ports() if self._docker_service else set()
         allocated: list[int] = []
 
         for port in range(self._settings.port_range_start, self._settings.port_range_end + 1):
-            if port in used_ports or port in reserved_ports:
+            if port in used_ports or port in reserved_ports or port in docker_bound_ports:
                 continue
-            if not self._is_port_free(port) or not self._can_bind(port):
+            if (
+                not self._is_port_free(port)
+                or not self._is_host_gateway_port_free(port)
+                or not self._can_bind(port)
+            ):
                 continue
 
             if reserve and not self._port_allocation_repository.reserve_port(port, tool_id, request_id):
@@ -58,6 +66,7 @@ class PortAllocatorService:
             allocated.append(port)
             used_ports.add(port)
             reserved_ports.add(port)
+            docker_bound_ports.add(port)
             if len(allocated) == count:
                 return allocated
 
@@ -69,13 +78,25 @@ class PortAllocatorService:
         used_ports = self._tool_repository.get_ports_in_use(exclude_tool_id=exclude_tool_id)
         if port in used_ports:
             return False
-        return self._is_port_free(port) and self._can_bind(port)
+        if self._docker_service and port in self._docker_service.get_published_host_ports():
+            return False
+        return self._is_port_free(port) and self._is_host_gateway_port_free(port) and self._can_bind(port)
 
     @staticmethod
     def _is_port_free(port: int) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.3)
             return sock.connect_ex(("127.0.0.1", port)) != 0
+
+    @staticmethod
+    def _is_host_gateway_port_free(port: int) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.3)
+                return sock.connect_ex(("host.docker.internal", port)) != 0
+        except OSError:
+            # Some non-container test/dev environments do not resolve host.docker.internal.
+            return True
 
     @staticmethod
     def _can_bind(port: int) -> bool:

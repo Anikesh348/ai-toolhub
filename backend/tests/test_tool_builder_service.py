@@ -146,6 +146,35 @@ def test_start_generation_can_mark_workflow_prompt_as_already_refined() -> None:
     thread_instance.start.assert_called_once()
 
 
+def test_start_generation_passes_image_paths_to_workflow_thread() -> None:
+    request_repository = Mock()
+    request_repository.create.return_value = {
+        "id": "new-request-id",
+        "status": "PENDING",
+    }
+    service = _build_service(request_repository=request_repository)
+
+    with patch("app.services.tool_builder_service.threading.Thread") as thread_cls:
+        thread_instance = Mock()
+        thread_cls.return_value = thread_instance
+
+        service.start_generation(
+            prompt="Build a dashboard matching uploaded references.",
+            name="demo tool",
+            image_paths=[
+                "/workspace/chat-session/attachments/ref-1.png",
+                "/workspace/chat-session/attachments/ref-2.png",
+            ],
+        )
+
+    thread_kwargs = thread_cls.call_args.kwargs["kwargs"]
+    assert thread_kwargs["image_paths"] == [
+        "/workspace/chat-session/attachments/ref-1.png",
+        "/workspace/chat-session/attachments/ref-2.png",
+    ]
+    thread_instance.start.assert_called_once()
+
+
 def test_builder_mounts_include_operator_allowed_paths(tmp_path) -> None:
     workspace_path = tmp_path / "workspace"
     allowed_path = tmp_path / "allowed"

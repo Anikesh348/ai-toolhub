@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import {
   buildJobLogArtifactDownloadUrl,
+  buildJobLogArtifactViewUrl,
   JobSummary,
   JobLogArtifact,
   TOOL_BACKEND_BASE_URL,
@@ -514,6 +515,14 @@ export default function RequestsPage() {
                           {formatArtifactSize(artifact.sizeBytes)} • {formatDate(artifact.createdAt)}
                         </p>
                       </div>
+                      <a
+                        href={buildJobLogArtifactViewUrl(activeLogsJob.id, artifact.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn-ghost border-amber/35 bg-amber/10 px-3 py-2 text-sm text-amber"
+                      >
+                        View
+                      </a>
                       <a
                         href={buildJobLogArtifactDownloadUrl(activeLogsJob.id, artifact.id)}
                         className="btn-ghost border-skyline/45 bg-skyline/10 px-3 py-2 text-sm text-skyline"

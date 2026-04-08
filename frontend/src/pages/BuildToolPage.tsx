@@ -13,7 +13,7 @@ import {
   submitTool,
   trimPrompt
 } from "@/lib/api";
-import { STATUS_COLORS, isTerminalStatus } from "@/lib/status";
+import { STATUS_COLORS, STATUS_STAGE_INFO, isTerminalStatus } from "@/lib/status";
 
 export default function BuildToolPage() {
   const [prompt, setPrompt] = useState("");
@@ -28,6 +28,10 @@ export default function BuildToolPage() {
 
   const activeJobs = useMemo(() => jobs.filter((job) => !isTerminalStatus(job.status)), [jobs]);
   const activeSummary = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [jobs, activeJobId]);
+  const activeStageInfo = useMemo(
+    () => (activeSummary ? STATUS_STAGE_INFO[activeSummary.status] : null),
+    [activeSummary]
+  );
 
   async function loadJobs(): Promise<void> {
     try {
@@ -201,6 +205,12 @@ export default function BuildToolPage() {
             <span className="stat-pill">
               Status <strong className={activeSummary ? STATUS_COLORS[activeSummary.status] : "text-muted"}>{activeSummary ? activeSummary.status : "Idle"}</strong>
             </span>
+            <span className="stat-pill">
+              Stage <strong>{activeStageInfo ? activeStageInfo.stage : "Idle"}</strong>
+            </span>
+            <span className="stat-pill">
+              Agent <strong>{activeStageInfo ? activeStageInfo.agent : "-"}</strong>
+            </span>
           </div>
         </div>
       </header>
@@ -276,6 +286,7 @@ export default function BuildToolPage() {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="font-[var(--font-mono)] text-xs text-muted">Prompt</p>
+                    <p className="mt-1 text-xs text-skyline">{STATUS_STAGE_INFO[activeJob.status].message}</p>
                   </div>
                   {!isTerminalStatus(activeJob.status) && (
                     <button

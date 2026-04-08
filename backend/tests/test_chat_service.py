@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from app.services.chat_service import ChatService
 from app.utils.time import now_ist
@@ -18,6 +18,96 @@ def test_docker_summary_query_ignores_deploy_request() -> None:
 def test_docker_summary_query_ignores_spin_up_request() -> None:
     prompt = "Please spin up docker containers for tool-hub"
     assert ChatService._is_docker_summary_query(prompt) is False
+
+
+def test_docker_summary_query_ignores_debug_request() -> None:
+    prompt = "Show me docker status and debug why toolhub-api keeps restarting"
+    assert ChatService._is_docker_summary_query(prompt) is False
+
+
+def test_explicit_system_resource_query_ignores_diagnostic_prompt() -> None:
+    prompt = "memory leak issue in worker service"
+    assert ChatService._is_explicit_system_resource_query(prompt) is False
+
+
+def test_explicit_system_resource_query_accepts_status_prompt() -> None:
+    prompt = "show current cpu and memory usage"
+    assert ChatService._is_explicit_system_resource_query(prompt) is True
+
+
+def test_operator_quick_reply_disabled_even_for_simple_operator_prompts() -> None:
+    assert ChatService._should_use_operator_quick_reply("operator", "show cpu usage") is False
+
+
+def test_should_capture_execution_logs_includes_tool_builder_mode() -> None:
+    assert ChatService._should_capture_execution_logs("tool_builder") is True  # pylint: disable=protected-access
+
+
+def test_operator_task_complexity_classifies_debug_request_as_complex() -> None:
+    prompt = "debug failing deployment pipeline and inspect logs from previous run"
+    assert ChatService._operator_task_complexity(prompt) == "complex"
+
+
+def test_operator_model_for_simple_task_prefers_fast_model() -> None:
+    codex_service = Mock()
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.list_chat_models.return_value = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"]
+    codex_service.is_supported_chat_model.return_value = True
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+    )
+
+    selected = service._operator_model_for_task(  # pylint: disable=protected-access
+        selected_model="gpt-5.4",
+        user_content="summarize disk usage in this repo",
+    )
+
+    assert selected == "gpt-5.4-mini"
+
+
+def test_operator_model_for_action_task_keeps_selected_model() -> None:
+    codex_service = Mock()
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.list_chat_models.return_value = ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"]
+    codex_service.is_supported_chat_model.return_value = True
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+    )
+
+    selected = service._operator_model_for_task(  # pylint: disable=protected-access
+        selected_model="gpt-5.4",
+        user_content="fix memory leak in api service",
+    )
+
+    assert selected == "gpt-5.4"
+
+
+def test_operator_timeout_seconds_shortens_simple_tasks() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    timeout = service._operator_timeout_seconds_for_task("show current disk usage")  # pylint: disable=protected-access
+    assert timeout == 480
+
+
+def test_operator_timeout_seconds_keeps_debug_tasks_high() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    timeout = service._operator_timeout_seconds_for_task(  # pylint: disable=protected-access
+        "debug and troubleshoot failing deployment pipeline"
+    )
+    assert timeout == 1800
 
 
 def test_operator_branch_instruction_defaults_to_current_branch() -> None:
@@ -125,6 +215,41 @@ def test_sanitize_operator_output_keeps_code_when_diff_requested() -> None:
     )
     sanitized = ChatService._sanitize_operator_output("Show me the diff", output)
     assert "+ print('hello')" in sanitized
+
+
+def test_try_direct_operator_answer_rejects_diagnostic_memory_prompt() -> None:
+    system_context_service = Mock()
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        system_context_service=system_context_service,  # type: ignore[arg-type]
+    )
+
+    answer = service._try_direct_operator_answer("operator", "memory leak issue in backend worker")  # pylint: disable=protected-access
+
+    assert answer is None
+    system_context_service.snapshot.assert_not_called()
+
+
+def test_try_direct_operator_answer_rejects_health_check_with_restart_action() -> None:
+    docker_service = Mock()
+    system_context_service = Mock()
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        docker_service=docker_service,  # type: ignore[arg-type]
+        system_context_service=system_context_service,  # type: ignore[arg-type]
+    )
+
+    answer = service._try_direct_operator_answer(  # pylint: disable=protected-access
+        "operator",
+        "check if api container is healthy and restart it if needed",
+    )
+
+    assert answer is None
+    docker_service.get_container_health.assert_not_called()
 
 
 def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
@@ -557,6 +682,148 @@ def test_modify_chat_tool_question_answers_without_starting_rebuild() -> None:
     assert codex_service.run_chat.call_args.kwargs["model"] == "gpt-5.4-mini"
 
 
+def test_tool_builder_with_image_attachment_forwards_visual_context_to_generation() -> None:
+    codex_service = Mock()
+    codex_service.run_chat.side_effect = [
+        SimpleNamespace(
+            success=True,
+            logs=(
+                "assistant: 1. Visual Direction\n"
+                "- Use a compact dashboard layout with strong card hierarchy.\n"
+                "2. Layout Structure\n"
+                "- Keep two-column desktop layout and stacked mobile flow."
+            ),
+        ),
+        SimpleNamespace(
+            success=True,
+            logs='{"needsClarification": false, "questions": [], "clarifiedRequest": ""}',
+        ),
+    ]
+    codex_service.clean_cli_output.side_effect = lambda value: value
+    tool_builder_service = Mock()
+    tool_builder_service.start_generation.return_value = {"id": "req-image", "status": "PENDING"}
+    message_repository = Mock()
+    message_repository.list_recent_for_session.return_value = []
+
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+    )
+
+    message, context = service._run_tool_builder_task(
+        session_id="session-1",
+        user_content="Build a project management dashboard and match the attached screenshot style.",
+        selected_model="gpt-5.4-mini",
+        attachments=[
+            {
+                "id": "att-1",
+                "fileName": "reference-ui.png",
+                "contentType": "image/png",
+                "size": 1024,
+                "containerPath": "/workspace/chat-session/attachments/reference-ui.png",
+                "url": "/chat/sessions/session-1/attachments/att-1",
+            }
+        ],
+    )
+
+    assert "Build queued." in message
+    assert context == {"requestId": "req-image", "phase": "building"}
+    assert codex_service.run_chat.call_count == 2
+
+    visual_call = codex_service.run_chat.call_args_list[0].kwargs
+    assert visual_call["session_id"] == "session-1-tool-visual-brief"
+    assert visual_call["image_paths"] == ["/workspace/chat-session/attachments/reference-ui.png"]
+
+    clarification_call = codex_service.run_chat.call_args_list[1].kwargs
+    assert clarification_call["session_id"] == "session-1-tool-clarify"
+    assert clarification_call["image_paths"] == ["/workspace/chat-session/attachments/reference-ui.png"]
+
+    starter_kwargs = tool_builder_service.start_generation.call_args.kwargs
+    assert starter_kwargs["image_paths"] == ["/workspace/chat-session/attachments/reference-ui.png"]
+    assert "Visual reference requirements" in starter_kwargs["prompt"]
+
+
+def test_send_message_for_tool_builder_forwards_resolved_attachments_to_handler() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "Tool Builder Session",
+        "mode": "tool_builder",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "Please use the attached screenshot.",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "Build queued.",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.run_chat.return_value = SimpleNamespace(success=True, logs="assistant: ok", exit_code=0)
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        tool_builder_service=Mock(),  # type: ignore[arg-type]
+    )
+    service._resolve_message_attachments = Mock(  # type: ignore[method-assign]
+        return_value=(
+            [
+                {
+                    "id": "att-1",
+                    "fileName": "ux.png",
+                    "contentType": "image/png",
+                    "size": 100,
+                    "containerPath": "/workspace/chat-session/attachments/ux.png",
+                    "url": "/chat/sessions/session-1/attachments/att-1",
+                }
+            ],
+            None,
+        )
+    )
+    service._run_tool_builder_task = Mock(  # type: ignore[method-assign]
+        return_value=("Build queued.", {"requestId": "req-1", "phase": "building"})
+    )
+
+    _user_message, _assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="Please use the attached screenshot.",
+        attachment_ids=["att-1"],
+    )
+
+    assert error is None
+    service._run_tool_builder_task.assert_called_once()  # type: ignore[attr-defined]
+    forwarded = service._run_tool_builder_task.call_args.kwargs  # type: ignore[attr-defined]
+    assert forwarded["attachments"] == [
+        {
+            "id": "att-1",
+            "fileName": "ux.png",
+            "contentType": "image/png",
+            "size": 100,
+            "containerPath": "/workspace/chat-session/attachments/ux.png",
+            "url": "/chat/sessions/session-1/attachments/att-1",
+        }
+    ]
+
+
 def test_summarize_tool_builder_request_text_extracts_nested_change_request() -> None:
     value = (
         "You are generating a production-ready Python tool for container deployment.\n"
@@ -680,7 +947,9 @@ def test_stream_message_persists_assistant_before_final_delta_stream() -> None:
         message_repository=message_repository,  # type: ignore[arg-type]
         codex_service=_StubCodexService(),  # type: ignore[arg-type]
     )
-    service._run_operator_task = Mock(return_value="A" * 180)  # type: ignore[method-assign]
+    service._run_operator_task = Mock(  # type: ignore[method-assign]
+        return_value={"assistantText": "A" * 180, "rawLogs": "raw", "success": True, "exitCode": 0}
+    )
 
     stream = service.stream_message(session_id="session-1", content="Please check the operator run.")
     assert next(stream)["type"] == "user_message"
@@ -690,6 +959,243 @@ def test_stream_message_persists_assistant_before_final_delta_stream() -> None:
     created_roles = [message["role"] for message in message_repository.created]
     assert created_roles == ["user", "assistant"]
     assert session_repository.touched is True
+
+
+def test_send_message_records_execution_log_for_general_chat() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "General Session",
+        "mode": "general",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "How is the deployment?",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "Deployment looks healthy.",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs="assistant: Deployment looks healthy.",
+        exit_code=0,
+    )
+    chat_execution_log_repository = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="How is the deployment?",
+    )
+
+    assert error is None
+    assert user_message is not None
+    assert assistant_message is not None
+    chat_execution_log_repository.create.assert_called_once()
+    payload = chat_execution_log_repository.create.call_args.kwargs
+    assert payload["session_id"] == "session-1"
+    assert payload["mode"] == "general"
+    assert payload["user_message_id"] == "user-1"
+    assert payload["assistant_message_id"] == "assistant-1"
+    assert payload["quick_path"] is False
+    assert payload["success"] is True
+    assert payload["total_tokens"] > 0
+    assert payload["token_source"] in {"parsed", "estimated", "mixed"}
+
+
+def test_send_message_records_execution_log_for_operator_without_quick_path() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "Operator Session",
+        "mode": "operator",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "show cpu usage",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "CPU: 23.5% usage right now.",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    chat_execution_log_repository = Mock()
+    system_context_service = Mock()
+    system_context_service.format_for_prompt.return_value = "Runtime telemetry snapshot."
+    system_context_service.snapshot.return_value = {
+        "cpu": {"percent": 23.5},
+        "memory": {"percent": 49.0, "usedBytes": 4_000_000_000, "totalBytes": 8_000_000_000},
+        "disk": {"percent": 70.0, "usedBytes": 10_000_000_000, "totalBytes": 20_000_000_000},
+        "battery": None,
+        "uptimeSeconds": 1200,
+        "isContainer": True,
+    }
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        system_context_service=system_context_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    _user_message, _assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="show cpu usage",
+    )
+
+    assert error is None
+    chat_execution_log_repository.create.assert_called_once()
+    payload = chat_execution_log_repository.create.call_args.kwargs
+    assert payload["session_id"] == "session-1"
+    assert payload["mode"] == "operator"
+    assert payload["quick_path"] is False
+    assert payload["total_tokens"] > 0
+
+
+def test_parse_token_usage_from_logs_parses_inline_input_output() -> None:
+    logs = "assistant: done\nTokens used: 1,200 input, 345 output"
+    usage = ChatService._parse_token_usage_from_logs(logs)  # pylint: disable=protected-access
+
+    assert usage["promptTokens"] == 1200
+    assert usage["completionTokens"] == 345
+    assert usage["totalTokens"] == 1545
+
+
+def test_parse_token_usage_from_logs_parses_labeled_token_lines() -> None:
+    logs = (
+        "assistant: completed\n"
+        "Prompt tokens: 900\n"
+        "Completion tokens: 150\n"
+    )
+    usage = ChatService._parse_token_usage_from_logs(logs)  # pylint: disable=protected-access
+
+    assert usage["promptTokens"] == 900
+    assert usage["completionTokens"] == 150
+    assert usage["totalTokens"] == 1050
+
+
+def test_derive_token_usage_estimates_when_logs_do_not_include_usage() -> None:
+    usage = ChatService._derive_token_usage(  # pylint: disable=protected-access
+        raw_logs="assistant: No explicit token usage line",
+        user_content="Summarize the deployment status for backend and frontend services.",
+        assistant_content="Deployment looks healthy across both services.",
+    )
+
+    assert usage["tokenSource"] == "estimated"
+    assert usage["promptTokens"] is not None
+    assert usage["completionTokens"] is not None
+    assert usage["totalTokens"] > 0
+
+
+def test_usage_cost_estimate_uses_live_usd_inr_rate_from_api() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        usd_inr_rate_api_url="https://open.er-api.com/v6/latest/USD",
+        usd_inr_rate_timeout_seconds=2,
+        usd_inr_rate_cache_ttl_seconds=1800,
+        usd_inr_rate_fallback=83,
+    )
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"rates": {"INR": 86.25}}
+
+    with patch("app.services.chat_service.requests.get", return_value=response) as get_mock:
+        estimate = service._usage_cost_estimate(total_tokens=1_000_000)  # pylint: disable=protected-access
+
+    assert estimate["usd"] == 2.0
+    assert estimate["usdToInrRate"] == 86.25
+    assert estimate["inr"] == 172.5
+    assert estimate["usdToInrSource"] == "live_api"
+    assert estimate["usdToInrLive"] is True
+    assert estimate["usdToInrUpdatedAt"] is not None
+    assert "live USD/INR" in estimate["note"]
+    get_mock.assert_called_once()
+
+
+def test_usage_cost_estimate_reuses_cached_rate_within_ttl() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        usd_inr_rate_api_url="https://open.er-api.com/v6/latest/USD",
+        usd_inr_rate_timeout_seconds=2,
+        usd_inr_rate_cache_ttl_seconds=1800,
+        usd_inr_rate_fallback=83,
+    )
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"conversion_rates": {"INR": 85.0}}
+
+    with patch("app.services.chat_service.requests.get", return_value=response) as get_mock:
+        first = service._usage_cost_estimate(total_tokens=100_000)  # pylint: disable=protected-access
+        second = service._usage_cost_estimate(total_tokens=100_000)  # pylint: disable=protected-access
+
+    assert first["usdToInrSource"] == "live_api"
+    assert second["usdToInrSource"] == "live_cache"
+    assert second["usdToInrRate"] == 85.0
+    get_mock.assert_called_once()
+
+
+def test_usage_cost_estimate_falls_back_when_fx_api_unavailable() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        usd_inr_rate_api_url="https://open.er-api.com/v6/latest/USD",
+        usd_inr_rate_timeout_seconds=2,
+        usd_inr_rate_cache_ttl_seconds=1800,
+        usd_inr_rate_fallback=83,
+    )
+
+    with patch("app.services.chat_service.requests.get", side_effect=RuntimeError("network down")) as get_mock:
+        estimate = service._usage_cost_estimate(total_tokens=1_000_000)  # pylint: disable=protected-access
+
+    assert estimate["usdToInrRate"] == 83.0
+    assert estimate["usdToInrSource"] == "fallback_default"
+    assert estimate["usdToInrLive"] is False
+    assert "fallback USD/INR" in estimate["note"]
+    get_mock.assert_called_once()
 
 
 def test_stop_active_stream_stops_codex_for_session() -> None:
