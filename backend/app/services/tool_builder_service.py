@@ -419,6 +419,9 @@ class ToolBuilderService:
     def get_job_logs_after(self, request_id: str, timestamp: datetime | None, limit: int = 200) -> list[dict]:
         return self._build_log_repository.get_logs_after(request_id=request_id, timestamp=timestamp, limit=limit)
 
+    def summarize_token_usage(self) -> dict[str, int]:
+        return self._request_repository.summarize_token_usage()
+
     def list_job_log_artifacts(self, request_id: str) -> list[dict]:
         request = self._request_repository.get_by_id(request_id)
         if request is None:

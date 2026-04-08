@@ -22,6 +22,10 @@ from app.utils.time import now_ist
 
 
 class ToolBuildWorkflow:
+    _TOKEN_SOURCE_PARSED = "parsed"
+    _TOKEN_SOURCE_ESTIMATED = "estimated"
+    _TOKEN_SOURCE_MIXED = "mixed"
+
     def __init__(
         self,
         settings: Settings,
@@ -167,6 +171,11 @@ class ToolBuildWorkflow:
                 prompt=prompt,
                 model=generation_model,
                 image_paths=image_paths,
+            )
+            self._record_generation_token_usage(
+                request_id=request_id,
+                generation_prompt=prompt,
+                generation_logs=generation_result.logs,
             )
             if self._request_stopped_or_missing(request_id):
                 return
@@ -1132,6 +1141,159 @@ class ToolBuildWorkflow:
             content=reason,
         )
         self._alert_service.send_build_failed_alert(request_id=request_id, reason=reason[-4000:])
+
+    def _record_generation_token_usage(
+        self,
+        request_id: str,
+        generation_prompt: str,
+        generation_logs: str,
+    ) -> None:
+        cleaned_logs_raw = self._codex_service.clean_cli_output(generation_logs)
+        cleaned_logs = cleaned_logs_raw if isinstance(cleaned_logs_raw, str) else str(cleaned_logs_raw or "")
+        usage = self._derive_token_usage(
+            raw_logs=generation_logs,
+            prompt_text=generation_prompt,
+            completion_text=cleaned_logs or generation_logs,
+        )
+        try:
+            self._request_repository.increment_token_usage(
+                request_id=request_id,
+                prompt_tokens=usage["promptTokens"],
+                completion_tokens=usage["completionTokens"],
+                total_tokens=usage["totalTokens"],
+                token_source=usage["tokenSource"],
+            )
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Unable to store token usage for request %s", request_id)
+
+    @classmethod
+    def _derive_token_usage(
+        cls,
+        raw_logs: str,
+        prompt_text: str,
+        completion_text: str,
+    ) -> dict[str, int | str | None]:
+        parsed = cls._parse_token_usage_from_logs(raw_logs=raw_logs)
+        prompt_tokens = parsed.get("promptTokens")
+        completion_tokens = parsed.get("completionTokens")
+        total_tokens = parsed.get("totalTokens")
+
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        if total_tokens is None:
+            estimated_prompt = cls._estimate_tokens_from_text(prompt_text)
+            estimated_completion = cls._estimate_tokens_from_text(completion_text)
+            if prompt_tokens is None:
+                prompt_tokens = estimated_prompt
+            if completion_tokens is None:
+                completion_tokens = estimated_completion
+            total_tokens = max((prompt_tokens or 0) + (completion_tokens or 0), 0)
+            if parsed.get("promptTokens") is None and parsed.get("completionTokens") is None:
+                source = cls._TOKEN_SOURCE_ESTIMATED
+            else:
+                source = cls._TOKEN_SOURCE_MIXED
+        else:
+            source = cls._TOKEN_SOURCE_PARSED
+            total_tokens = max(int(total_tokens), 0)
+
+        return {
+            "promptTokens": max(int(prompt_tokens), 0) if prompt_tokens is not None else None,
+            "completionTokens": max(int(completion_tokens), 0) if completion_tokens is not None else None,
+            "totalTokens": max(int(total_tokens), 0),
+            "tokenSource": source,
+        }
+
+    @classmethod
+    def _parse_token_usage_from_logs(cls, raw_logs: str) -> dict[str, int | None]:
+        normalized = (raw_logs or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.strip():
+            return {"promptTokens": None, "completionTokens": None, "totalTokens": None}
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        total_tokens: int | None = None
+
+        inline_patterns = (
+            r"tokens\s*used\s*:\s*([0-9][0-9,]*)\s*input\b[^0-9]+([0-9][0-9,]*)\s*output\b",
+            r"tokens\s*used\s*:\s*input[^0-9]*([0-9][0-9,]*)[^0-9]+output[^0-9]*([0-9][0-9,]*)",
+            r"tokens\s*used\s*:\s*([0-9][0-9,]*)\s*prompt\b[^0-9]+([0-9][0-9,]*)\s*(?:output|completion)\b",
+        )
+        for pattern in inline_patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+            prompt_tokens = cls._parse_token_count(match.group(1))
+            completion_tokens = cls._parse_token_count(match.group(2))
+            if prompt_tokens is not None and completion_tokens is not None:
+                break
+
+        if prompt_tokens is None:
+            prompt_tokens = cls._first_token_match(
+                normalized,
+                patterns=(
+                    r"\b(?:prompt|input)\s*tokens?\s*[:=]\s*([0-9][0-9,]*)",
+                    r"\binput\s*[:=]\s*([0-9][0-9,]*)\s*tokens?\b",
+                    r"\btokens\s*used\s*:[^\n]*?([0-9][0-9,]*)\s*input\b",
+                ),
+            )
+        if completion_tokens is None:
+            completion_tokens = cls._first_token_match(
+                normalized,
+                patterns=(
+                    r"\b(?:completion|output)\s*tokens?\s*[:=]\s*([0-9][0-9,]*)",
+                    r"\boutput\s*[:=]\s*([0-9][0-9,]*)\s*tokens?\b",
+                    r"\btokens\s*used\s*:[^\n]*?([0-9][0-9,]*)\s*output\b",
+                ),
+            )
+
+        total_tokens = cls._first_token_match(
+            normalized,
+            patterns=(
+                r"\btotal\s*tokens?\s*[:=]\s*([0-9][0-9,]*)",
+                r"\btokens\s*used\s*[:=]\s*([0-9][0-9,]*)\s*(?:$|\n)",
+                r"\btokens\s*used\s*\n\s*([0-9][0-9,]*)\b",
+            ),
+        )
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "promptTokens": prompt_tokens,
+            "completionTokens": completion_tokens,
+            "totalTokens": total_tokens,
+        }
+
+    @classmethod
+    def _first_token_match(cls, value: str, patterns: tuple[str, ...]) -> int | None:
+        for pattern in patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if not match:
+                continue
+            parsed = cls._parse_token_count(match.group(1))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _parse_token_count(value: str | None) -> int | None:
+        cleaned = re.sub(r"[^\d]", "", str(value or ""))
+        if not cleaned:
+            return None
+        try:
+            return int(cleaned)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _estimate_tokens_from_text(value: str) -> int:
+        cleaned = re.sub(r"\s+", " ", value or "").strip()
+        if not cleaned:
+            return 0
+        words = len(re.findall(r"\w+", cleaned))
+        char_estimate = max(1, round(len(cleaned) / 4))
+        word_estimate = max(1, round(words * 1.3))
+        return max(char_estimate, word_estimate)
 
     def _store_log_artifact(
         self,

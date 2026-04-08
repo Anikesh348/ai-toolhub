@@ -1232,3 +1232,103 @@ def test_stop_active_stream_returns_not_found_for_unknown_session() -> None:
     assert stopped is False
     assert error == "Session not found"
     codex_service.stop_chat.assert_not_called()
+
+
+def test_summarize_usage_includes_tool_builder_runtime_usage() -> None:
+    chat_execution_log_repository = Mock()
+    chat_execution_log_repository.summarize_usage.return_value = {
+        "totals": {
+            "requests": 2,
+            "promptTokens": 10,
+            "completionTokens": 20,
+            "totalTokens": 30,
+            "parsedCount": 1,
+            "estimatedCount": 1,
+            "mixedCount": 0,
+        },
+        "modes": [
+            {
+                "mode": "general",
+                "requests": 2,
+                "promptTokens": 10,
+                "completionTokens": 20,
+                "totalTokens": 30,
+                "parsedCount": 1,
+                "estimatedCount": 1,
+                "mixedCount": 0,
+            }
+        ],
+    }
+    tool_builder_service = Mock()
+    tool_builder_service.summarize_token_usage.return_value = {
+        "requestCount": 3,
+        "promptTokens": 100,
+        "completionTokens": 200,
+        "totalTokens": 300,
+        "parsedCount": 2,
+        "estimatedCount": 1,
+        "mixedCount": 0,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    summary = service.summarize_usage(modes=["general", "tool_builder"])
+
+    assert summary["requestCount"] == 5
+    assert summary["promptTokens"] == 110
+    assert summary["completionTokens"] == 220
+    assert summary["totalTokens"] == 330
+    assert summary["parsedCount"] == 3
+    assert summary["estimatedCount"] == 2
+    assert summary["mixedCount"] == 0
+    tool_builder_row = next((row for row in summary["modes"] if row["mode"] == "tool_builder"), None)
+    assert tool_builder_row is not None
+    assert tool_builder_row["requestCount"] == 3
+    assert tool_builder_row["totalTokens"] == 300
+    tool_builder_service.summarize_token_usage.assert_called_once()
+
+
+def test_summarize_usage_does_not_include_tool_builder_runtime_usage_for_session_filters() -> None:
+    chat_execution_log_repository = Mock()
+    chat_execution_log_repository.summarize_usage.return_value = {
+        "totals": {
+            "requests": 1,
+            "promptTokens": 12,
+            "completionTokens": 18,
+            "totalTokens": 30,
+            "parsedCount": 0,
+            "estimatedCount": 1,
+            "mixedCount": 0,
+        },
+        "modes": [
+            {
+                "mode": "tool_builder",
+                "requests": 1,
+                "promptTokens": 12,
+                "completionTokens": 18,
+                "totalTokens": 30,
+                "parsedCount": 0,
+                "estimatedCount": 1,
+                "mixedCount": 0,
+            }
+        ],
+    }
+    tool_builder_service = Mock()
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        tool_builder_service=tool_builder_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    summary = service.summarize_usage(session_id="session-1", modes=["tool_builder"])
+
+    assert summary["requestCount"] == 1
+    assert summary["totalTokens"] == 30
+    tool_builder_service.summarize_token_usage.assert_not_called()

@@ -32,6 +32,7 @@ class RequestRepository:
             "refinedPrompt": None,
             "status": BuildStatus.PENDING.value,
             "error": None,
+            "tokenUsage": self._default_token_usage(),
             "createdAt": now,
             "updatedAt": now,
         }
@@ -116,12 +117,82 @@ class RequestRepository:
         }
         self._collection.update_one({"_id": request_id}, {"$set": update_fields})
 
+    def increment_token_usage(
+        self,
+        request_id: str,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        total_tokens: int | None,
+        token_source: str | None,
+    ) -> None:
+        resolved_prompt = self._normalize_optional_int(prompt_tokens)
+        resolved_completion = self._normalize_optional_int(completion_tokens)
+        resolved_total = self._normalize_optional_int(total_tokens)
+        if resolved_total is None and resolved_prompt is not None and resolved_completion is not None:
+            resolved_total = resolved_prompt + resolved_completion
+        if resolved_total is None:
+            resolved_total = 0
+
+        resolved_source = self._normalize_token_source(token_source)
+        inc_fields: dict[str, int] = {
+            "tokenUsage.promptTokens": resolved_prompt or 0,
+            "tokenUsage.completionTokens": resolved_completion or 0,
+            "tokenUsage.totalTokens": resolved_total,
+            "tokenUsage.trackedRuns": 1,
+        }
+        if resolved_source == "parsed":
+            inc_fields["tokenUsage.parsedCount"] = 1
+        elif resolved_source == "mixed":
+            inc_fields["tokenUsage.mixedCount"] = 1
+        else:
+            inc_fields["tokenUsage.estimatedCount"] = 1
+
+        self._collection.update_one(
+            {"_id": request_id},
+            {
+                "$inc": inc_fields,
+                "$set": {"updatedAt": now_ist()},
+            },
+        )
+
+    def summarize_token_usage(self) -> dict[str, int]:
+        rows = list(
+            self._collection.aggregate(
+                [
+                    {
+                        "$group": {
+                            "_id": None,
+                            "requestCount": {"$sum": {"$ifNull": ["$tokenUsage.trackedRuns", 0]}},
+                            "promptTokens": {"$sum": {"$ifNull": ["$tokenUsage.promptTokens", 0]}},
+                            "completionTokens": {"$sum": {"$ifNull": ["$tokenUsage.completionTokens", 0]}},
+                            "totalTokens": {"$sum": {"$ifNull": ["$tokenUsage.totalTokens", 0]}},
+                            "parsedCount": {"$sum": {"$ifNull": ["$tokenUsage.parsedCount", 0]}},
+                            "estimatedCount": {"$sum": {"$ifNull": ["$tokenUsage.estimatedCount", 0]}},
+                            "mixedCount": {"$sum": {"$ifNull": ["$tokenUsage.mixedCount", 0]}},
+                        }
+                    }
+                ]
+            )
+        )
+        row = rows[0] if rows else {}
+        return {
+            "requestCount": int(row.get("requestCount") or 0),
+            "promptTokens": int(row.get("promptTokens") or 0),
+            "completionTokens": int(row.get("completionTokens") or 0),
+            "totalTokens": int(row.get("totalTokens") or 0),
+            "parsedCount": int(row.get("parsedCount") or 0),
+            "estimatedCount": int(row.get("estimatedCount") or 0),
+            "mixedCount": int(row.get("mixedCount") or 0),
+        }
+
     def delete(self, request_id: str) -> bool:
         result = self._collection.delete_one({"_id": request_id})
         return result.deleted_count > 0
 
     @staticmethod
     def _to_model(document: dict) -> dict:
+        raw_usage = document.get("tokenUsage")
+        usage = RequestRepository._normalize_token_usage(raw_usage if isinstance(raw_usage, dict) else None)
         return {
             "id": document["_id"],
             "prompt": document["prompt"],
@@ -131,6 +202,47 @@ class RequestRepository:
             "refinedPrompt": document.get("refinedPrompt"),
             "status": document["status"],
             "error": document.get("error"),
+            "tokenUsage": usage,
             "createdAt": document["createdAt"],
             "updatedAt": document["updatedAt"],
         }
+
+    @staticmethod
+    def _default_token_usage() -> dict[str, int]:
+        return {
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "totalTokens": 0,
+            "parsedCount": 0,
+            "estimatedCount": 0,
+            "mixedCount": 0,
+            "trackedRuns": 0,
+        }
+
+    @staticmethod
+    def _normalize_optional_int(value: int | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return None
+        return max(resolved, 0)
+
+    @staticmethod
+    def _normalize_token_source(value: str | None) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized in {"parsed", "estimated", "mixed"}:
+            return normalized
+        return "estimated"
+
+    @staticmethod
+    def _normalize_token_usage(value: dict[str, Any] | None) -> dict[str, int]:
+        default = RequestRepository._default_token_usage()
+        if not value:
+            return default
+        normalized = dict(default)
+        for field in normalized:
+            resolved = RequestRepository._normalize_optional_int(value.get(field))
+            normalized[field] = resolved if resolved is not None else 0
+        return normalized

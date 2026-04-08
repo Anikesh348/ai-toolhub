@@ -224,6 +224,54 @@ def test_workflow_forwards_image_paths_to_generation_attempts() -> None:
     ]
 
 
+def test_workflow_tracks_generation_token_usage_from_logs() -> None:
+    settings = SimpleNamespace(
+        max_build_attempts=1,
+        smoke_test_host="127.0.0.1",
+        scraping_web_verify_timeout_seconds=30,
+        tool_builder_model="gpt-5.3-codex",
+    )
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "req-token-usage",
+        "prompt": "Build a notes app",
+        "status": BuildStatus.PENDING.value,
+    }
+    prompt_service = Mock()
+    prompt_service.refine_prompt.return_value = "refined prompt"
+    codex_service = Mock()
+    codex_service.run_generation.return_value = CommandResult(
+        success=False,
+        exit_code=1,
+        logs="assistant: done\nTokens used: 1,200 input, 345 output",
+    )
+    codex_service.clean_cli_output.return_value = "assistant: done\nTokens used: 1,200 input, 345 output"
+
+    workflow = ToolBuildWorkflow(
+        settings=settings,  # type: ignore[arg-type]
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=Mock(),  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
+        tool_repository=Mock(),  # type: ignore[arg-type]
+        prompt_service=prompt_service,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        testing_service=Mock(),  # type: ignore[arg-type]
+        docker_service=Mock(),  # type: ignore[arg-type]
+        port_allocator_service=Mock(),  # type: ignore[arg-type]
+        alert_service=Mock(),  # type: ignore[arg-type]
+    )
+
+    workflow._run(request_id="req-token-usage", tool_name_hint=None)  # pylint: disable=protected-access
+
+    request_repository.increment_token_usage.assert_called_once_with(
+        request_id="req-token-usage",
+        prompt_tokens=1200,
+        completion_tokens=345,
+        total_tokens=1545,
+        token_source="parsed",
+    )
+
+
 def test_workflow_skips_prompt_refinement_when_prompt_is_already_refined() -> None:
     settings = SimpleNamespace(
         max_build_attempts=1,

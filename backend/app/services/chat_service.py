@@ -481,14 +481,6 @@ class ChatService:
         totals = summary.get("totals") if isinstance(summary, dict) else None
         if not isinstance(totals, dict):
             totals = {}
-
-        request_count = int(totals.get("requests") or 0)
-        prompt_tokens = int(totals.get("promptTokens") or 0)
-        completion_tokens = int(totals.get("completionTokens") or 0)
-        total_tokens = int(totals.get("totalTokens") or 0)
-        parsed_count = int(totals.get("parsedCount") or 0)
-        estimated_count = int(totals.get("estimatedCount") or 0)
-        mixed_count = int(totals.get("mixedCount") or 0)
         mode_rows = summary.get("modes") if isinstance(summary, dict) else []
         normalized_rows: list[dict[str, Any]] = []
         if isinstance(mode_rows, list):
@@ -508,6 +500,49 @@ class ChatService:
                     }
                 )
 
+        include_tool_builder_runtime_usage = (
+            not (session_id or "").strip()
+            and (not normalized_modes or "tool_builder" in normalized_modes)
+        )
+        if include_tool_builder_runtime_usage:
+            runtime_usage = self._summarize_tool_builder_runtime_usage()
+            if runtime_usage["requestCount"] > 0 or runtime_usage["totalTokens"] > 0:
+                tool_builder_row = next((row for row in normalized_rows if row.get("mode") == "tool_builder"), None)
+                if tool_builder_row is None:
+                    tool_builder_row = {
+                        "mode": "tool_builder",
+                        "requestCount": 0,
+                        "promptTokens": 0,
+                        "completionTokens": 0,
+                        "totalTokens": 0,
+                        "parsedCount": 0,
+                        "estimatedCount": 0,
+                        "mixedCount": 0,
+                    }
+                    normalized_rows.append(tool_builder_row)
+
+                for key in (
+                    "requestCount",
+                    "promptTokens",
+                    "completionTokens",
+                    "totalTokens",
+                    "parsedCount",
+                    "estimatedCount",
+                    "mixedCount",
+                ):
+                    value = int(runtime_usage.get(key) or 0)
+                    tool_builder_row[key] += value
+                    total_key = "requests" if key == "requestCount" else key
+                    totals[total_key] = int(totals.get(total_key) or 0) + value
+
+        request_count = int(totals.get("requests") or 0)
+        prompt_tokens = int(totals.get("promptTokens") or 0)
+        completion_tokens = int(totals.get("completionTokens") or 0)
+        total_tokens = int(totals.get("totalTokens") or 0)
+        parsed_count = int(totals.get("parsedCount") or 0)
+        estimated_count = int(totals.get("estimatedCount") or 0)
+        mixed_count = int(totals.get("mixedCount") or 0)
+
         return {
             "requestCount": request_count,
             "promptTokens": prompt_tokens,
@@ -518,6 +553,41 @@ class ChatService:
             "mixedCount": mixed_count,
             "modes": normalized_rows,
             "costEstimate": self._usage_cost_estimate(total_tokens=total_tokens),
+        }
+
+    def _summarize_tool_builder_runtime_usage(self) -> dict[str, int]:
+        empty = {
+            "requestCount": 0,
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "totalTokens": 0,
+            "parsedCount": 0,
+            "estimatedCount": 0,
+            "mixedCount": 0,
+        }
+        if self._tool_builder_service is None:
+            return empty
+
+        summarize = getattr(self._tool_builder_service, "summarize_token_usage", None)
+        if not callable(summarize):
+            return empty
+
+        try:
+            raw = summarize()
+        except Exception:  # pylint: disable=broad-except
+            self._logger.exception("Unable to summarize tool-builder token usage.")
+            return empty
+        if not isinstance(raw, dict):
+            return empty
+
+        return {
+            "requestCount": int(raw.get("requestCount") or 0),
+            "promptTokens": int(raw.get("promptTokens") or 0),
+            "completionTokens": int(raw.get("completionTokens") or 0),
+            "totalTokens": int(raw.get("totalTokens") or 0),
+            "parsedCount": int(raw.get("parsedCount") or 0),
+            "estimatedCount": int(raw.get("estimatedCount") or 0),
+            "mixedCount": int(raw.get("mixedCount") or 0),
         }
 
     @staticmethod
