@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     codex_tool_builder_model: str | None = Field(default=None, alias="CODEX_TOOL_BUILDER_MODEL")
     codex_models_cache_path: str | None = Field(default="~/.codex/models_cache.json", alias="CODEX_MODELS_CACHE_PATH")
     codex_config_path: str | None = Field(default="~/.codex/config.toml", alias="CODEX_CONFIG_PATH")
+    codex_transient_retries: int = Field(default=2, alias="CODEX_TRANSIENT_RETRIES")
+    codex_transient_retry_delay_seconds: float = Field(default=2.0, alias="CODEX_TRANSIENT_RETRY_DELAY_SECONDS")
 
     port_range_start: int = Field(default=3001, alias="PORT_RANGE_START")
     port_range_end: int = Field(default=3999, alias="PORT_RANGE_END")

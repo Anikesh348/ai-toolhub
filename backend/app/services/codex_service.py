@@ -4,6 +4,7 @@ import mimetypes
 from pathlib import Path
 import re
 import shlex
+import time
 from typing import Iterable
 from uuid import uuid4
 
@@ -18,6 +19,16 @@ class CodexService:
     _PROVIDER_RE = re.compile(r"\b(?:using|with)\s+(.+)$", flags=re.IGNORECASE)
     _SSH_TARGET_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
     _CHAT_ATTACHMENT_ID_RE = re.compile(r"^[a-f0-9]{32}-[A-Za-z0-9._-]{1,180}$")
+    _TRANSIENT_TRANSPORT_MARKERS = (
+        "failed to connect to websocket",
+        "responses_websocket",
+        "broken pipe (os error 32)",
+        "io error: broken pipe",
+        "error: reconnecting",
+        "connection reset by peer",
+        "connection closed before message completed",
+        "error sending request for url",
+    )
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
         self._settings = settings
@@ -43,7 +54,7 @@ class CodexService:
         )
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
-        return self._docker_service.run_builder_container(
+        return self._run_builder_container_with_retries(
             request_id=request_id,
             shell_command=shell_command,
             timeout_seconds=self._settings.build_timeout_seconds,
@@ -75,7 +86,7 @@ class CodexService:
         )
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
-        return self._docker_service.run_builder_container(
+        return self._run_builder_container_with_retries(
             request_id=request_id,
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.build_timeout_seconds,
@@ -209,7 +220,7 @@ class CodexService:
             f"\"$(cat {prompt_file_container})\""
         )
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
-        return self._docker_service.run_builder_container_with_options(
+        return self._run_builder_container_with_retries(
             request_id=request_id,
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.operator_timeout_seconds,
@@ -385,6 +396,84 @@ class CodexService:
             return shell_command
         image_flags = "".join(f" --image {shlex.quote(path)}" for path in cleaned)
         return re.sub(r"\bcodex\s+exec\b", lambda match: f"{match.group(0)}{image_flags}", shell_command, count=1)
+
+    def _run_builder_container_with_retries(
+        self,
+        request_id: str,
+        shell_command: str,
+        timeout_seconds: int,
+        extra_volumes: dict[str, dict[str, str]] | None = None,
+        extra_environment: dict[str, str] | None = None,
+        working_dir_override: str | None = None,
+        tty: bool = False,
+    ) -> CommandResult:
+        configured_retries = max(0, int(getattr(self._settings, "codex_transient_retries", 0)))
+        retry_delay_seconds = max(0.0, float(getattr(self._settings, "codex_transient_retry_delay_seconds", 0.0)))
+        max_attempts = configured_retries + 1
+
+        transient_attempt_logs: list[str] = []
+        last_result: CommandResult | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            result = self._docker_service.run_builder_container_with_options(
+                request_id=request_id,
+                shell_command=shell_command,
+                timeout_seconds=timeout_seconds,
+                extra_volumes=extra_volumes,
+                extra_environment=extra_environment,
+                working_dir_override=working_dir_override,
+                tty=tty,
+            )
+            last_result = result
+
+            if result.success:
+                if not transient_attempt_logs:
+                    return result
+
+                combined_logs = "\n\n".join([
+                    *transient_attempt_logs,
+                    f"Recovered after transient Codex transport issue on attempt {attempt}/{max_attempts}.",
+                    result.logs.strip(),
+                ]).strip()
+                return CommandResult(success=True, exit_code=result.exit_code, logs=combined_logs)
+
+            if not self._is_transient_transport_failure(result.logs):
+                if not transient_attempt_logs:
+                    return result
+
+                combined_logs = "\n\n".join([
+                    *transient_attempt_logs,
+                    result.logs.strip(),
+                ]).strip()
+                return CommandResult(success=False, exit_code=result.exit_code, logs=combined_logs)
+
+            transient_attempt_logs.append(
+                f"[Codex transient transport failure attempt {attempt}/{max_attempts}]\n"
+                f"{(result.logs or '').strip() or '(no logs)'}"
+            )
+            if attempt < max_attempts and retry_delay_seconds > 0:
+                time.sleep(retry_delay_seconds * attempt)
+
+        if last_result is None:
+            return CommandResult(
+                success=False,
+                exit_code=1,
+                logs="Codex command failed before producing output.",
+            )
+
+        combined_failure_logs = "\n\n".join([
+            *transient_attempt_logs,
+            f"Transient Codex transport issue persisted after {max_attempts} attempts.",
+            (last_result.logs or "").strip(),
+        ]).strip()
+        return CommandResult(success=False, exit_code=last_result.exit_code, logs=combined_failure_logs)
+
+    @classmethod
+    def _is_transient_transport_failure(cls, logs: str) -> bool:
+        lowered = (logs or "").lower()
+        if not lowered:
+            return False
+        return any(marker in lowered for marker in cls._TRANSIENT_TRANSPORT_MARKERS)
 
     @staticmethod
     def _sanitize_attachment_filename(file_name: str) -> str:
