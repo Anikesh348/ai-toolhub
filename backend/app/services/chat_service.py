@@ -2,6 +2,7 @@ import json
 import mimetypes
 import re
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -148,48 +149,55 @@ class ChatService:
         assistant_metadata: dict[str, Any] = {}
         raw_execution_logs = ""
         quick_path = quick_answer is not None
-        if quick_answer is not None:
-            assistant_text = quick_answer
-            success = True
-            exit_code = 0
-        elif normalized_mode == "operator":
-            operator_result = self._run_operator_task(
-                session_id=session_id,
-                user_content=content,
-                selected_model=selected_model,
-            )
-            assistant_text = str(operator_result.get("assistantText") or "")
-            success = bool(operator_result.get("success", False))
-            exit_code = int(operator_result.get("exitCode", 1))
-            raw_execution_logs = str(operator_result.get("rawLogs") or "")
-        elif normalized_mode == "tool_builder":
-            assistant_text, tool_builder_context = self._run_tool_builder_task(
-                session_id=session_id,
-                user_content=content,
-                selected_model=selected_model,
-                attachments=attachments,
-            )
-            success = True
-            exit_code = 0
-            if tool_builder_context:
-                assistant_metadata["toolBuilder"] = tool_builder_context
-        else:
-            completion = self._codex_service.run_chat(
-                session_id=session_id,
-                prompt=prompt,
-                model=selected_model,
-                image_paths=image_paths,
-            )
-            assistant_text = self._build_assistant_text(completion.logs, completion.success)
-            success = completion.success
-            exit_code = completion.exit_code
-            raw_execution_logs = completion.logs
-            if not completion.success:
-                self._logger.warning(
-                    "Chat completion failed for session %s: exit=%s",
-                    session_id,
-                    completion.exit_code,
+        try:
+            if quick_answer is not None:
+                assistant_text = quick_answer
+                success = True
+                exit_code = 0
+            elif normalized_mode == "operator":
+                operator_result = self._run_operator_task(
+                    session_id=session_id,
+                    user_content=content,
+                    selected_model=selected_model,
                 )
+                assistant_text = str(operator_result.get("assistantText") or "")
+                success = bool(operator_result.get("success", False))
+                exit_code = int(operator_result.get("exitCode", 1))
+                raw_execution_logs = str(operator_result.get("rawLogs") or "")
+            elif normalized_mode == "tool_builder":
+                assistant_text, tool_builder_context = self._run_tool_builder_task(
+                    session_id=session_id,
+                    user_content=content,
+                    selected_model=selected_model,
+                    attachments=attachments,
+                )
+                success = True
+                exit_code = 0
+                if tool_builder_context:
+                    assistant_metadata["toolBuilder"] = tool_builder_context
+            else:
+                completion = self._codex_service.run_chat(
+                    session_id=session_id,
+                    prompt=prompt,
+                    model=selected_model,
+                    image_paths=image_paths,
+                )
+                assistant_text = self._build_assistant_text(completion.logs, completion.success)
+                success = completion.success
+                exit_code = completion.exit_code
+                raw_execution_logs = completion.logs
+                if not completion.success:
+                    self._logger.warning(
+                        "Chat completion failed for session %s: exit=%s",
+                        session_id,
+                        completion.exit_code,
+                    )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.exception("Chat execution failed for session %s", session_id)
+            assistant_text = "I could not generate a response right now. Please retry."
+            success = False
+            exit_code = 1
+            raw_execution_logs = self._exception_execution_logs("Chat execution failed", exc)
 
         assistant_metadata["success"] = success
         assistant_metadata["exitCode"] = exit_code
@@ -280,87 +288,98 @@ class ChatService:
         assistant_metadata: dict[str, Any] = {}
         raw_execution_logs = ""
         quick_path = quick_answer is not None
-        if quick_answer is not None:
-            assistant_text = quick_answer
-            success = True
-            exit_code = 0
-        elif normalized_mode == "operator":
-            operator_result = self._run_operator_task(
-                session_id=session_id,
-                user_content=user_content,
-                selected_model=selected_model,
-            )
-            assistant_text = str(operator_result.get("assistantText") or "")
-            success = bool(operator_result.get("success", False))
-            exit_code = int(operator_result.get("exitCode", 1))
-            raw_execution_logs = str(operator_result.get("rawLogs") or "")
-        elif normalized_mode == "tool_builder":
-            assistant_text, tool_builder_context = self._run_tool_builder_task(
-                session_id=session_id,
-                user_content=user_content,
-                selected_model=selected_model,
-                attachments=attachments,
-            )
-            success = True
-            exit_code = 0
-            if tool_builder_context:
-                assistant_metadata["toolBuilder"] = tool_builder_context
-        else:
-            completion = None
-            raw_logs = ""
-            for stream_event in self._codex_service.stream_chat(
-                session_id=session_id,
-                prompt=prompt,
-                model=selected_model,
-                image_paths=image_paths,
-            ):
-                if stream_event.type == "log" and stream_event.chunk:
-                    raw_logs = f"{raw_logs}{stream_event.chunk}"
-                    if len(raw_logs) > 24000:
-                        raw_logs = raw_logs[-24000:]
-                    detected_status = self._detect_stream_status(stream_event.chunk)
-                    if detected_status and detected_status != stream_status:
-                        stream_status = detected_status
-                        yield {"type": "status", "status": stream_status}
-                    parsed_partial = self._sanitize_assistant_output(self._extract_assistant_text(raw_logs))
-                    delta = self._incremental_delta(streamed_assistant, parsed_partial)
-                    if delta:
-                        if stream_status != "thinking":
-                            stream_status = "thinking"
-                            yield {"type": "status", "status": stream_status}
-                        streamed_assistant = parsed_partial
-                        yield {"type": "assistant_delta", "delta": delta}
-                    continue
-                if stream_event.type == "done":
-                    completion = stream_event.result
-
-            if completion is None:
-                assistant_text = "I could not generate a response right now. Please retry."
-                success = False
-                exit_code = 1
-                raw_execution_logs = raw_logs
-            else:
-                assistant_text = self._build_assistant_text(completion.logs, completion.success)
-                success = completion.success
-                exit_code = completion.exit_code
-                raw_execution_logs = completion.logs
-            stream_cancelled = self._consume_stream_cancelled(session_id)
-            if stream_cancelled:
-                if not assistant_text.strip():
-                    assistant_text = "Generation stopped."
-                success = False
-                exit_code = 130
-                assistant_metadata["stopped"] = True
-                if raw_execution_logs:
-                    raw_execution_logs = f"{raw_execution_logs}\n\n[stream cancelled by user]"
-                else:
-                    raw_execution_logs = "[stream cancelled by user]"
-            if completion is not None and not completion.success:
-                self._logger.warning(
-                    "Chat stream completion failed for session %s: exit=%s",
-                    session_id,
-                    completion.exit_code,
+        raw_stream_logs = ""
+        try:
+            if quick_answer is not None:
+                assistant_text = quick_answer
+                success = True
+                exit_code = 0
+            elif normalized_mode == "operator":
+                operator_result = self._run_operator_task(
+                    session_id=session_id,
+                    user_content=user_content,
+                    selected_model=selected_model,
                 )
+                assistant_text = str(operator_result.get("assistantText") or "")
+                success = bool(operator_result.get("success", False))
+                exit_code = int(operator_result.get("exitCode", 1))
+                raw_execution_logs = str(operator_result.get("rawLogs") or "")
+            elif normalized_mode == "tool_builder":
+                assistant_text, tool_builder_context = self._run_tool_builder_task(
+                    session_id=session_id,
+                    user_content=user_content,
+                    selected_model=selected_model,
+                    attachments=attachments,
+                )
+                success = True
+                exit_code = 0
+                if tool_builder_context:
+                    assistant_metadata["toolBuilder"] = tool_builder_context
+            else:
+                completion = None
+                for stream_event in self._codex_service.stream_chat(
+                    session_id=session_id,
+                    prompt=prompt,
+                    model=selected_model,
+                    image_paths=image_paths,
+                ):
+                    if stream_event.type == "log" and stream_event.chunk:
+                        raw_stream_logs = f"{raw_stream_logs}{stream_event.chunk}"
+                        if len(raw_stream_logs) > 24000:
+                            raw_stream_logs = raw_stream_logs[-24000:]
+                        detected_status = self._detect_stream_status(stream_event.chunk)
+                        if detected_status and detected_status != stream_status:
+                            stream_status = detected_status
+                            yield {"type": "status", "status": stream_status}
+                        parsed_partial = self._sanitize_assistant_output(self._extract_assistant_text(raw_stream_logs))
+                        delta = self._incremental_delta(streamed_assistant, parsed_partial)
+                        if delta:
+                            if stream_status != "thinking":
+                                stream_status = "thinking"
+                                yield {"type": "status", "status": stream_status}
+                            streamed_assistant = parsed_partial
+                            yield {"type": "assistant_delta", "delta": delta}
+                        continue
+                    if stream_event.type == "done":
+                        completion = stream_event.result
+
+                if completion is None:
+                    assistant_text = "I could not generate a response right now. Please retry."
+                    success = False
+                    exit_code = 1
+                    raw_execution_logs = raw_stream_logs
+                else:
+                    assistant_text = self._build_assistant_text(completion.logs, completion.success)
+                    success = completion.success
+                    exit_code = completion.exit_code
+                    raw_execution_logs = completion.logs
+                stream_cancelled = self._consume_stream_cancelled(session_id)
+                if stream_cancelled:
+                    if not assistant_text.strip():
+                        assistant_text = "Generation stopped."
+                    success = False
+                    exit_code = 130
+                    assistant_metadata["stopped"] = True
+                    if raw_execution_logs:
+                        raw_execution_logs = f"{raw_execution_logs}\n\n[stream cancelled by user]"
+                    else:
+                        raw_execution_logs = "[stream cancelled by user]"
+                if completion is not None and not completion.success:
+                    self._logger.warning(
+                        "Chat stream completion failed for session %s: exit=%s",
+                        session_id,
+                        completion.exit_code,
+                    )
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.exception("Chat stream execution failed for session %s", session_id)
+            assistant_text = "I could not generate a response right now. Please retry."
+            success = False
+            exit_code = 1
+            failure_logs = self._exception_execution_logs("Chat stream execution failed", exc)
+            if raw_stream_logs:
+                raw_execution_logs = f"{raw_stream_logs}\n\n{failure_logs}"
+            else:
+                raw_execution_logs = failure_logs
 
         assistant_metadata["success"] = success
         assistant_metadata["exitCode"] = exit_code
@@ -601,6 +620,14 @@ class ChatService:
             return normalized
         truncated = normalized[-cls._CHAT_EXECUTION_LOG_LIMIT:]
         return f"[truncated to last {cls._CHAT_EXECUTION_LOG_LIMIT} chars]\n{truncated}"
+
+    @staticmethod
+    def _exception_execution_logs(context: str, exc: Exception) -> str:
+        message = f"{context}: {exc}".strip()
+        stack = traceback.format_exc().strip()
+        if not stack:
+            return message
+        return f"{message}\n\n{stack}"
 
     def _usage_cost_estimate(self, total_tokens: int) -> dict[str, Any]:
         resolved_total = max(int(total_tokens), 0)
@@ -1440,9 +1467,10 @@ class ChatService:
             )
         except Exception as exc:  # pylint: disable=broad-except
             self._logger.exception("Operator task execution failed for session %s", session_id)
+            raw_logs = self._exception_execution_logs("Operator task failed to start", exc)
             return {
                 "assistantText": f"Operator task failed to start: {exc}",
-                "rawLogs": "",
+                "rawLogs": raw_logs,
                 "success": False,
                 "exitCode": 1,
             }

@@ -57,7 +57,17 @@ class DockerService:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._client = docker.from_env()
+        # Use a long HTTP timeout so long-running operator/build actions do not fail with
+        # Docker SDK read-timeout errors while the container is still healthy and running.
+        self._docker_http_timeout_seconds = (
+            max(
+                int(getattr(settings, "operator_timeout_seconds", 1800)),
+                int(getattr(settings, "build_timeout_seconds", 900)),
+                600,
+            )
+            + 120
+        )
+        self._client = docker.from_env(timeout=self._docker_http_timeout_seconds)
 
     def ensure_job_workspace(self, request_id: str) -> tuple[Path, str]:
         host_root = Path(self._settings.codex_workspace_host).resolve()
@@ -135,16 +145,32 @@ class DockerService:
                 environment=environment if environment else None,
                 labels=builder_labels,
             )
-            try:
-                wait_result = container.wait(timeout=timeout_seconds)
-            except requests_exceptions.ReadTimeout:
-                timeout_logs = self._safe_container_logs(container)
-                return CommandResult(
-                    success=False,
-                    exit_code=124,
-                    logs=f"{timeout_logs}\nCommand timed out after {timeout_seconds}s.".strip(),
-                )
-            exit_code = int(wait_result.get("StatusCode", 1))
+            started_at = time.monotonic()
+            while True:
+                if time.monotonic() - started_at > timeout_seconds:
+                    try:
+                        container.kill()
+                    except (requests_exceptions.RequestException, DockerException):
+                        pass
+                    timeout_logs = self._safe_container_logs(container)
+                    return CommandResult(
+                        success=False,
+                        exit_code=124,
+                        logs=f"{timeout_logs}\nCommand timed out after {timeout_seconds}s.".strip(),
+                    )
+                try:
+                    container.reload()
+                    current_status = container.status
+                except (requests_exceptions.RequestException, DockerException):
+                    # Docker SDK requests can transiently time out while the container is still running.
+                    # Keep polling until command timeout rather than treating this as terminal status.
+                    time.sleep(0.3)
+                    continue
+                if current_status not in {"created", "running", "restarting"}:
+                    break
+                time.sleep(0.2)
+
+            exit_code = self._resolve_container_exit_code(container, default_exit_code=1)
             logs = self._safe_container_logs(container)
             return CommandResult(success=exit_code == 0, exit_code=exit_code, logs=logs)
         except requests_exceptions.RequestException as exc:
@@ -155,7 +181,7 @@ class DockerService:
             if container is not None:
                 try:
                     container.remove(force=True)
-                except DockerException:
+                except (requests_exceptions.RequestException, DockerException):
                     pass
 
     def run_builder_container_stream_with_options(
@@ -225,7 +251,7 @@ class DockerService:
                 if time.monotonic() - started_at > timeout_seconds:
                     try:
                         container.kill()
-                    except DockerException:
+                    except (requests_exceptions.RequestException, DockerException):
                         pass
                     logs = self._safe_container_logs(container)
                     if len(logs) > emitted_chars:
@@ -248,21 +274,16 @@ class DockerService:
                 try:
                     container.reload()
                     status = container.status
-                except DockerException:
-                    status = "unknown"
+                except (requests_exceptions.RequestException, DockerException):
+                    # Keep polling on transient Docker API failures.
+                    time.sleep(0.3)
+                    continue
 
                 if status not in {"created", "running", "restarting"}:
                     break
                 time.sleep(0.2)
 
-            wait_code = 1
-            try:
-                wait_result = container.wait(timeout=10)
-                wait_code = int(wait_result.get("StatusCode", 1))
-            except requests_exceptions.ReadTimeout:
-                wait_code = 124
-            except DockerException:
-                wait_code = 1
+            wait_code = self._resolve_container_exit_code(container, default_exit_code=1)
 
             final_logs = self._safe_container_logs(container)
             if len(final_logs) > emitted_chars:
@@ -270,6 +291,11 @@ class DockerService:
             yield CommandStreamEvent(
                 type="done",
                 result=CommandResult(success=wait_code == 0, exit_code=wait_code, logs=final_logs),
+            )
+        except requests_exceptions.RequestException as exc:
+            yield CommandStreamEvent(
+                type="done",
+                result=CommandResult(success=False, exit_code=1, logs=f"Docker request error: {exc}"),
             )
         except DockerException as exc:
             yield CommandStreamEvent(
@@ -280,7 +306,7 @@ class DockerService:
             if container is not None:
                 try:
                     container.remove(force=True)
-                except DockerException:
+                except (requests_exceptions.RequestException, DockerException):
                     pass
 
     def list_containers_summary(self, running_only: bool = True) -> list[dict[str, Any]]:
@@ -440,9 +466,54 @@ class DockerService:
     def _safe_container_logs(container: Any) -> str:
         try:
             raw_logs = container.logs(stdout=True, stderr=True)
-        except DockerException:
+        except (requests_exceptions.RequestException, DockerException):
             return ""
         return raw_logs.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _extract_container_exit_code(container: Any, refresh: bool = True) -> int | None:
+        if refresh:
+            try:
+                container.reload()
+            except (requests_exceptions.RequestException, DockerException):
+                pass
+
+        state: dict[str, Any] = {}
+        try:
+            state = (container.attrs.get("State") or {})
+        except Exception:  # pylint: disable=broad-except
+            return None
+
+        raw_exit_code = state.get("ExitCode")
+        if raw_exit_code is None:
+            return None
+        try:
+            return int(raw_exit_code)
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_container_exit_code(self, container: Any, default_exit_code: int = 1) -> int:
+        exit_code = self._extract_container_exit_code(container, refresh=False)
+        if exit_code is not None:
+            return exit_code
+
+        for _ in range(3):
+            try:
+                wait_result = container.wait(timeout=10)
+                status_code = wait_result.get("StatusCode")
+                if status_code is not None:
+                    return int(status_code)
+            except (requests_exceptions.RequestException, DockerException):
+                pass
+            except (TypeError, ValueError):
+                pass
+
+            exit_code = self._extract_container_exit_code(container, refresh=True)
+            if exit_code is not None:
+                return exit_code
+            time.sleep(0.3)
+
+        return default_exit_code
 
     @staticmethod
     def _format_docker_error(exc: DockerException) -> str:

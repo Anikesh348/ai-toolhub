@@ -29,6 +29,16 @@ class CodexService:
         "connection closed before message completed",
         "error sending request for url",
     )
+    _TRANSIENT_DOCKER_MARKERS = (
+        "docker request error",
+        "read timed out",
+        "unixhttpconnectionpool",
+        "connection aborted",
+        "connection reset by peer",
+        "temporarily unavailable",
+        "httpconnectionpool",
+        "protocol error",
+    )
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
         self._settings = settings
@@ -432,12 +442,12 @@ class CodexService:
 
                 combined_logs = "\n\n".join([
                     *transient_attempt_logs,
-                    f"Recovered after transient Codex transport issue on attempt {attempt}/{max_attempts}.",
+                    f"Recovered after transient Codex runtime issue on attempt {attempt}/{max_attempts}.",
                     result.logs.strip(),
                 ]).strip()
                 return CommandResult(success=True, exit_code=result.exit_code, logs=combined_logs)
 
-            if not self._is_transient_transport_failure(result.logs):
+            if not self._is_transient_retryable_failure(result.logs):
                 if not transient_attempt_logs:
                     return result
 
@@ -448,7 +458,7 @@ class CodexService:
                 return CommandResult(success=False, exit_code=result.exit_code, logs=combined_logs)
 
             transient_attempt_logs.append(
-                f"[Codex transient transport failure attempt {attempt}/{max_attempts}]\n"
+                f"[Codex transient runtime failure attempt {attempt}/{max_attempts}]\n"
                 f"{(result.logs or '').strip() or '(no logs)'}"
             )
             if attempt < max_attempts and retry_delay_seconds > 0:
@@ -463,7 +473,7 @@ class CodexService:
 
         combined_failure_logs = "\n\n".join([
             *transient_attempt_logs,
-            f"Transient Codex transport issue persisted after {max_attempts} attempts.",
+            f"Transient Codex runtime issue persisted after {max_attempts} attempts.",
             (last_result.logs or "").strip(),
         ]).strip()
         return CommandResult(success=False, exit_code=last_result.exit_code, logs=combined_failure_logs)
@@ -474,6 +484,17 @@ class CodexService:
         if not lowered:
             return False
         return any(marker in lowered for marker in cls._TRANSIENT_TRANSPORT_MARKERS)
+
+    @classmethod
+    def _is_transient_retryable_failure(cls, logs: str) -> bool:
+        lowered = (logs or "").lower()
+        if not lowered:
+            return False
+        if cls._is_transient_transport_failure(lowered):
+            return True
+        if "docker request error" not in lowered:
+            return False
+        return any(marker in lowered for marker in cls._TRANSIENT_DOCKER_MARKERS)
 
     @staticmethod
     def _sanitize_attachment_filename(file_name: str) -> str:

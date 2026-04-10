@@ -1091,6 +1091,118 @@ def test_send_message_records_execution_log_for_operator_without_quick_path() ->
     assert payload["total_tokens"] > 0
 
 
+def test_send_message_records_execution_log_when_chat_execution_raises() -> None:
+    session_repository = _StubSessionRepository()
+    session_repository._session["mode"] = "general"  # pylint: disable=protected-access
+    session_repository._session["model"] = "gpt-5.4"  # pylint: disable=protected-access
+    message_repository = _StubMessageRepository()
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.run_chat.side_effect = RuntimeError("codex crashed while generating")
+    chat_execution_log_repository = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,  # type: ignore[arg-type]
+        message_repository=message_repository,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="Summarize service health.",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "could not generate a response" in assistant_message["content"].lower()
+    chat_execution_log_repository.create.assert_called_once()
+    payload = chat_execution_log_repository.create.call_args.kwargs
+    assert payload["success"] is False
+    assert payload["exit_code"] == 1
+    assert "codex crashed while generating" in payload["raw_logs"]
+
+
+def test_stream_message_records_execution_log_when_stream_execution_raises() -> None:
+    session_repository = _StubSessionRepository()
+    session_repository._session["mode"] = "general"  # pylint: disable=protected-access
+    session_repository._session["model"] = "gpt-5.4"  # pylint: disable=protected-access
+    message_repository = _StubMessageRepository()
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+
+    def _broken_stream(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        if False:
+            yield None
+        raise RuntimeError("stream transport crashed")
+
+    codex_service.stream_chat.side_effect = _broken_stream
+    chat_execution_log_repository = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,  # type: ignore[arg-type]
+        message_repository=message_repository,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    events = list(service.stream_message(session_id="session-1", content="Summarize recent outages."))
+
+    assert events[0]["type"] == "user_message"
+    assert events[-1]["type"] == "done"
+    assistant_event = next((event for event in events if event["type"] == "assistant_message"), None)
+    assert assistant_event is not None
+    assert "could not generate a response" in str(assistant_event["message"]["content"]).lower()
+    chat_execution_log_repository.create.assert_called_once()
+    payload = chat_execution_log_repository.create.call_args.kwargs
+    assert payload["success"] is False
+    assert payload["exit_code"] == 1
+    assert "stream transport crashed" in payload["raw_logs"]
+
+
+def test_run_operator_task_includes_raw_logs_when_operator_execution_raises() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "Operator Session",
+        "mode": "operator",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.return_value = []
+    codex_service = Mock()
+    codex_service.run_operator.side_effect = RuntimeError("operator runtime crashed")
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.list_chat_models.return_value = ["gpt-5.4"]
+    codex_service.is_supported_chat_model.return_value = True
+    operator_access_service = Mock()
+    operator_access_service.resolve_project_path.return_value = "/tmp"
+    operator_access_service.normalize_cwd.return_value = "/tmp"
+    operator_access_service.to_container_path.return_value = "/workspace/tmp"
+    operator_access_service.build_mounts.return_value = {}
+    operator_access_service.policy_summary.return_value = "Allowed paths: /tmp"
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        operator_access_service=operator_access_service,  # type: ignore[arg-type]
+    )
+
+    result = service._run_operator_task(  # pylint: disable=protected-access
+        session_id="session-1",
+        user_content="check docker logs",
+        selected_model="gpt-5.4",
+    )
+
+    assert result["success"] is False
+    assert result["exitCode"] == 1
+    assert "operator runtime crashed" in str(result["assistantText"])
+    assert "operator runtime crashed" in str(result["rawLogs"])
+
+
 def test_parse_token_usage_from_logs_parses_inline_input_output() -> None:
     logs = "assistant: done\nTokens used: 1,200 input, 345 output"
     usage = ChatService._parse_token_usage_from_logs(logs)  # pylint: disable=protected-access
