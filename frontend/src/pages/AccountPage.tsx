@@ -5,12 +5,14 @@ import { useNavigate } from "react-router-dom";
 import {
   ChatExecutionLog,
   ChatUsageSummary,
+  CodexUsageStatus,
   currentIstTimestamp,
   CodexAuthStatus,
   CodexLoginStreamEvent,
   fetchChatExecutionLogs,
   fetchChatUsageSummary,
   fetchCodexAuthStatus,
+  fetchCodexUsageStatus,
   fetchGitSshPublicKey,
   formatDate,
   GitSshPublicKeyStatus,
@@ -69,6 +71,25 @@ function formatInr(value: number): string {
   return `₹${INTEGER_FORMATTER.format(Number(value.toFixed(0)))}`;
 }
 
+function formatPlanType(value: string | null | undefined): string {
+  if (!value) {
+    return "Unknown";
+  }
+  return value
+    .replace(/[_-]+/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "0%";
+  }
+  return `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+}
+
 export default function AccountPage() {
   const navigate = useNavigate();
   const { isLoaded: googleLoaded, isSignedIn } = useAuth();
@@ -81,6 +102,8 @@ export default function AccountPage() {
   const [logoutInProgress, setLogoutInProgress] = useState(false);
   const [googleSignOutInProgress, setGoogleSignOutInProgress] = useState(false);
   const [authLogs, setAuthLogs] = useState("");
+  const [codexUsage, setCodexUsage] = useState<CodexUsageStatus | null>(null);
+  const [loadingCodexUsage, setLoadingCodexUsage] = useState(false);
   const [gitSshKey, setGitSshKey] = useState<GitSshPublicKeyStatus | null>(null);
   const [loadingGitSshKey, setLoadingGitSshKey] = useState(true);
   const [copyKeyMessage, setCopyKeyMessage] = useState<string | null>(null);
@@ -160,6 +183,9 @@ export default function AccountPage() {
     return [...(chatUsage?.modes ?? [])].sort((lhs, rhs) => rhs.totalTokens - lhs.totalTokens);
   }, [chatUsage]);
 
+  const codexPrimaryWindow = useMemo(() => codexUsage?.rateLimit?.primaryWindow ?? null, [codexUsage]);
+  const codexSecondaryWindow = useMemo(() => codexUsage?.rateLimit?.secondaryWindow ?? null, [codexUsage]);
+
   async function loadAuthStatus(): Promise<void> {
     setLoadingAuth(true);
     try {
@@ -169,6 +195,18 @@ export default function AccountPage() {
       setError(loadError instanceof Error ? loadError.message : "Unable to load Codex auth status");
     } finally {
       setLoadingAuth(false);
+    }
+  }
+
+  async function loadCodexUsage(): Promise<void> {
+    setLoadingCodexUsage(true);
+    try {
+      const usage = await fetchCodexUsageStatus();
+      setCodexUsage(usage);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load Codex usage");
+    } finally {
+      setLoadingCodexUsage(false);
     }
   }
 
@@ -226,6 +264,7 @@ export default function AccountPage() {
     }
 
     void loadAuthStatus();
+    void loadCodexUsage();
     void loadGitSshKey();
     void loadChatLogs();
   }, []);
@@ -262,6 +301,7 @@ export default function AccountPage() {
     try {
       await streamCodexLogin(handleCodexLoginEvent);
       await loadAuthStatus();
+      await loadCodexUsage();
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Unable to start Codex login");
     } finally {
@@ -284,6 +324,7 @@ export default function AccountPage() {
         setAuthLogs(status.message);
       }
       await loadAuthStatus();
+      await loadCodexUsage();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out of Codex");
     } finally {
@@ -440,6 +481,101 @@ export default function AccountPage() {
                   {logoutInProgress ? "Logging out..." : "Logout"}
                 </button>
               </div>
+            </div>
+
+            <div className="mt-4 overflow-hidden border-t border-amber/14 pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs uppercase tracking-[0.15em] text-muted">Codex Usage</p>
+                <button
+                  type="button"
+                  onClick={() => void loadCodexUsage()}
+                  disabled={loadingCodexUsage}
+                  className="btn-ghost border-amber/30 bg-black/30 px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {loadingCodexUsage ? "Refreshing..." : "Refresh Usage"}
+                </button>
+              </div>
+
+              <p className="mt-2 break-words text-xs text-muted">
+                {codexUsage?.message ?? "Usage data has not been loaded yet."}
+              </p>
+
+              {codexUsage?.available ? (
+                <>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <article className="min-w-0 border border-amber/14 bg-black/35 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Plan</p>
+                      <p className="mt-1 break-words text-lg font-semibold text-[#f7e8bf]">
+                        {formatPlanType(codexUsage.planType)}
+                      </p>
+                      <p className="mt-1 break-words text-[11px] text-muted">
+                        {codexUsage.fetchedAt ? `Fetched ${formatDate(codexUsage.fetchedAt)}` : "Awaiting refresh"}
+                      </p>
+                    </article>
+                    <article className="min-w-0 border border-amber/14 bg-black/35 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Primary Window</p>
+                      <p className="mt-1 text-lg font-semibold text-[#f7e8bf]">
+                        {formatPercent(codexPrimaryWindow?.usedPercent)}
+                      </p>
+                      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-black/55">
+                        <div
+                          className="h-full bg-amber/70"
+                          style={{ width: formatPercent(codexPrimaryWindow?.usedPercent) }}
+                        />
+                      </div>
+                      <p className="mt-1 break-words text-[11px] text-muted">
+                        {codexPrimaryWindow?.resetAt
+                          ? `Resets ${formatDate(codexPrimaryWindow.resetAt)}`
+                          : "Reset time unavailable"}
+                      </p>
+                    </article>
+                    <article className="min-w-0 border border-amber/14 bg-black/35 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Secondary Window</p>
+                      <p className="mt-1 text-lg font-semibold text-[#f7e8bf]">
+                        {formatPercent(codexSecondaryWindow?.usedPercent)}
+                      </p>
+                      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-black/55">
+                        <div
+                          className="h-full bg-skyline/70"
+                          style={{ width: formatPercent(codexSecondaryWindow?.usedPercent) }}
+                        />
+                      </div>
+                      <p className="mt-1 break-words text-[11px] text-muted">
+                        {codexSecondaryWindow?.resetAt
+                          ? `Resets ${formatDate(codexSecondaryWindow.resetAt)}`
+                          : "Reset time unavailable"}
+                      </p>
+                    </article>
+                    <article className="min-w-0 border border-amber/14 bg-black/35 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-[0.14em] text-muted">Credits</p>
+                      <p className="mt-1 break-words text-lg font-semibold text-[#f7e8bf]">
+                        {codexUsage.credits?.unlimited ? "Unlimited" : (codexUsage.credits?.balance ?? "0")}
+                      </p>
+                      <p className="mt-1 break-words text-[11px] text-muted">
+                        {codexUsage.credits?.hasCredits ? "Credits available" : "No credits available"}
+                      </p>
+                    </article>
+                  </div>
+
+                  {codexUsage.additionalRateLimits.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {codexUsage.additionalRateLimits.map((item, index) => (
+                        <span
+                          key={`${item.limitName ?? "limit"}-${index}`}
+                          className="max-w-full break-words rounded-full border border-amber/18 bg-black/30 px-3 py-1 text-[11px] text-muted"
+                        >
+                          {(item.limitName || item.meteredFeature || "additional").replace(/_/g, " ")}:{" "}
+                          {formatPercent(item.rateLimit?.primaryWindow?.usedPercent)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="mt-2 text-xs text-muted">
+                  Sign in with ChatGPT inside Codex to load account usage windows and credits.
+                </p>
+              )}
             </div>
           </article>
 

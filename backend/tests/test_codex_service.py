@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -110,3 +111,122 @@ def test_run_chat_reports_when_transient_retries_are_exhausted(tmp_path) -> None
     assert result.exit_code == 1
     assert docker_service.calls == 3
     assert "Transient Codex transport issue persisted after 3 attempts." in result.logs
+
+
+def test_get_usage_status_returns_unavailable_for_non_chatgpt_auth(tmp_path) -> None:
+    docker_service = _StubDockerService(root=tmp_path, results=[])
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    auth_path = tmp_path / ".codex" / "auth.json"
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(
+        json.dumps({
+            "auth_mode": "api_key",
+            "tokens": {"access_token": "ignored"},
+        }),
+        encoding="utf-8",
+    )
+
+    payload = service.get_usage_status()
+
+    assert payload["available"] is False
+    assert payload["authMode"] == "api_key"
+    assert "ChatGPT-authenticated sessions" in str(payload["message"])
+
+
+def test_get_usage_status_maps_wham_usage_payload(tmp_path, monkeypatch) -> None:
+    docker_service = _StubDockerService(root=tmp_path, results=[])
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    auth_path = tmp_path / ".codex" / "auth.json"
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(
+        json.dumps({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "token-123",
+                "account_id": "acct-123",
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    sample_payload = {
+        "plan_type": "plus",
+        "rate_limit": {
+            "allowed": True,
+            "limit_reached": False,
+            "primary_window": {
+                "used_percent": 12,
+                "limit_window_seconds": 18000,
+                "reset_after_seconds": 1200,
+                "reset_at": 1776000000,
+            },
+            "secondary_window": {
+                "used_percent": 5,
+                "limit_window_seconds": 604800,
+                "reset_after_seconds": 320000,
+                "reset_at": 1776500000,
+            },
+        },
+        "code_review_rate_limit": None,
+        "additional_rate_limits": [
+            {
+                "limit_name": "codex_other",
+                "metered_feature": "codex_other",
+                "rate_limit": {
+                    "allowed": True,
+                    "limit_reached": False,
+                    "primary_window": {
+                        "used_percent": 44,
+                        "limit_window_seconds": 900,
+                        "reset_after_seconds": 200,
+                        "reset_at": 1776000900,
+                    },
+                    "secondary_window": None,
+                },
+            }
+        ],
+        "credits": {
+            "has_credits": True,
+            "unlimited": False,
+            "overage_limit_reached": False,
+            "balance": "7.25",
+        },
+        "spend_control": {"reached": False},
+    }
+
+    captured_headers: dict[str, str] = {}
+
+    class _FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self.status_code = 200
+            self.text = json.dumps(payload)
+            self._payload = payload
+
+        def json(self) -> dict:
+            return self._payload
+
+    def _fake_get(url: str, *, headers: dict[str, str], timeout: int):
+        captured_headers.update(headers)
+        assert url == "https://chatgpt.com/backend-api/wham/usage"
+        assert timeout == 12
+        return _FakeResponse(sample_payload)
+
+    monkeypatch.setattr("app.services.codex_service.requests.get", _fake_get)
+
+    payload = service.get_usage_status()
+
+    assert payload["available"] is True
+    assert payload["planType"] == "plus"
+    assert payload["endpoint"] == "https://chatgpt.com/backend-api/wham/usage"
+    assert payload["rateLimit"]["primaryWindow"]["usedPercent"] == 12.0
+    assert payload["rateLimit"]["primaryWindow"]["windowMinutes"] == 300
+    assert payload["credits"]["balance"] == "7.25"
+    assert len(payload["additionalRateLimits"]) == 1
+    assert payload["additionalRateLimits"][0]["limitName"] == "codex_other"
+    assert captured_headers["ChatGPT-Account-Id"] == "acct-123"

@@ -102,6 +102,49 @@ class CodexAuthStatusResponse(BaseModel):
     exitCode: int
 
 
+class CodexUsageWindowResponse(BaseModel):
+    usedPercent: Optional[float] = None
+    limitWindowSeconds: Optional[int] = None
+    windowMinutes: Optional[int] = None
+    resetAfterSeconds: Optional[int] = None
+    resetAtEpoch: Optional[int] = None
+    resetAt: Optional[datetime] = None
+
+
+class CodexUsageRateLimitResponse(BaseModel):
+    allowed: bool
+    limitReached: bool
+    primaryWindow: Optional[CodexUsageWindowResponse] = None
+    secondaryWindow: Optional[CodexUsageWindowResponse] = None
+
+
+class CodexUsageCreditsResponse(BaseModel):
+    hasCredits: bool
+    unlimited: bool
+    balance: Optional[str] = None
+    overageLimitReached: Optional[bool] = None
+
+
+class CodexUsageAdditionalRateLimitResponse(BaseModel):
+    limitName: Optional[str] = None
+    meteredFeature: Optional[str] = None
+    rateLimit: Optional[CodexUsageRateLimitResponse] = None
+
+
+class CodexUsageStatusResponse(BaseModel):
+    available: bool
+    authMode: Optional[str] = None
+    endpoint: Optional[str] = None
+    planType: Optional[str] = None
+    message: str
+    fetchedAt: Optional[datetime] = None
+    rateLimit: Optional[CodexUsageRateLimitResponse] = None
+    codeReviewRateLimit: Optional[CodexUsageRateLimitResponse] = None
+    additionalRateLimits: list[CodexUsageAdditionalRateLimitResponse] = Field(default_factory=list)
+    credits: Optional[CodexUsageCreditsResponse] = None
+    spendControlReached: Optional[bool] = None
+
+
 class GitSshPublicKeyResponse(BaseModel):
     publicKey: str
     fingerprint: Optional[str] = None

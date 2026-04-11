@@ -1,11 +1,13 @@
 import base64
+from datetime import datetime, timezone
 import json
 import mimetypes
 from pathlib import Path
 import re
+import requests
 import shlex
 import time
-from typing import Iterable
+from typing import Any, Iterable
 from uuid import uuid4
 
 from app.services.docker_service import CommandResult, CommandStreamEvent, DockerService
@@ -38,6 +40,10 @@ class CodexService:
         "temporarily unavailable",
         "httpconnectionpool",
         "protocol error",
+    )
+    _USAGE_ENDPOINTS = (
+        "https://chatgpt.com/backend-api/wham/usage",
+        "https://chat.openai.com/backend-api/wham/usage",
     )
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
@@ -287,6 +293,78 @@ class CodexService:
             "exitCode": result.exit_code,
         }
 
+    def get_usage_status(self) -> dict[str, object]:
+        payload, load_error = self._load_codex_auth_payload()
+        if payload is None:
+            return self._build_usage_unavailable(
+                message=load_error or "Codex auth state is unavailable.",
+                auth_mode=None,
+            )
+
+        auth_mode = str(payload.get("auth_mode") or "").strip().lower() or None
+        if auth_mode != "chatgpt":
+            return self._build_usage_unavailable(
+                message=(
+                    "Codex usage metrics are available only for ChatGPT-authenticated sessions. "
+                    "Sign in with ChatGPT to load usage."
+                ),
+                auth_mode=auth_mode,
+            )
+
+        tokens = payload.get("tokens")
+        token_payload = tokens if isinstance(tokens, dict) else {}
+        access_token = str(token_payload.get("access_token") or "").strip()
+        account_id = str(token_payload.get("account_id") or "").strip() or None
+        if not access_token:
+            return self._build_usage_unavailable(
+                message="ChatGPT access token is missing from Codex auth state. Please re-authenticate.",
+                auth_mode=auth_mode,
+            )
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "User-Agent": "codex-cli",
+        }
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+
+        last_error: str | None = None
+        for endpoint in self._USAGE_ENDPOINTS:
+            try:
+                response = requests.get(endpoint, headers=headers, timeout=12)
+            except requests.RequestException as exc:
+                last_error = f"Unable to reach Codex usage endpoint: {exc}"
+                continue
+
+            if response.status_code >= 400:
+                last_error = (
+                    f"Codex usage endpoint returned HTTP {response.status_code}. "
+                    "Please confirm Codex ChatGPT login and try again."
+                )
+                continue
+
+            try:
+                usage_payload = response.json()
+            except ValueError:
+                last_error = "Codex usage endpoint returned invalid JSON."
+                continue
+
+            if not isinstance(usage_payload, dict):
+                last_error = "Codex usage endpoint returned an unexpected payload."
+                continue
+
+            return self._map_usage_payload(
+                payload=usage_payload,
+                auth_mode=auth_mode,
+                endpoint=endpoint,
+            )
+
+        return self._build_usage_unavailable(
+            message=last_error or "Unable to fetch Codex usage right now.",
+            auth_mode=auth_mode,
+        )
+
     def get_git_ssh_public_key(self) -> dict[str, object]:
         generated = self._ensure_operator_ssh_key_pair()
         public_key_path = self._operator_ssh_public_key_host_path()
@@ -385,6 +463,146 @@ class CodexService:
                 environment[f"GIT_CONFIG_VALUE_{index}"] = value
 
         return environment
+
+    def _load_codex_auth_payload(self) -> tuple[dict[str, Any] | None, str | None]:
+        auth_path = self._codex_auth_file_path()
+        if not auth_path.exists():
+            return None, "Codex auth file was not found. Sign in to Codex first."
+
+        try:
+            raw_payload = json.loads(auth_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, "Unable to read Codex auth file."
+
+        if not isinstance(raw_payload, dict):
+            return None, "Codex auth file has an unexpected format."
+        return raw_payload, None
+
+    def _codex_auth_file_path(self) -> Path:
+        return Path(self._settings.codex_workspace_host) / ".codex" / "auth.json"
+
+    @staticmethod
+    def _build_usage_unavailable(message: str, auth_mode: str | None) -> dict[str, object]:
+        return {
+            "available": False,
+            "authMode": auth_mode,
+            "endpoint": None,
+            "planType": None,
+            "message": message,
+            "fetchedAt": None,
+            "rateLimit": None,
+            "codeReviewRateLimit": None,
+            "additionalRateLimits": [],
+            "credits": None,
+            "spendControlReached": None,
+        }
+
+    @classmethod
+    def _map_usage_payload(cls, payload: dict[str, Any], auth_mode: str | None, endpoint: str) -> dict[str, object]:
+        additional_limits_raw = payload.get("additional_rate_limits")
+        additional_limits: list[dict[str, object]] = []
+        if isinstance(additional_limits_raw, list):
+            for item in additional_limits_raw:
+                if not isinstance(item, dict):
+                    continue
+                additional_limits.append({
+                    "limitName": item.get("limit_name"),
+                    "meteredFeature": item.get("metered_feature"),
+                    "rateLimit": cls._map_rate_limit_details(item.get("rate_limit")),
+                })
+
+        credits_raw = payload.get("credits")
+        credits: dict[str, object] | None = None
+        if isinstance(credits_raw, dict):
+            balance_raw = credits_raw.get("balance")
+            balance = str(balance_raw) if balance_raw is not None else None
+            credits = {
+                "hasCredits": bool(credits_raw.get("has_credits")),
+                "unlimited": bool(credits_raw.get("unlimited")),
+                "balance": balance,
+                "overageLimitReached": (
+                    bool(credits_raw.get("overage_limit_reached"))
+                    if "overage_limit_reached" in credits_raw
+                    else None
+                ),
+            }
+
+        spend_control = payload.get("spend_control")
+        spend_control_reached: bool | None = None
+        if isinstance(spend_control, dict) and "reached" in spend_control:
+            spend_control_reached = bool(spend_control.get("reached"))
+
+        return {
+            "available": True,
+            "authMode": auth_mode,
+            "endpoint": endpoint,
+            "planType": str(payload.get("plan_type") or "").strip() or None,
+            "message": "Codex usage loaded from your ChatGPT account.",
+            "fetchedAt": datetime.now(timezone.utc).isoformat(),
+            "rateLimit": cls._map_rate_limit_details(payload.get("rate_limit")),
+            "codeReviewRateLimit": cls._map_rate_limit_details(payload.get("code_review_rate_limit")),
+            "additionalRateLimits": additional_limits,
+            "credits": credits,
+            "spendControlReached": spend_control_reached,
+        }
+
+    @classmethod
+    def _map_rate_limit_details(cls, value: Any) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+        return {
+            "allowed": bool(value.get("allowed")),
+            "limitReached": bool(value.get("limit_reached")),
+            "primaryWindow": cls._map_rate_limit_window(value.get("primary_window")),
+            "secondaryWindow": cls._map_rate_limit_window(value.get("secondary_window")),
+        }
+
+    @classmethod
+    def _map_rate_limit_window(cls, value: Any) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+
+        used_percent_raw = value.get("used_percent")
+        limit_window_seconds_raw = value.get("limit_window_seconds")
+        reset_after_seconds_raw = value.get("reset_after_seconds")
+        reset_at_raw = value.get("reset_at")
+
+        used_percent: float | None = None
+        if isinstance(used_percent_raw, (int, float)):
+            used_percent = float(used_percent_raw)
+
+        limit_window_seconds: int | None = None
+        if isinstance(limit_window_seconds_raw, (int, float)):
+            limit_window_seconds = int(limit_window_seconds_raw)
+
+        reset_after_seconds: int | None = None
+        if isinstance(reset_after_seconds_raw, (int, float)):
+            reset_after_seconds = int(reset_after_seconds_raw)
+
+        reset_at_epoch: int | None = None
+        if isinstance(reset_at_raw, (int, float)):
+            reset_at_epoch = int(reset_at_raw)
+
+        return {
+            "usedPercent": used_percent,
+            "limitWindowSeconds": limit_window_seconds,
+            "windowMinutes": cls._window_minutes_from_seconds(limit_window_seconds),
+            "resetAfterSeconds": reset_after_seconds,
+            "resetAtEpoch": reset_at_epoch,
+            "resetAt": cls._epoch_seconds_to_iso_utc(reset_at_epoch),
+        }
+
+    @staticmethod
+    def _window_minutes_from_seconds(seconds: int | None) -> int | None:
+        if seconds is None or seconds <= 0:
+            return None
+        return (seconds + 59) // 60
+
+    @staticmethod
+    def _epoch_seconds_to_iso_utc(value: int | None) -> str | None:
+        if value is None or value <= 0:
+            return None
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
     @staticmethod
     def _apply_chat_model(shell_command: str, model: str | None) -> str:

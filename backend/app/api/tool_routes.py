@@ -8,6 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from app.api.schemas import (
     CodexAuthStatusResponse,
+    CodexUsageStatusResponse,
     DeleteJobResponse,
     DeleteToolResponse,
     GenerateToolRequest,
@@ -183,6 +184,11 @@ def get_codex_auth_status(service: CodexService = Depends(get_codex_service)) ->
 @router.post("/codex/auth/logout", response_model=CodexAuthStatusResponse)
 def logout_codex_auth(service: CodexService = Depends(get_codex_service)) -> CodexAuthStatusResponse:
     return CodexAuthStatusResponse(**service.logout())
+
+
+@router.get("/codex/usage", response_model=CodexUsageStatusResponse)
+def get_codex_usage_status(service: CodexService = Depends(get_codex_service)) -> CodexUsageStatusResponse:
+    return CodexUsageStatusResponse(**service.get_usage_status())
 
 
 @router.get("/codex/auth/login/events")

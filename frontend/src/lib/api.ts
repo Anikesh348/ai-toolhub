@@ -156,6 +156,49 @@ export type CodexAuthStatus = {
   exitCode: number;
 };
 
+export type CodexUsageWindow = {
+  usedPercent: number | null;
+  limitWindowSeconds: number | null;
+  windowMinutes: number | null;
+  resetAfterSeconds: number | null;
+  resetAtEpoch: number | null;
+  resetAt: string | null;
+};
+
+export type CodexUsageRateLimit = {
+  allowed: boolean;
+  limitReached: boolean;
+  primaryWindow: CodexUsageWindow | null;
+  secondaryWindow: CodexUsageWindow | null;
+};
+
+export type CodexUsageCredits = {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+  overageLimitReached: boolean | null;
+};
+
+export type CodexUsageAdditionalRateLimit = {
+  limitName: string | null;
+  meteredFeature: string | null;
+  rateLimit: CodexUsageRateLimit | null;
+};
+
+export type CodexUsageStatus = {
+  available: boolean;
+  authMode: string | null;
+  endpoint: string | null;
+  planType: string | null;
+  message: string;
+  fetchedAt: string | null;
+  rateLimit: CodexUsageRateLimit | null;
+  codeReviewRateLimit: CodexUsageRateLimit | null;
+  additionalRateLimits: CodexUsageAdditionalRateLimit[];
+  credits: CodexUsageCredits | null;
+  spendControlReached: boolean | null;
+};
+
 export type GitSshPublicKeyStatus = {
   publicKey: string;
   fingerprint: string | null;
@@ -339,6 +382,15 @@ export async function fetchCodexAuthStatus(): Promise<CodexAuthStatus> {
     throw new Error(`Unable to fetch Codex auth status: ${response.status} ${text}`);
   }
   return (await response.json()) as CodexAuthStatus;
+}
+
+export async function fetchCodexUsageStatus(): Promise<CodexUsageStatus> {
+  const response = await fetch(`${API_BASE_URL}/codex/usage`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch Codex usage status: ${response.status} ${text}`);
+  }
+  return (await response.json()) as CodexUsageStatus;
 }
 
 export async function logoutCodexAuth(): Promise<CodexAuthStatus> {
