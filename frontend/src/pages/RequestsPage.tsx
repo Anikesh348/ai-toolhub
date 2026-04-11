@@ -268,7 +268,7 @@ export default function RequestsPage() {
   }
 
   return (
-    <main className="flex flex-col gap-4 overflow-x-clip lg:h-full lg:min-h-0 lg:overflow-hidden">
+    <main className="flex h-full min-h-0 flex-col gap-4 overflow-x-clip overflow-y-auto lg:overflow-hidden">
       <header className="glass-strong rounded-[1.8rem] px-6 py-6 lg:shrink-0">
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="max-w-2xl">
