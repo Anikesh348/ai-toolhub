@@ -89,7 +89,7 @@ class Settings(BaseSettings):
         alias="CODEX_COMMAND_TEMPLATE",
     )
     codex_chat_models: str = Field(default=DEFAULT_CODEX_CHAT_MODELS, alias="CODEX_CHAT_MODELS")
-    codex_default_chat_model: str | None = Field(default=None, alias="CODEX_DEFAULT_CHAT_MODEL")
+    codex_default_chat_model: str | None = Field(default="gpt-5.3-codex", alias="CODEX_DEFAULT_CHAT_MODEL")
     codex_tool_builder_model: str | None = Field(default=None, alias="CODEX_TOOL_BUILDER_MODEL")
     codex_models_cache_path: str | None = Field(default="~/.codex/models_cache.json", alias="CODEX_MODELS_CACHE_PATH")
     codex_config_path: str | None = Field(default="~/.codex/config.toml", alias="CODEX_CONFIG_PATH")

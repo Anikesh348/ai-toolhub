@@ -1152,6 +1152,10 @@ function ChatPageContent() {
     return composerModel ?? activeChat?.model ?? defaultModel ?? availableModels[0] ?? null;
   }
 
+  function resolveModelForNewChat(): string | null {
+    return defaultModel ?? availableModels[0] ?? resolveModelForRequest();
+  }
+
   function clearCopyFeedbackTimeout(): void {
     if (copyFeedbackTimeoutRef.current === null) {
       return;
@@ -1543,7 +1547,7 @@ function ChatPageContent() {
         return;
       }
 
-      const created = await createChatSession("New Chat", "general", resolveModelForRequest());
+      const created = await createChatSession("New Chat", "general", resolveModelForNewChat());
       setChats(sortChatsForSidebar([created, ...list]));
       setActiveChatId(created.id);
       selectedChatId = created.id;
@@ -1788,7 +1792,7 @@ function ChatPageContent() {
     setError(null);
     try {
       const title = mode === "general" ? "New Chat" : `${MODE_LABELS[mode]} Chat`;
-      const selectedModel = resolveModelForRequest();
+      const selectedModel = resolveModelForNewChat();
       const created = await createChatSession(title, mode, selectedModel);
       setChats((current) => sortChatsForSidebar([created, ...current]));
       setActiveChatId(created.id);

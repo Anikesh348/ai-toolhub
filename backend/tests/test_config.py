@@ -15,6 +15,15 @@ def _settings_kwargs(**overrides: object) -> dict[str, object]:
     return values
 
 
+def test_settings_default_chat_model_prefers_gpt_5_3_codex() -> None:
+    settings = Settings(
+        **_settings_kwargs(),
+        _env_file=None,
+    )
+
+    assert settings.default_chat_model == "gpt-5.3-codex"
+
+
 def test_settings_use_desktop_model_cache_for_chat_and_tool_builder_defaults(tmp_path) -> None:
     models_cache_path = tmp_path / "models_cache.json"
     models_cache_path.write_text(
