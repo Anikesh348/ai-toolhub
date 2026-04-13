@@ -218,6 +218,31 @@ class ToolBuildWorkflow:
                 last_failure = preflight_message
                 continue
 
+            contract_check = getattr(self._testing_service, "verify_change_request_contracts", None)
+            if callable(contract_check):
+                contract_result = contract_check(
+                    request_id=request_id,
+                    prompt=refined_prompt,
+                )
+                if isinstance(contract_result, tuple) and len(contract_result) == 2:
+                    contract_ok, contract_message = bool(contract_result[0]), str(contract_result[1])
+                else:
+                    contract_ok, contract_message = True, "Change-request contract check skipped (service did not return a contract result tuple)."
+                self._build_log_repository.add_log(
+                    request_id,
+                    f"change_contract_attempt_{attempt}",
+                    contract_message[-12000:],
+                )
+                self._store_log_artifact(
+                    request_id=request_id,
+                    step=f"change_contract_attempt_{attempt}",
+                    file_name=f"change-contract-attempt-{attempt}.log",
+                    content=contract_message,
+                )
+                if not contract_ok:
+                    last_failure = contract_message
+                    continue
+
             self._transition(
                 request_id,
                 BuildStatus.GUARDIAN_VALIDATING,
@@ -548,25 +573,35 @@ class ToolBuildWorkflow:
         latest_prompt = str(request.get("latestPrompt") or request.get("prompt") or "").strip()
         raw_history = request.get("promptHistory")
 
-        history_prompts: list[str] = []
+        history_entries: list[tuple[str, str]] = []
         if isinstance(raw_history, list):
             for item in raw_history:
                 if not isinstance(item, dict):
                     continue
                 prompt = str(item.get("prompt") or "").strip()
                 if prompt:
-                    history_prompts.append(prompt)
+                    kind = str(item.get("kind") or "change").strip() or "change"
+                    history_entries.append((kind, prompt))
 
-        if not initial_prompt and not history_prompts:
+        if not initial_prompt and not history_entries:
             return latest_prompt
 
         parts: list[str] = []
         if initial_prompt:
             parts.append(f"Original tool request:\n{initial_prompt}")
-        if history_prompts:
-            recent_changes = history_prompts[1:] if len(history_prompts) > 1 else []
+        if history_entries:
+            recent_changes = history_entries[1:] if len(history_entries) > 1 else []
             if recent_changes:
-                parts.append("Modification history:\n" + "\n".join(f"- {prompt}" for prompt in recent_changes[-3:]))
+                deduped_recent: list[tuple[str, str]] = []
+                seen_prompts: set[str] = set()
+                for kind, prompt in recent_changes:
+                    normalized = re.sub(r"\s+", " ", prompt).strip().lower()
+                    if not normalized or normalized in seen_prompts:
+                        continue
+                    seen_prompts.add(normalized)
+                    deduped_recent.append((kind, prompt))
+                rendered_changes = [f"- {kind}: {prompt}" for kind, prompt in deduped_recent[-4:]]
+                parts.append("Modification history:\n" + "\n".join(rendered_changes))
         if latest_prompt and latest_prompt != initial_prompt:
             parts.append(f"Latest user request:\n{latest_prompt}")
 

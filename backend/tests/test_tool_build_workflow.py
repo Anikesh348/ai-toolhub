@@ -447,6 +447,60 @@ def test_workflow_fails_when_dynamic_data_reliability_check_fails() -> None:
     assert any(call.args[1] == BuildStatus.FAILED for call in request_repository.update_status.call_args_list)
 
 
+def test_workflow_retries_when_change_request_contract_check_fails() -> None:
+    settings = SimpleNamespace(
+        max_build_attempts=1,
+        smoke_test_host="127.0.0.1",
+        scraping_web_verify_timeout_seconds=30,
+    )
+    request_repository = Mock()
+    request_repository.get_by_id.return_value = {
+        "id": "req-contract-fail",
+        "prompt": "Build movie show search API",
+        "status": BuildStatus.PENDING.value,
+    }
+    build_log_repository = Mock()
+    tool_repository = Mock()
+    prompt_service = Mock()
+    prompt_service.refine_prompt.return_value = (
+        "Apply the requested change to the existing tool codebase.\n\n"
+        "Change request:\nAdd genre picker multi-select.\n\n"
+        "Requirements:\n- Preserve existing behavior.\n"
+    )
+    codex_service = Mock()
+    codex_service.run_generation.return_value = CommandResult(success=True, exit_code=0, logs="generated")
+    testing_service = Mock()
+    testing_service.preflight_validate.return_value = (True, "ok")
+    testing_service.verify_change_request_contracts.return_value = (
+        False,
+        "Change-request contract check failed:\n- missing genre picker",
+    )
+    docker_service = Mock()
+    port_allocator_service = Mock()
+    alert_service = Mock()
+
+    workflow = ToolBuildWorkflow(
+        settings=settings,  # type: ignore[arg-type]
+        request_repository=request_repository,  # type: ignore[arg-type]
+        build_log_repository=build_log_repository,  # type: ignore[arg-type]
+        build_log_artifact_repository=Mock(),  # type: ignore[arg-type]
+        tool_repository=tool_repository,  # type: ignore[arg-type]
+        prompt_service=prompt_service,  # type: ignore[arg-type]
+        codex_service=codex_service,  # type: ignore[arg-type]
+        testing_service=testing_service,  # type: ignore[arg-type]
+        docker_service=docker_service,  # type: ignore[arg-type]
+        port_allocator_service=port_allocator_service,  # type: ignore[arg-type]
+        alert_service=alert_service,  # type: ignore[arg-type]
+    )
+
+    workflow._run(request_id="req-contract-fail", tool_name_hint=None)  # pylint: disable=protected-access
+
+    testing_service.verify_change_request_contracts.assert_called_once()
+    testing_service.run_tests.assert_not_called()
+    tool_repository.create.assert_not_called()
+    assert any(call.args[1] == BuildStatus.FAILED for call in request_repository.update_status.call_args_list)
+
+
 def test_workflow_fails_fast_on_non_retryable_generation_error() -> None:
     settings = SimpleNamespace(
         max_build_attempts=3,

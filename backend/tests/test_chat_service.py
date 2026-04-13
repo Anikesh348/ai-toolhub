@@ -357,6 +357,40 @@ def test_build_tool_modification_prompt_preserves_runtime_contracts() -> None:
     assert "Do not let synchronous Mongo startup failures crash the HTTP server" in prompt
 
 
+def test_build_tool_modification_prompt_includes_critical_change_checklist() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    prompt = service._build_tool_modification_prompt(
+        user_content=(
+            "Preserve existing behavior. "
+            "Add a UI-first genre picker multi-select and persist selected genres in DB before year/language flow."
+        ),
+        tool=None,
+        request_state=None,
+    )
+
+    assert "Critical change checklist (must implement all):" in prompt
+    assert "genre picker multi-select" in prompt
+    assert "persist selected genres in DB" in prompt
+
+
+def test_condense_modification_history_prompt_prefers_latest_user_request_block() -> None:
+    condensed = ChatService._condense_modification_history_prompt(  # pylint: disable=protected-access
+        original_request=(
+            "Original tool request:\nBuild a movie discovery app.\n\n"
+            "Latest user request:\nAdd a clickable genre picker multi-select and persist selected genres."
+        ),
+        clarification_result=None,
+    )
+
+    assert "clickable genre picker multi-select" in condensed
+    assert "Original tool request:" not in condensed
+
+
 def test_tool_builder_clarification_targets_live_movie_alert_gaps() -> None:
     clarification = ChatService._build_tool_builder_clarification(
         "Build a tool that tracks movie show availability in Chennai and Bangalore and sends alerts."

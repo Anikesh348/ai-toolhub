@@ -1766,13 +1766,17 @@ class ChatService:
                     original_request=combined_change_request,
                     clarification_result=clarification_result,
                 )
+                condensed_history_prompt = self._condense_modification_history_prompt(
+                    original_request=combined_change_request,
+                    clarification_result=clarification_result,
+                )
                 modification_prompt = self._build_tool_modification_prompt(
                     user_content=finalized_change_request,
                     tool=tool,
                     request_state=request_state,
                 )
                 job = self._tool_builder_service.start_generation(
-                    prompt=finalized_change_request,
+                    prompt=condensed_history_prompt,
                     name=tool_name,
                     base_request_id=base_request_id,
                     rebuild_tool_id=rebuild_tool_id,
@@ -1923,13 +1927,17 @@ class ChatService:
                 original_request=change_request,
                 clarification_result=clarification_result,
             )
+            condensed_history_prompt = self._condense_modification_history_prompt(
+                original_request=change_request,
+                clarification_result=clarification_result,
+            )
             modification_prompt = self._build_tool_modification_prompt(
                 user_content=finalized_change_request,
                 tool=tool,
                 request_state=request_state,
             )
             job = self._tool_builder_service.start_generation(
-                prompt=finalized_change_request,
+                prompt=condensed_history_prompt,
                 name=tool_name,
                 base_request_id=base_request_id,
                 rebuild_tool_id=rebuild_tool_id,
@@ -2261,9 +2269,24 @@ class ChatService:
             recent_entries = history[1:] if len(history) > 1 else []
             if recent_entries:
                 lines.append("\nApplied modification history:")
-                for entry in recent_entries[-3:]:
-                    kind = str(entry.get("kind") or "change").strip() or "change"
+                deduped_recent: list[dict[str, str]] = []
+                seen_prompts: set[str] = set()
+                for entry in recent_entries:
                     prompt = cls._summarize_tool_builder_request_text(str(entry.get("prompt") or ""), limit=limit)
+                    normalized = re.sub(r"\s+", " ", prompt).strip().lower()
+                    if not normalized or normalized in seen_prompts:
+                        continue
+                    seen_prompts.add(normalized)
+                    deduped_recent.append(
+                        {
+                            "kind": str(entry.get("kind") or "change").strip() or "change",
+                            "prompt": prompt,
+                        }
+                    )
+
+                for entry in deduped_recent[-4:]:
+                    kind = str(entry.get("kind") or "change").strip() or "change"
+                    prompt = str(entry.get("prompt") or "").strip()
                     if prompt:
                         lines.append(f"- {kind}: {prompt}")
         if latest_prompt and latest_prompt != initial_prompt:
@@ -2798,11 +2821,20 @@ class ChatService:
             tool_lines.extend(self._tool_request_context_lines(request_state, limit=5000))
 
         context_block = "\n".join(tool_lines)
+        checklist_items = self._build_modification_must_implement_checklist(user_content=user_content)
+        checklist_section = ""
+        if checklist_items:
+            checklist_lines = "\n".join(f"- {item}" for item in checklist_items)
+            checklist_section = (
+                "\nCritical change checklist (must implement all):\n"
+                f"{checklist_lines}\n"
+            )
         return (
             "Apply the requested change to the existing tool codebase.\n"
             "Inspect the current workspace first, then make targeted updates.\n\n"
             f"{context_block}\n\n"
             f"Change request:\n{user_content}\n\n"
+            f"{checklist_section}"
             "Requirements:\n"
             "- Clarify updated requirements and assumptions before changing implementation.\n"
             "- Keep `docs/requirements.md` and `docs/test-cases.md` in sync with the requested change before implementation.\n"
@@ -2824,6 +2856,79 @@ class ChatService:
             "- Keep Docker/runtime compatibility intact, including required health/status checks.\n"
             "- Re-verify runtime APIs after the change; for scraping/live-data flows, compare sampled API results with live web evidence before publish."
         )
+
+    @classmethod
+    def _build_modification_must_implement_checklist(cls, user_content: str) -> list[str]:
+        text = cls._summarize_tool_builder_request_text(user_content, limit=6000)
+        if not text:
+            return []
+
+        extracted: list[str] = []
+        lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()]
+        for line in lines:
+            match = re.match(r"^\s*(?:[-*]|\d+[.)])\s+(.+)$", line)
+            candidate = (match.group(1) if match else line).strip(" .")
+            lowered = candidate.lower()
+            if not candidate:
+                continue
+            if lowered.endswith(":"):
+                continue
+            if lowered.startswith(("requirements", "change request", "latest user request", "modification history")):
+                continue
+            if lowered.startswith("continue the existing tool scope"):
+                continue
+            extracted.append(candidate)
+
+        if not extracted:
+            sentence = re.split(r"(?<=[.!?])\s+", text.strip())[0].strip(" .")
+            if sentence:
+                extracted.append(sentence)
+
+        checklist: list[str] = []
+        seen: set[str] = set()
+        for item in extracted:
+            normalized = re.sub(r"\s+", " ", item).strip()
+            lowered = normalized.lower()
+            if not normalized or lowered in seen:
+                continue
+            seen.add(lowered)
+            checklist.append(normalized)
+            if len(checklist) >= 8:
+                break
+        return checklist
+
+    @classmethod
+    def _condense_modification_history_prompt(
+        cls,
+        original_request: str,
+        clarification_result: dict[str, Any] | None,
+    ) -> str:
+        clarified = ""
+        if isinstance(clarification_result, dict):
+            clarified = str(clarification_result.get("clarifiedRequest") or "").strip()
+
+        source = clarified or original_request
+        source = cls._extract_embedded_tool_builder_request(source)
+        source = source or original_request
+
+        marker_patterns = (
+            r"latest user request:\s*(.+)$",
+            r"new requested change(?:\s*\(preserved\))?:\s*(.+)$",
+            r"change request:\s*(.+)$",
+        )
+        for pattern in marker_patterns:
+            match = re.search(pattern, source, flags=re.IGNORECASE | re.DOTALL)
+            if not match:
+                continue
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip()
+            if candidate:
+                source = candidate
+                break
+
+        if "\n\nRequirements:\n" in source:
+            source = source.split("\n\nRequirements:\n", 1)[0].strip()
+
+        return cls._truncate_prompt_for_context(source.strip(), limit=3500)
 
     @staticmethod
     def _truncate_prompt_for_context(value: str, limit: int = 5000) -> str:

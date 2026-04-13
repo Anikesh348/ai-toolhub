@@ -89,7 +89,14 @@ class RequestRepository:
         if latest_prompt:
             previous_prompt = str(existing.get("latestPrompt") or existing.get("prompt") or "").strip()
             if previous_prompt != latest_prompt:
-                history.append(self._history_entry("modification", latest_prompt, now))
+                last_recorded_prompt = str(history[-1].get("prompt") or "").strip() if history else ""
+                if last_recorded_prompt != latest_prompt:
+                    history.append(self._history_entry("modification", latest_prompt, now))
+
+        # Keep history bounded so repeated modify-chat sessions stay concise.
+        if len(history) > 12:
+            initial_entry = history[0]
+            history = [initial_entry, *history[-11:]]
 
         updated = self._collection.find_one_and_update(
             {"_id": request_id},

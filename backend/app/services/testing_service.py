@@ -100,6 +100,7 @@ class TestingService:
         re.compile(r"urllib\.request\.", flags=re.IGNORECASE),
         re.compile(r"fetch\(\s*[\"']https?://", flags=re.IGNORECASE),
     )
+    _UI_SOURCE_SUFFIXES = {".html", ".htm", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".py"}
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
         self._settings = settings
@@ -231,10 +232,53 @@ class TestingService:
             guidance.append(
                 "For dynamic/live-data requests, replace static sample catalogs with real data fetching plus robust parsing."
             )
+        if "change-request contract check failed" in lowered:
+            guidance.append(
+                "Implement each critical item from the latest change request explicitly; do not rely on inferred behavior."
+            )
+            guidance.append(
+                "Add or update focused tests so requested UI/behavioral controls are asserted (for example, required picker controls and persistence wiring)."
+            )
 
         if not guidance:
             guidance.append("Address every failing test and keep all mandatory tool requirements satisfied.")
         return "\n".join(f"- {line}" for line in guidance)
+
+    def verify_change_request_contracts(self, request_id: str, prompt: str) -> tuple[bool, str]:
+        change_request = self._extract_change_request(prompt)
+        if not change_request:
+            return True, "Change-request contract check skipped (no explicit change request block)."
+
+        lowered = re.sub(r"\s+", " ", change_request.lower()).strip()
+        host_job_path, _ = self._docker_service.ensure_job_workspace(request_id)
+        failures: list[str] = []
+
+        requires_genre_picker = (
+            "genre" in lowered
+            and (
+                "multi-select" in lowered
+                or "multiselect" in lowered
+                or "genre picker" in lowered
+            )
+        )
+        if requires_genre_picker and not self._detect_genre_multiselect_ui(root=host_job_path):
+            failures.append(
+                "Expected a genre picker multi-select UI contract, but no matching UI implementation signals were found."
+            )
+
+        requires_genre_persistence = (
+            "genre" in lowered
+            and ("persist" in lowered or "database" in lowered or "db" in lowered)
+        )
+        if requires_genre_persistence and not self._detect_genre_persistence_signals(root=host_job_path):
+            failures.append(
+                "Expected persisted genre preference handling, but no backend persistence signals were found."
+            )
+
+        if not failures:
+            return True, "Change-request contract check passed."
+        details = "\n".join(f"- {item}" for item in failures)
+        return False, f"Change-request contract check failed:\n{details}"
 
     @staticmethod
     def _find_compose_file(root: Path) -> Path | None:
@@ -872,6 +916,80 @@ class TestingService:
             if ".text" in lowered and any(token in lowered for token in ("html", "parse", "regex", "selector")):
                 return True
             if any(pattern.search(content) for pattern in self._EXTERNAL_FETCH_PATTERNS):
+                return True
+        return False
+
+    def _detect_genre_multiselect_ui(self, root: Path) -> bool:
+        for file_path in root.rglob("*"):
+            if not file_path.is_file():
+                continue
+            if any(part in {".venv", "node_modules", "__pycache__", ".pytest_cache"} for part in file_path.parts):
+                continue
+            if file_path.suffix.lower() not in self._UI_SOURCE_SUFFIXES:
+                continue
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            lowered = content.lower()
+            if "genre" not in lowered:
+                continue
+            multi_select_markers = (
+                "multi-select",
+                "multiselect",
+                "multiple",
+                "checkbox",
+                "selectedgenres",
+                "selected_genres",
+                "genrepicker",
+                "genre_picker",
+                "chip",
+                "tag",
+                "pill",
+            )
+            ui_interaction_markers = (
+                "<select",
+                "<input",
+                "button",
+                "onchange",
+                "onclick",
+                "dropdown",
+                "option",
+                "label",
+            )
+            if any(marker in lowered for marker in multi_select_markers) and any(
+                marker in lowered for marker in ui_interaction_markers
+            ):
+                return True
+        return False
+
+    def _detect_genre_persistence_signals(self, root: Path) -> bool:
+        backend_suffixes = {".py", ".js", ".ts"}
+        persistence_markers = (
+            "mongo",
+            "collection",
+            "insert",
+            "update",
+            "upsert",
+            "save",
+            "persist",
+            "repository",
+        )
+        for file_path in root.rglob("*"):
+            if not file_path.is_file():
+                continue
+            if any(part in {".venv", "node_modules", "__pycache__", ".pytest_cache"} for part in file_path.parts):
+                continue
+            if file_path.suffix.lower() not in backend_suffixes:
+                continue
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            lowered = content.lower()
+            if "genre" not in lowered:
+                continue
+            if any(marker in lowered for marker in persistence_markers):
                 return True
         return False
 

@@ -249,6 +249,63 @@ def test_assess_dynamic_data_reliability_allows_dynamic_prompt_when_external_fet
     assert "passed" in message.lower()
 
 
+def test_verify_change_request_contracts_flags_missing_genre_picker_and_persistence(tmp_path: Path) -> None:
+    service, docker_service = _build_service(tmp_path=tmp_path)
+    docker_service.ensure_job_workspace.return_value = (tmp_path, "/workspace/job")
+
+    ok, message = service.verify_change_request_contracts(
+        request_id="req-contract-1",
+        prompt=(
+            "Apply the requested change to the existing tool codebase.\n\n"
+            "Change request:\n"
+            "Add a clickable genre picker multi-select and persist selected genres in DB before year/language selection.\n\n"
+            "Requirements:\n"
+            "- Preserve existing behavior.\n"
+        ),
+    )
+
+    assert ok is False
+    assert "contract check failed" in message.lower()
+    assert "genre picker" in message.lower()
+    assert "persisted genre preference" in message.lower()
+
+
+def test_verify_change_request_contracts_passes_when_genre_ui_and_persistence_signals_exist(tmp_path: Path) -> None:
+    service, docker_service = _build_service(tmp_path=tmp_path)
+    docker_service.ensure_job_workspace.return_value = (tmp_path, "/workspace/job")
+    (tmp_path / "frontend").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "backend").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "frontend" / "app.tsx").write_text(
+        """
+        const GenrePicker = () => {
+          return <div><label>Genre</label><select multiple onChange={() => {}}><option>Action</option></select></div>
+        };
+        """,
+        encoding="utf-8",
+    )
+    (tmp_path / "backend" / "repo.py").write_text(
+        """
+        def save_genre_preferences(collection, user_id, genres):
+            return collection.update_one({"user_id": user_id}, {"$set": {"genres": genres}}, upsert=True)
+        """,
+        encoding="utf-8",
+    )
+
+    ok, message = service.verify_change_request_contracts(
+        request_id="req-contract-2",
+        prompt=(
+            "Apply the requested change to the existing tool codebase.\n\n"
+            "Change request:\n"
+            "Add a clickable genre picker multi-select and persist selected genres in DB before year/language selection.\n\n"
+            "Requirements:\n"
+            "- Preserve existing behavior.\n"
+        ),
+    )
+
+    assert ok is True
+    assert "passed" in message.lower()
+
+
 def test_preflight_validate_requires_requirement_and_test_case_artifacts(tmp_path: Path) -> None:
     service, docker_service = _build_service(tmp_path=tmp_path)
     docker_service.ensure_job_workspace.return_value = (tmp_path, "/workspace/job")

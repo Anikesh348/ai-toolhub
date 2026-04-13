@@ -3,6 +3,7 @@ services:
     image: mongo:7
     container_name: tool-builder-mongo
     restart: unless-stopped
+    command: ["--quiet"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-toolhub}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-toolhub-dev-password}
@@ -16,7 +17,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "mongosh --quiet --host 127.0.0.1 --port 27017 -u \"$${MONGO_INITDB_ROOT_USERNAME}\" -p \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep 1",
+          "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/27017 && exec 3>&-'",
         ]
       interval: 10s
       timeout: 5s
