@@ -16,6 +16,7 @@ from app.repositories.port_allocation_repository import PortAllocationRepository
 from app.repositories.request_repository import RequestRepository
 from app.repositories.tool_repository import ToolRepository
 from app.services.alert_service import AlertService
+from app.services.browser_screenshot_service import BrowserScreenshotService
 from app.services.chat_service import ChatService
 from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
@@ -42,6 +43,7 @@ class AppState:
     tool_monitor_service: Optional[ToolMonitorService] = None
     chat_service: Optional[ChatService] = None
     codex_service: Optional[CodexService] = None
+    browser_screenshot_service: Optional[BrowserScreenshotService] = None
     instagram_service: Optional[InstagramService] = None
     youtube_service: Optional[YouTubeService] = None
 
@@ -118,6 +120,7 @@ def create_app() -> FastAPI:
         docker_service = DockerService(settings)
         prompt_service = PromptService()
         codex_service = CodexService(settings, docker_service)
+        browser_screenshot_service = BrowserScreenshotService(settings=settings)
         operator_access_service = OperatorAccessService(settings)
         system_context_service = SystemContextService()
         testing_service = TestingService(settings, docker_service)
@@ -166,6 +169,7 @@ def create_app() -> FastAPI:
             session_repository=chat_session_repository,
             message_repository=chat_message_repository,
             codex_service=codex_service,
+            browser_screenshot_service=browser_screenshot_service,
             docker_service=docker_service,
             operator_access_service=operator_access_service,
             system_context_service=system_context_service,
@@ -184,6 +188,7 @@ def create_app() -> FastAPI:
         app_state.tool_monitor_service = monitor_service
         app_state.chat_service = chat_service
         app_state.codex_service = codex_service
+        app_state.browser_screenshot_service = browser_screenshot_service
         app_state.instagram_service = instagram_service
         app_state.youtube_service = youtube_service
 
@@ -193,6 +198,7 @@ def create_app() -> FastAPI:
             app_state.tool_monitor_service.stop()
         app_state.chat_service = None
         app_state.codex_service = None
+        app_state.browser_screenshot_service = None
         app_state.instagram_service = None
         app_state.youtube_service = None
         if app_state.mongo_client:

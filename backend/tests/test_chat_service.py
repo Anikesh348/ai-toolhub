@@ -110,6 +110,19 @@ def test_operator_timeout_seconds_keeps_debug_tasks_high() -> None:
     assert timeout == 1800
 
 
+def test_operator_timeout_seconds_extends_package_install_tasks() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    timeout = service._operator_timeout_seconds_for_task(  # pylint: disable=protected-access
+        "ssh ubuntu@server 'sudo apt install -y nginx'"
+    )
+    assert timeout == 2400
+
+
 def test_operator_branch_instruction_defaults_to_current_branch() -> None:
     instruction = ChatService._operator_branch_instruction("Update the login endpoint validation.")
     assert "stay on the current branch" in instruction
@@ -215,6 +228,72 @@ def test_sanitize_operator_output_keeps_code_when_diff_requested() -> None:
     )
     sanitized = ChatService._sanitize_operator_output("Show me the diff", output)
     assert "+ print('hello')" in sanitized
+
+
+def test_sanitize_assistant_output_collapses_consecutive_duplicate_lines() -> None:
+    sanitized = ChatService._sanitize_assistant_output(
+        "Hey! What can I help you with today?\nHey! What can I help you with today?"
+    )
+
+    assert sanitized == "Hey! What can I help you with today?"
+
+
+def test_sanitize_assistant_output_preserves_consecutive_duplicate_lines_in_code_fences() -> None:
+    sanitized = ChatService._sanitize_assistant_output(
+        "```python\nprint('x')\nprint('x')\n```\n\nDone."
+    )
+
+    assert "print('x')\nprint('x')" in sanitized
+
+
+def test_build_chat_prompt_general_mode_includes_image_generation_instruction() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    prompt = service._build_chat_prompt(  # pylint: disable=protected-access
+        mode="general",
+        messages=[
+            {
+                "id": "m-1",
+                "role": "user",
+                "content": "Generate a landing page hero image with warm tones.",
+                "metadata": {},
+            }
+        ],
+    )
+
+    assert "generate or edit an image" in prompt
+    assert "Markdown image output" in prompt
+
+
+def test_hydrate_assistant_generated_images_rewrites_local_markdown_image_paths() -> None:
+    codex_service = Mock()
+    codex_service.materialize_chat_generated_image.return_value = {
+        "id": "att-1",
+        "fileName": "generated.png",
+        "contentType": "image/png",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+    )
+
+    rewritten, attachments = service._hydrate_assistant_generated_images(  # pylint: disable=protected-access
+        session_id="session-1",
+        assistant_text="![Shin-chan style image](/workspace/chat-session-1/generated.png)",
+    )
+
+    assert rewritten == "![Shin-chan style image](/chat/sessions/session-1/attachments/att-1)"
+    assert len(attachments) == 1
+    assert attachments[0]["id"] == "att-1"
+    assert attachments[0]["url"] == "/chat/sessions/session-1/attachments/att-1"
 
 
 def test_try_direct_operator_answer_rejects_diagnostic_memory_prompt() -> None:
@@ -972,6 +1051,10 @@ class _StubCodexService:
     def clean_cli_output(value: str) -> str:
         return value
 
+    @staticmethod
+    def generate_chat_image(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return None, "OPENAI_API_KEY is missing"
+
 
 def test_stream_message_persists_assistant_before_final_delta_stream() -> None:
     session_repository = _StubSessionRepository()
@@ -993,6 +1076,519 @@ def test_stream_message_persists_assistant_before_final_delta_stream() -> None:
     created_roles = [message["role"] for message in message_repository.created]
     assert created_roles == ["user", "assistant"]
     assert session_repository.touched is True
+
+
+def test_is_general_browser_screenshot_request_detects_url_prompt() -> None:
+    prompt = "Please open https://example.com and capture a full page screenshot."
+    assert ChatService._is_general_browser_screenshot_request(prompt) is True
+
+
+def test_is_general_browser_screenshot_request_detects_ss_shorthand_prompt() -> None:
+    prompt = "can you search for shoes on amazon and give me the SS here"
+    assert ChatService._is_general_browser_screenshot_request(prompt) is True
+
+
+def test_extract_screenshot_target_url_infers_amazon_search_url() -> None:
+    prompt = "can you search for shoes on amazon and give me the SS here"
+    target = ChatService._extract_screenshot_target_url(prompt)
+    assert target == "https://www.amazon.com/s?k=shoes"
+
+
+def test_extract_screenshot_target_url_infers_brave_image_search_url() -> None:
+    prompt = "search for deepika padukone on brave image search and give me screenshot"
+    target = ChatService._extract_screenshot_target_url(prompt)
+    assert target == "https://search.brave.com/images?q=deepika+padukone"
+
+
+def test_extract_screenshot_target_url_infers_google_dot_com_search_url() -> None:
+    prompt = "search for deepika padukone on google.com and give me screenshot"
+    target = ChatService._extract_screenshot_target_url(prompt)
+    assert target == "https://www.google.com/search?q=deepika+padukone"
+
+
+def test_extract_screenshot_target_url_infers_google_dot_com_search_url_for_exact_prompt_shape() -> None:
+    prompt = "can you search for deepika padukone ass on google.com and give me the SS"
+    target = ChatService._extract_screenshot_target_url(prompt)
+    assert target == "https://www.google.com/search?q=deepika+padukone+ass"
+
+
+def test_should_route_to_browser_screenshot_accepts_ss_shorthand_for_operator_mode() -> None:
+    prompt = "search for shoes on amazon and give me SS"
+    routed = ChatService._should_route_to_browser_screenshot(mode="operator", user_content=prompt)
+    assert routed is True
+
+
+def test_should_route_to_browser_screenshot_accepts_brave_image_search_prompt_for_operator_mode() -> None:
+    prompt = "search for deepika padukone on brave image search and give me screenshot"
+    routed = ChatService._should_route_to_browser_screenshot(mode="operator", user_content=prompt)
+    assert routed is True
+
+
+def test_extract_screenshot_dimensions_swaps_portrait_input_to_landscape() -> None:
+    width, height = ChatService._extract_screenshot_dimensions("capture screenshot in 900x1400")
+    assert (width, height) == (1400, 900)
+
+
+def test_is_full_page_screenshot_requested_is_disabled_to_preserve_landscape() -> None:
+    assert ChatService._is_full_page_screenshot_requested("capture full page screenshot") is False
+    assert ChatService._is_full_page_screenshot_requested("capture screenshot") is False
+
+
+def test_run_general_browser_screenshot_task_returns_clickable_image_markdown() -> None:
+    codex_service = Mock()
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "screenshot-example-domain.png",
+        "contentType": "image/png",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.capture_screenshot.return_value = {
+        "imageBytes": b"\x89PNG\r\n\x1a\nfake",
+        "contentType": "image/png",
+        "pageTitle": "Example Domain",
+        "finalUrl": "https://example.com/",
+        "width": 1366,
+        "height": 900,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+
+    result = service._run_general_browser_screenshot_task(  # pylint: disable=protected-access
+        session_id="session-1",
+        user_content="capture screenshot of https://example.com",
+    )
+
+    assert result["success"] is True
+    assert (
+        result["assistantText"]
+        == "[![Example Domain](/chat/sessions/session-1/attachments/att-1)](/chat/sessions/session-1/attachments/att-1)"
+    )
+
+
+def test_send_message_general_screenshot_request_uses_browser_screenshot_service() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "General Session",
+        "mode": "general",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "capture screenshot of https://example.com",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "![Example Domain](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "screenshot-example-domain.png",
+        "contentType": "image/png",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.capture_screenshot.return_value = {
+        "imageBytes": b"\x89PNG\r\n\x1a\nfake",
+        "contentType": "image/png",
+        "pageTitle": "Example Domain",
+        "finalUrl": "https://example.com/",
+        "width": 1366,
+        "height": 900,
+    }
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="capture screenshot of https://example.com",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "(/chat/sessions/session-1/attachments/att-1)" in assistant_message["content"]
+    browser_screenshot_service.capture_screenshot.assert_called_once()
+    codex_service.save_chat_attachment.assert_called_once()
+    codex_service.run_chat.assert_not_called()
+
+
+def test_send_message_general_ss_shorthand_request_uses_browser_screenshot_service() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "General Session",
+        "mode": "general",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "can you search for shoes on amazon and give me the SS here",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "![Amazon shoes](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "screenshot-amazon-shoes.png",
+        "contentType": "image/png",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.capture_screenshot.return_value = {
+        "imageBytes": b"\x89PNG\r\n\x1a\nfake",
+        "contentType": "image/png",
+        "pageTitle": "Amazon.com : shoes",
+        "finalUrl": "https://www.amazon.com/s?k=shoes",
+        "width": 1366,
+        "height": 900,
+    }
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="can you search for shoes on amazon and give me the SS here",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "(/chat/sessions/session-1/attachments/att-1)" in assistant_message["content"]
+    browser_screenshot_service.capture_screenshot.assert_called_once_with(
+        url="https://www.amazon.com/s?k=shoes",
+        width=1366,
+        height=900,
+        full_page=False,
+    )
+    codex_service.save_chat_attachment.assert_called_once()
+    codex_service.run_chat.assert_not_called()
+
+
+def test_send_message_operator_screenshot_request_uses_browser_screenshot_service() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "Operator Session",
+        "mode": "operator",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "Take a screenshot of https://example.com",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "![Example Domain](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "screenshot-example-domain.png",
+        "contentType": "image/png",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.capture_screenshot.return_value = {
+        "imageBytes": b"\x89PNG\r\n\x1a\nfake",
+        "contentType": "image/png",
+        "pageTitle": "Example Domain",
+        "finalUrl": "https://example.com/",
+        "width": 1366,
+        "height": 900,
+    }
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+    service._run_operator_task = Mock(return_value={  # type: ignore[method-assign]
+        "assistantText": "operator fallback",
+        "rawLogs": "operator fallback",
+        "success": True,
+        "exitCode": 0,
+    })
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="Take a screenshot of https://example.com",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "(/chat/sessions/session-1/attachments/att-1)" in assistant_message["content"]
+    browser_screenshot_service.capture_screenshot.assert_called_once()
+    codex_service.save_chat_attachment.assert_called_once()
+    service._run_operator_task.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_send_message_tool_builder_screenshot_request_uses_browser_screenshot_service() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "Tool Builder Session",
+        "mode": "tool_builder",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "Capture a screenshot of https://example.com for reference",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "![Example Domain](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "screenshot-example-domain.png",
+        "contentType": "image/png",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.capture_screenshot.return_value = {
+        "imageBytes": b"\x89PNG\r\n\x1a\nfake",
+        "contentType": "image/png",
+        "pageTitle": "Example Domain",
+        "finalUrl": "https://example.com/",
+        "width": 1366,
+        "height": 900,
+    }
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+    service._run_tool_builder_task = Mock(return_value=("tool builder fallback", None))  # type: ignore[method-assign]
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="Capture a screenshot of https://example.com for reference",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "(/chat/sessions/session-1/attachments/att-1)" in assistant_message["content"]
+    browser_screenshot_service.capture_screenshot.assert_called_once()
+    codex_service.save_chat_attachment.assert_called_once()
+    service._run_tool_builder_task.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_send_message_general_image_request_uses_image_fast_path() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "General Session",
+        "mode": "general",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "generate image of mountains",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "![generate image of mountains](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.side_effect = lambda model: model == "gpt-5.4"
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs="assistant: ![mountains](/chat/sessions/session-1/attachments/att-1)",
+        exit_code=0,
+    )
+    codex_service.generate_chat_image.return_value = (None, "not needed")
+    chat_execution_log_repository = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="generate image of mountains",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "(/chat/sessions/session-1/attachments/att-1)" in assistant_message["content"]
+    codex_service.run_chat.assert_called_once()
+    codex_service.generate_chat_image.assert_not_called()
+
+
+def test_send_message_general_image_request_falls_back_to_image_api_when_codex_output_not_usable() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "General Session",
+        "mode": "general",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "generate image of mountains",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "![generate image of mountains](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.side_effect = lambda model: model == "gpt-5.4"
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.run_chat.return_value = SimpleNamespace(
+        success=True,
+        logs="assistant: I generated it.",
+        exit_code=0,
+    )
+    codex_service.generate_chat_image.return_value = (
+        {
+            "id": "att-1",
+            "fileName": "generated-image.png",
+            "contentType": "image/png",
+            "size": 1024,
+            "containerPath": "/workspace/chat-session-1/attachments/att-1",
+            "hostPath": "/tmp/chat-session-1/attachments/att-1",
+        },
+        None,
+    )
+    chat_execution_log_repository = Mock()
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=chat_execution_log_repository,  # type: ignore[arg-type]
+    )
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="generate image of mountains",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    assert "(/chat/sessions/session-1/attachments/att-1)" in assistant_message["content"]
+    codex_service.run_chat.assert_called_once()
+    codex_service.generate_chat_image.assert_called_once()
 
 
 def test_send_message_records_execution_log_for_general_chat() -> None:

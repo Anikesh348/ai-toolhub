@@ -11,6 +11,7 @@ class _StubDockerService:
         self._root = root
         self._results = list(results)
         self.calls: int = 0
+        self.last_extra_environment: dict[str, str] | None = None
 
     def ensure_job_workspace(self, request_id: str) -> tuple[Path, str]:
         host_job_path = self._root / request_id
@@ -27,8 +28,9 @@ class _StubDockerService:
         working_dir_override: str | None = None,
         tty: bool = False,
     ) -> CommandResult:
-        del request_id, shell_command, timeout_seconds, extra_volumes, extra_environment, working_dir_override, tty
+        del request_id, shell_command, timeout_seconds, extra_volumes, working_dir_override, tty
         self.calls += 1
+        self.last_extra_environment = extra_environment
         if self._results:
             return self._results.pop(0)
         return CommandResult(success=True, exit_code=0, logs="ok")
@@ -49,6 +51,12 @@ def _settings(*, retries: int, delay_seconds: float) -> SimpleNamespace:
         codex_workspace_host="/tmp/codex-workspace",
         operator_github_token=None,
         operator_github_username="x-access-token",
+        operator_sudo_password=None,
+        openai_image_api_base="https://api.openai.com/v1",
+        openai_image_model="gpt-image-1",
+        openai_image_size="1024x1024",
+        openai_image_quality="high",
+        openai_image_timeout_seconds=60,
     )
 
 
@@ -230,3 +238,132 @@ def test_get_usage_status_maps_wham_usage_payload(tmp_path, monkeypatch) -> None
     assert len(payload["additionalRateLimits"]) == 1
     assert payload["additionalRateLimits"][0]["limitName"] == "codex_other"
     assert captured_headers["ChatGPT-Account-Id"] == "acct-123"
+
+
+def test_run_operator_sets_noninteractive_apt_environment(tmp_path) -> None:
+    docker_service = _StubDockerService(
+        root=tmp_path,
+        results=[CommandResult(success=True, exit_code=0, logs="done")],
+    )
+    service = CodexService(settings=_settings(retries=0, delay_seconds=0), docker_service=docker_service)
+
+    service.run_operator(
+        session_id="session-1",
+        prompt="Install nginx",
+        container_cwd="/workspace/chat-session-1",
+        extra_volumes={},
+        timeout_seconds=300,
+    )
+
+    assert docker_service.last_extra_environment is not None
+    assert docker_service.last_extra_environment.get("DEBIAN_FRONTEND") == "noninteractive"
+
+
+def test_run_operator_includes_optional_sudo_password_in_environment(tmp_path) -> None:
+    docker_service = _StubDockerService(
+        root=tmp_path,
+        results=[CommandResult(success=True, exit_code=0, logs="done")],
+    )
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.operator_sudo_password = "super-secret"
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    service.run_operator(
+        session_id="session-1",
+        prompt="Install nginx",
+        container_cwd="/workspace/chat-session-1",
+        extra_volumes={},
+        timeout_seconds=300,
+    )
+
+    assert docker_service.last_extra_environment is not None
+    assert docker_service.last_extra_environment.get("OPERATOR_SUDO_PASSWORD") == "super-secret"
+
+
+def test_materialize_chat_generated_image_maps_container_path_to_attachment(tmp_path) -> None:
+    docker_service = _StubDockerService(root=tmp_path, results=[])
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    generated_host_path = tmp_path / "chat-session-1" / "generated.png"
+    generated_host_path.parent.mkdir(parents=True, exist_ok=True)
+    generated_host_path.write_bytes(b"\x89PNG\r\n\x1a\npng-bytes")
+
+    resolved = service.materialize_chat_generated_image(
+        session_id="session-1",
+        image_reference="/workspace/chat-session-1/generated.png",
+    )
+
+    assert resolved is not None
+    attachment_id = str(resolved.get("id") or "")
+    assert attachment_id
+    attachment_host_path = tmp_path / "chat-session-1" / "attachments" / attachment_id
+    assert attachment_host_path.exists()
+
+
+def test_materialize_chat_generated_image_ignores_remote_urls(tmp_path) -> None:
+    docker_service = _StubDockerService(root=tmp_path, results=[])
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    resolved = service.materialize_chat_generated_image(
+        session_id="session-1",
+        image_reference="https://example.com/image.png",
+    )
+
+    assert resolved is None
+
+
+def test_generate_chat_image_saves_attachment_from_b64_response(tmp_path, monkeypatch) -> None:
+    docker_service = _StubDockerService(root=tmp_path, results=[])
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    settings.openai_api_key = "key-123"
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    png_bytes = b"\x89PNG\r\n\x1a\nfake-png"
+
+    class _FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+
+        @staticmethod
+        def json() -> dict:
+            import base64
+
+            return {"data": [{"b64_json": base64.b64encode(png_bytes).decode("ascii")}]}
+
+    def _fake_post(url: str, *, headers: dict[str, str], json: dict[str, object], timeout: int):
+        assert url == "https://api.openai.com/v1/images/generations"
+        assert headers["Authorization"] == "Bearer key-123"
+        assert json["model"] == "gpt-image-1"
+        assert json["quality"] == "high"
+        assert timeout == 60
+        return _FakeResponse()
+
+    monkeypatch.setattr("app.services.codex_service.requests.post", _fake_post)
+
+    attachment, error = service.generate_chat_image(session_id="session-1", prompt="Generate image of mountains")
+
+    assert error is None
+    assert attachment is not None
+    attachment_id = str(attachment.get("id") or "")
+    assert attachment_id
+    saved_path = tmp_path / "chat-session-1" / "attachments" / attachment_id
+    assert saved_path.exists()
+
+
+def test_generate_chat_image_requires_openai_api_key(tmp_path) -> None:
+    docker_service = _StubDockerService(root=tmp_path, results=[])
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    settings.openai_api_key = None
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    attachment, error = service.generate_chat_image(session_id="session-1", prompt="Generate image of mountains")
+
+    assert attachment is None
+    assert error is not None
+    assert "OPENAI_API_KEY" in error

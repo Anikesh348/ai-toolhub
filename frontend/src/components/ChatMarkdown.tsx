@@ -1,10 +1,30 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { API_BASE_URL } from "@/lib/api";
+
 type ChatMarkdownProps = {
   content: string;
   isUser?: boolean;
 };
+
+function resolveMarkdownMediaUrl(value: string): string {
+  const cleaned = (value || "").trim();
+  if (!cleaned) {
+    return "";
+  }
+  if (/^(https?:|data:|blob:)/i.test(cleaned)) {
+    return cleaned;
+  }
+
+  const base = API_BASE_URL.endsWith("/") ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
+  const path = cleaned.startsWith("/") ? cleaned : `/${cleaned}`;
+  return `${base}${path}`;
+}
+
+function resolveMarkdownHref(value: string): string {
+  return resolveMarkdownMediaUrl(value);
+}
 
 export default function ChatMarkdown({ content, isUser = false }: ChatMarkdownProps) {
   if (isUser) {
@@ -24,7 +44,7 @@ export default function ChatMarkdown({ content, isUser = false }: ChatMarkdownPr
           li: ({ children }) => <li className="pl-1">{children}</li>,
           a: ({ href, children }) => (
             <a
-              href={href ?? "#"}
+              href={resolveMarkdownHref(href ?? "") || "#"}
               target="_blank"
               rel="noreferrer"
               className="text-skyline underline decoration-skyline/45 underline-offset-4 hover:text-amber"
@@ -44,7 +64,7 @@ export default function ChatMarkdown({ content, isUser = false }: ChatMarkdownPr
           },
           img: ({ src, alt }) => (
             <img
-              src={src ?? ""}
+              src={resolveMarkdownMediaUrl(src ?? "")}
               alt={alt ?? "image"}
               className="max-h-96 w-full max-w-2xl rounded-xl border border-amber/25 object-contain"
             />

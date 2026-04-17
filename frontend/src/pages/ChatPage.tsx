@@ -1050,6 +1050,22 @@ function sortChatsForSidebar(list: ChatSession[]): ChatSession[] {
   });
 }
 
+function hasPendingAssistantReply(messages: ChatMessage[]): boolean {
+  let latestUserIndex = -1;
+  let latestAssistantIndex = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    const role = messages[index]?.role;
+    if (role === "user") {
+      latestUserIndex = index;
+      continue;
+    }
+    if (role === "assistant") {
+      latestAssistantIndex = index;
+    }
+  }
+  return latestUserIndex > latestAssistantIndex;
+}
+
 function chatDraftStorageKey(chatId: string | null): string {
   return `${CHAT_DRAFT_STORAGE_PREFIX}:${chatId ?? "new-chat"}`;
 }
@@ -1120,6 +1136,7 @@ function ChatPageContent() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const activeChatIdRef = useRef<string | null>(null);
   const streamTokenRef = useRef(0);
+  const optimisticUserMessageRef = useRef<{ chatId: string; messageId: string; message: ChatMessage } | null>(null);
   const sendingChatIdRef = useRef<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1687,6 +1704,7 @@ function ChatPageContent() {
     streamTokenRef.current += 1;
     setStreamActivity("ready");
     setStreamingAssistant("");
+    optimisticUserMessageRef.current = null;
 
     if (!activeChatId) {
       setMessages([]);
@@ -1697,7 +1715,9 @@ function ChatPageContent() {
     setError(null);
     void fetchChatMessages(activeChatId)
       .then((data) => {
-        setMessages(data);
+        const merged = mergeFetchedMessagesWithOptimistic(data, activeChatId);
+        setMessages(merged);
+        setStreamActivity(hasPendingAssistantReply(merged) ? "thinking" : "ready");
       })
       .catch((loadError: unknown) => {
         setError(loadError instanceof Error ? loadError.message : "Unable to load messages");
@@ -1706,6 +1726,33 @@ function ChatPageContent() {
         setLoadingMessages(false);
       });
   }, [activeChatId]);
+
+  useEffect(() => {
+    if (!activeChatId || sending || streamingAssistant || !hasPendingAssistantReply(messages)) {
+      return;
+    }
+
+    setStreamActivity("thinking");
+    const intervalId = window.setInterval(() => {
+      const targetChatId = activeChatId;
+      void fetchChatMessages(targetChatId)
+        .then((data) => {
+          if (activeChatIdRef.current !== targetChatId) {
+            return;
+          }
+          const merged = mergeFetchedMessagesWithOptimistic(data, targetChatId);
+          setMessages(merged);
+          setStreamActivity(hasPendingAssistantReply(merged) ? "thinking" : "ready");
+        })
+        .catch(() => {
+          // Ignore transient polling errors while waiting for completion.
+        });
+    }, 2500);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeChatId, messages, sending, streamingAssistant]);
 
   useEffect(() => {
     if (!requestedChatId) {
@@ -1723,6 +1770,31 @@ function ChatPageContent() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, streamingAssistant, streamActivity]);
+
+  function mergeFetchedMessagesWithOptimistic(fetched: ChatMessage[], chatId: string): ChatMessage[] {
+    const optimistic = optimisticUserMessageRef.current;
+    if (!optimistic || optimistic.chatId !== chatId) {
+      return fetched;
+    }
+
+    if (fetched.some((message) => message.id === optimistic.messageId)) {
+      optimisticUserMessageRef.current = null;
+      return fetched;
+    }
+
+    const normalizeForComparison = (value: string): string => value.trim().replace(/\s+/g, " ").toLowerCase();
+    const optimisticNormalized = normalizeForComparison(optimistic.message.content);
+    const recentUserMessages = fetched.filter((message) => message.role === "user").slice(-5);
+    const optimisticAlreadyPersisted = recentUserMessages.some(
+      (message) => normalizeForComparison(message.content) === optimisticNormalized
+    );
+    if (optimisticAlreadyPersisted) {
+      optimisticUserMessageRef.current = null;
+      return fetched;
+    }
+
+    return [...fetched, optimistic.message];
+  }
 
   function upsertChat(chat: ChatSession): void {
     setChats((current) => {
@@ -1752,7 +1824,24 @@ function ChatPageContent() {
     }
     if (event.type === "user_message") {
       upsertChat(event.session);
-      setMessages((current) => [...current, event.message]);
+      setMessages((current) => {
+        const optimistic = optimisticUserMessageRef.current;
+        if (optimistic && optimistic.chatId === streamChatId) {
+          const optimisticIndex = current.findIndex((message) => message.id === optimistic.messageId);
+          if (optimisticIndex >= 0) {
+            const next = [...current];
+            next[optimisticIndex] = event.message;
+            optimisticUserMessageRef.current = null;
+            return next;
+          }
+        }
+        if (current.some((message) => message.id === event.message.id)) {
+          optimisticUserMessageRef.current = null;
+          return current;
+        }
+        optimisticUserMessageRef.current = null;
+        return [...current, event.message];
+      });
       return;
     }
     if (event.type === "status") {
@@ -1774,7 +1863,12 @@ function ChatPageContent() {
       upsertChat(event.session);
       setStreamActivity("ready");
       setStreamingAssistant("");
-      setMessages((current) => [...current, event.message]);
+      setMessages((current) => {
+        if (current.some((message) => message.id === event.message.id)) {
+          return current;
+        }
+        return [...current, event.message];
+      });
       return;
     }
     if (event.type === "done") {
@@ -2017,8 +2111,22 @@ function ChatPageContent() {
     setError(null);
     setSending(true);
     setStopping(false);
-    const content = prompt.trim() || "Use the attached image as the primary visual reference and apply its UI style/layout.";
     const streamToken = streamTokenRef.current + 1;
+    const content = prompt.trim() || "Use the attached image as the primary visual reference and apply its UI style/layout.";
+    const optimisticUserMessage: ChatMessage = {
+      id: `optimistic-user-${streamChatId}-${streamToken}`,
+      sessionId: streamChatId,
+      role: "user",
+      content,
+      metadata: {},
+      createdAt: new Date().toISOString()
+    };
+    optimisticUserMessageRef.current = {
+      chatId: streamChatId,
+      messageId: optimisticUserMessage.id,
+      message: optimisticUserMessage
+    };
+    setMessages((current) => [...current, optimisticUserMessage]);
     setThinkingPanelCycle((current) => current + 1);
     streamTokenRef.current = streamToken;
     setPrompt("");
@@ -2046,6 +2154,14 @@ function ChatPageContent() {
     } catch (sendError) {
       setPrompt(content);
       streamTokenRef.current += 1;
+      setMessages((current) => {
+        const optimistic = optimisticUserMessageRef.current;
+        if (!optimistic || optimistic.chatId !== streamChatId) {
+          return current;
+        }
+        optimisticUserMessageRef.current = null;
+        return current.filter((message) => message.id !== optimistic.messageId);
+      });
       setStreamActivity("ready");
       setStreamingAssistant("");
       setError(sendError instanceof Error ? sendError.message : "Unable to send message");

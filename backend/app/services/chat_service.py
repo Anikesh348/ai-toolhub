@@ -6,11 +6,13 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import quote_plus, urlsplit, urlunsplit
 
 import requests
 from app.repositories.chat_execution_log_repository import ChatExecutionLogRepository
 from app.repositories.chat_message_repository import ChatMessageRepository
 from app.repositories.chat_session_repository import ChatSessionRepository
+from app.services.browser_screenshot_service import BrowserScreenshotService
 from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
 from app.services.operator_access_service import OperatorAccessService
@@ -38,12 +40,91 @@ class ChatService:
     _USD_INR_SOURCE_LIVE_CACHE = "live_cache"
     _USD_INR_SOURCE_CACHE_STALE = "cache_stale"
     _USD_INR_SOURCE_FALLBACK_DEFAULT = "fallback_default"
+    _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\n]+)\)")
+    _GENERAL_IMAGE_ACTION_MARKERS = (
+        "generate",
+        "create",
+        "make",
+        "draw",
+        "render",
+        "illustrate",
+        "paint",
+    )
+    _GENERAL_IMAGE_TARGET_MARKERS = (
+        "image",
+        "photo",
+        "picture",
+        "portrait",
+        "illustration",
+        "artwork",
+        "wallpaper",
+    )
+    _GENERAL_SCREENSHOT_ACTION_MARKERS = (
+        "screenshot",
+        "screen shot",
+        "snapshot",
+        "capture",
+    )
+    _GENERAL_SCREENSHOT_TARGET_MARKERS = (
+        "website",
+        "web site",
+        "webpage",
+        "web page",
+        "url",
+        "page",
+        "site",
+        "link",
+    )
+    _EXPLICIT_URL_RE = re.compile(r"(https?://[^\s<>()\"']+)", flags=re.IGNORECASE)
+    _DOMAIN_URL_RE = re.compile(
+        r"(?<!@)\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s<>()\"']*)?)",
+        flags=re.IGNORECASE,
+    )
+    _SCREENSHOT_DIMENSION_RE = re.compile(r"\b(\d{3,4})\s*[xX]\s*(\d{3,4})\b")
+    _SCREENSHOT_SS_TOKEN_RE = re.compile(r"\bss\b", flags=re.IGNORECASE)
+    _SCREENSHOT_SITE_SEARCH_PATTERNS = (
+        (
+            re.compile(
+                r"\bsearch(?:\s+for)?\s+(.+?)\s+on\s+((?:www\.)?(?:amazon|flipkart|google|youtube|brave)(?:\.com)?)"
+                r"(?:\s+(?:image|images)\s+search)?\b",
+                flags=re.IGNORECASE,
+            ),
+            "query_site",
+        ),
+        (
+            re.compile(
+                r"\bon\s+((?:www\.)?(?:amazon|flipkart|google|youtube|brave)(?:\.com)?)"
+                r"(?:\s+(?:image|images)\s+search)?\s+search(?:\s+for)?\s+(.+)",
+                flags=re.IGNORECASE,
+            ),
+            "site_query",
+        ),
+    )
+    _SCREENSHOT_SITE_SEARCH_BASE_URLS = {
+        "amazon": "https://www.amazon.com/s?k={query}",
+        "flipkart": "https://www.flipkart.com/search?q={query}",
+        "google": "https://www.google.com/search?q={query}",
+        "youtube": "https://www.youtube.com/results?search_query={query}",
+        "brave": "https://search.brave.com/search?q={query}",
+    }
+    _SCREENSHOT_SITE_IMAGE_SEARCH_BASE_URLS = {
+        "google": "https://www.google.com/search?tbm=isch&q={query}",
+        "brave": "https://search.brave.com/images?q={query}",
+    }
+    _SCREENSHOT_SITE_HOME_URLS = {
+        "amazon": "https://www.amazon.com/",
+        "flipkart": "https://www.flipkart.com/",
+        "google": "https://www.google.com/",
+        "youtube": "https://www.youtube.com/",
+        "brave": "https://search.brave.com/",
+    }
 
     def __init__(
         self,
         session_repository: ChatSessionRepository,
         message_repository: ChatMessageRepository,
         codex_service: CodexService,
+        browser_screenshot_service: BrowserScreenshotService | None = None,
         docker_service: DockerService | None = None,
         operator_access_service: OperatorAccessService | None = None,
         system_context_service: SystemContextService | None = None,
@@ -59,6 +140,7 @@ class ChatService:
         self._session_repository = session_repository
         self._message_repository = message_repository
         self._codex_service = codex_service
+        self._browser_screenshot_service = browser_screenshot_service
         self._docker_service = docker_service
         self._operator_access_service = operator_access_service
         self._system_context_service = system_context_service
@@ -154,6 +236,25 @@ class ChatService:
                 assistant_text = quick_answer
                 success = True
                 exit_code = 0
+            elif self._should_route_to_browser_screenshot(mode=normalized_mode, user_content=content):
+                screenshot_result = self._run_general_browser_screenshot_task(
+                    session_id=session_id,
+                    user_content=content,
+                )
+                assistant_text = str(screenshot_result.get("assistantText") or "")
+                success = bool(screenshot_result.get("success", False))
+                exit_code = int(screenshot_result.get("exitCode", 1))
+                raw_execution_logs = str(screenshot_result.get("rawLogs") or "")
+            elif normalized_mode == "general" and self._is_general_image_generation_request(content):
+                image_result = self._run_general_image_task(
+                    session_id=session_id,
+                    user_content=content,
+                    selected_model=selected_model,
+                )
+                assistant_text = str(image_result.get("assistantText") or "")
+                success = bool(image_result.get("success", False))
+                exit_code = int(image_result.get("exitCode", 1))
+                raw_execution_logs = str(image_result.get("rawLogs") or "")
             elif normalized_mode == "operator":
                 operator_result = self._run_operator_task(
                     session_id=session_id,
@@ -199,6 +300,10 @@ class ChatService:
             exit_code = 1
             raw_execution_logs = self._exception_execution_logs("Chat execution failed", exc)
 
+        assistant_text, _generated_attachments = self._hydrate_assistant_generated_images(
+            session_id=session_id,
+            assistant_text=assistant_text,
+        )
         assistant_metadata["success"] = success
         assistant_metadata["exitCode"] = exit_code
         assistant_message = self._message_repository.create(
@@ -294,6 +399,25 @@ class ChatService:
                 assistant_text = quick_answer
                 success = True
                 exit_code = 0
+            elif self._should_route_to_browser_screenshot(mode=normalized_mode, user_content=user_content):
+                screenshot_result = self._run_general_browser_screenshot_task(
+                    session_id=session_id,
+                    user_content=user_content,
+                )
+                assistant_text = str(screenshot_result.get("assistantText") or "")
+                success = bool(screenshot_result.get("success", False))
+                exit_code = int(screenshot_result.get("exitCode", 1))
+                raw_execution_logs = str(screenshot_result.get("rawLogs") or "")
+            elif normalized_mode == "general" and self._is_general_image_generation_request(user_content):
+                image_result = self._run_general_image_task(
+                    session_id=session_id,
+                    user_content=user_content,
+                    selected_model=selected_model,
+                )
+                assistant_text = str(image_result.get("assistantText") or "")
+                success = bool(image_result.get("success", False))
+                exit_code = int(image_result.get("exitCode", 1))
+                raw_execution_logs = str(image_result.get("rawLogs") or "")
             elif normalized_mode == "operator":
                 operator_result = self._run_operator_task(
                     session_id=session_id,
@@ -381,6 +505,10 @@ class ChatService:
             else:
                 raw_execution_logs = failure_logs
 
+        assistant_text, _generated_attachments = self._hydrate_assistant_generated_images(
+            session_id=session_id,
+            assistant_text=assistant_text,
+        )
         assistant_metadata["success"] = success
         assistant_metadata["exitCode"] = exit_code
         assistant_message = self._message_repository.create(
@@ -962,6 +1090,57 @@ class ChatService:
         attachment["url"] = f"/chat/sessions/{session_id}/attachments/{attachment['id']}"
         return attachment, None
 
+    def _hydrate_assistant_generated_images(
+        self,
+        session_id: str,
+        assistant_text: str,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        if not assistant_text or "![" not in assistant_text:
+            return assistant_text, []
+
+        materialize = getattr(self._codex_service, "materialize_chat_generated_image", None)
+        if not callable(materialize):
+            return assistant_text, []
+
+        cached_url_by_reference: dict[str, str | None] = {}
+        generated_attachments: list[dict[str, Any]] = []
+        generated_attachment_ids: set[str] = set()
+
+        def _rewrite(match: re.Match[str]) -> str:
+            alt_text = match.group(1)
+            destination = match.group(2).strip()
+            if not destination:
+                return match.group(0)
+
+            image_reference = destination.split(maxsplit=1)[0].strip().strip("<>").strip("'\"")
+            if not image_reference:
+                return match.group(0)
+
+            if image_reference not in cached_url_by_reference:
+                resolved_attachment = materialize(session_id=session_id, image_reference=image_reference)
+                if not isinstance(resolved_attachment, dict):
+                    cached_url_by_reference[image_reference] = None
+                else:
+                    attachment = dict(resolved_attachment)
+                    attachment_id = str(attachment.get("id") or "").strip()
+                    if not attachment_id:
+                        cached_url_by_reference[image_reference] = None
+                    else:
+                        url = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
+                        attachment["url"] = url
+                        cached_url_by_reference[image_reference] = url
+                        if attachment_id not in generated_attachment_ids:
+                            generated_attachment_ids.add(attachment_id)
+                            generated_attachments.append(attachment)
+
+            rewritten_url = cached_url_by_reference.get(image_reference)
+            if not rewritten_url:
+                return match.group(0)
+            return f"![{alt_text}]({rewritten_url})"
+
+        rewritten_text = self._MARKDOWN_IMAGE_RE.sub(_rewrite, assistant_text)
+        return rewritten_text, generated_attachments
+
     def get_image_attachment(self, session_id: str, attachment_id: str) -> dict[str, Any] | None:
         attachment = self._codex_service.get_chat_attachment(session_id=session_id, attachment_id=attachment_id)
         if not attachment:
@@ -969,6 +1148,137 @@ class ChatService:
         enriched = dict(attachment)
         enriched["url"] = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
         return enriched
+
+    def _run_general_image_task(
+        self,
+        session_id: str,
+        user_content: str,
+        selected_model: str | None = None,
+    ) -> dict[str, Any]:
+        prompt = self._general_image_prompt(user_content)
+
+        codex_text, codex_error, codex_logs = self._generate_image_with_codex_runtime(
+            session_id=session_id,
+            user_content=user_content,
+            prompt=prompt,
+            selected_model=selected_model,
+        )
+        if codex_text:
+            return {
+                "assistantText": codex_text,
+                "rawLogs": codex_logs or "image generation completed via Codex runtime",
+                "success": True,
+                "exitCode": 0,
+            }
+
+        generate_image = getattr(self._codex_service, "generate_chat_image", None)
+        if callable(generate_image):
+            attachment, error = generate_image(session_id=session_id, prompt=prompt)
+            if not error and attachment:
+                attachment_id = str(attachment.get("id") or "").strip()
+                if attachment_id:
+                    alt_text = self._image_alt_text_for_prompt(user_content)
+                    image_url = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
+                    return {
+                        "assistantText": f"![{alt_text}]({image_url})",
+                        "rawLogs": "image generation completed via OpenAI Images API fallback",
+                        "success": True,
+                        "exitCode": 0,
+                    }
+            fallback_error = str(error or "Image generation fallback failed.")
+        else:
+            fallback_error = "Image API fallback is unavailable in this runtime."
+
+        primary_error = str(codex_error or "Codex runtime did not return a usable image output.")
+        return {
+            "assistantText": (
+                "I could not generate the image right now. "
+                f"{primary_error} Fallback status: {fallback_error}"
+            ),
+            "rawLogs": f"{primary_error}\n\n{fallback_error}",
+            "success": False,
+            "exitCode": 1,
+        }
+
+    def _generate_image_with_codex_runtime(
+        self,
+        session_id: str,
+        user_content: str,
+        prompt: str,
+        selected_model: str | None,
+    ) -> tuple[str | None, str | None, str]:
+        image_model = self._best_codex_image_model(selected_model)
+        runtime_prompt = self._build_codex_image_generation_prompt(user_prompt=prompt)
+        logs = ""
+        try:
+            completion = self._codex_service.run_chat(
+                session_id=f"{session_id}-image",
+                prompt=runtime_prompt,
+                model=image_model,
+                timeout_seconds=180,
+            )
+            logs = str(completion.logs or "")
+        except Exception as exc:  # pylint: disable=broad-except
+            return None, f"Codex image runtime failed: {exc}", logs
+
+        if not bool(getattr(completion, "success", False)):
+            exit_code = int(getattr(completion, "exit_code", 1))
+            return None, f"Codex image runtime did not complete successfully (exit {exit_code}).", logs
+
+        assistant_text = self._build_assistant_text(logs, True)
+        rewritten_text, _attachments = self._hydrate_assistant_generated_images(
+            session_id=session_id,
+            assistant_text=assistant_text,
+        )
+        if self._has_usable_image_markdown(rewritten_text, session_id=session_id):
+            return rewritten_text, None, logs
+
+        return None, "Codex runtime returned text but no usable image markdown output.", logs
+
+    def _best_codex_image_model(self, selected_model: str | None) -> str | None:
+        preferred = (
+            "gpt-5.4",
+            "gpt-5.1-codex-max",
+            "gpt-5.3-codex",
+            "gpt-5.2",
+            "gpt-5.4-mini",
+        )
+        for candidate in preferred:
+            if self._codex_service.is_supported_chat_model(candidate):
+                return candidate
+        if selected_model and self._codex_service.is_supported_chat_model(selected_model):
+            return selected_model
+        return self._codex_service.default_chat_model()
+
+    @staticmethod
+    def _build_codex_image_generation_prompt(user_prompt: str) -> str:
+        return (
+            "Generate exactly one raster image that satisfies the user request.\n"
+            f"User request: {user_prompt}\n\n"
+            "Rules:\n"
+            "- Use Codex native image-generation capability/tooling.\n"
+            "- Do not use shell commands, Python scripts, SVG generation, HTML, or placeholders.\n"
+            "- Return exactly one Markdown image tag pointing to the generated image.\n"
+            "- Do not include any other text."
+        )
+
+    @classmethod
+    def _has_usable_image_markdown(cls, assistant_text: str, session_id: str) -> bool:
+        if not assistant_text:
+            return False
+        for match in cls._MARKDOWN_IMAGE_RE.finditer(assistant_text):
+            destination = match.group(2).strip()
+            if not destination:
+                continue
+            image_reference = destination.split(maxsplit=1)[0].strip().strip("<>").strip("'\"")
+            if not image_reference:
+                continue
+            lowered = image_reference.lower()
+            if lowered.startswith(("http://", "https://", "data:", "blob:")):
+                return True
+            if image_reference.startswith(f"/chat/sessions/{session_id}/attachments/"):
+                return True
+        return False
 
     def stop_active_stream(self, session_id: str) -> tuple[bool, str | None]:
         session = self._session_repository.get_by_id(session_id)
@@ -1031,6 +1341,11 @@ class ChatService:
             lines.append(f"{role}: {serialized_content}")
         lines.append("")
         lines.append("Respond as ASSISTANT in clear Markdown. Keep answers concise unless asked for details.")
+        if normalized_mode == "general":
+            lines.append(
+                "If the user asks to generate or edit an image, perform the image generation/edit workflow and "
+                "return the result as Markdown image output."
+            )
         lines.append("Return only the final answer. Do not include tool logs, search traces, or intermediate status narration.")
         return "\n".join(lines)
 
@@ -1077,6 +1392,7 @@ class ChatService:
             filtered_lines.append(stripped)
 
         cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(filtered_lines).strip())
+        cleaned = ChatService._collapse_consecutive_duplicate_lines(cleaned)
         blocks = [block.strip() for block in cleaned.split("\n\n") if block.strip()]
         if not blocks:
             return cleaned
@@ -1103,6 +1419,33 @@ class ChatService:
                 deduped_blocks = deduped_blocks[:midpoint]
 
         return "\n\n".join(deduped_blocks).strip()
+
+    @staticmethod
+    def _collapse_consecutive_duplicate_lines(text: str) -> str:
+        if not text:
+            return ""
+
+        lines = text.split("\n")
+        collapsed: list[str] = []
+        in_fenced_code = False
+        previous_key = ""
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_fenced_code = not in_fenced_code
+                collapsed.append(line)
+                previous_key = ""
+                continue
+
+            normalized_key = re.sub(r"\s+", " ", stripped).strip().lower()
+            if not in_fenced_code and normalized_key and normalized_key == previous_key:
+                continue
+
+            collapsed.append(line)
+            previous_key = normalized_key if normalized_key else ""
+
+        return "\n".join(collapsed)
 
     @staticmethod
     def _is_prompt_echo_line(stripped: str) -> bool:
@@ -1446,6 +1789,11 @@ class ChatService:
             "- For code changes, implement the requested update and run tests/lint/build checks only when needed for confidence.\n"
             "- If this is non-code ops query, provide concise factual summary.\n"
             "- For container operations, try `docker compose` first and fall back to `docker-compose` if needed.\n"
+            "- Remote server operations over SSH are allowed when the user asks for them.\n"
+            "- For Debian/Ubuntu package tasks, use non-interactive apt commands (`apt-get update`, `apt-get install -y`).\n"
+            "- For remote apt installs, run through SSH and use `sudo -n` first to avoid interactive prompts.\n"
+            "- If sudo requires a password and `OPERATOR_SUDO_PASSWORD` is present, pass it via stdin; never print secrets.\n"
+            "- After package installation, verify with `dpkg -s <package>` and/or `<package> --version`.\n"
             "- Keep response crisp and readable (3-6 short lines by default).\n"
             "- Include verification details, branch names, modified file lists, and environment diagnostics only when the user explicitly asks.\n"
             "- Do not paste full file contents, full diffs, or long code/config blocks unless the user explicitly asks for code/log output.\n"
@@ -1493,6 +1841,9 @@ class ChatService:
 
     def _operator_timeout_seconds_for_task(self, user_content: str) -> int:
         complexity = self._operator_task_complexity(user_content)
+        if self._is_operator_package_install_request(user_content):
+            # Package operations can take longer due apt metadata refresh/download time.
+            return 2400
         if complexity == "simple":
             # Keep short read-only requests responsive.
             return 480
@@ -1505,6 +1856,23 @@ class ChatService:
         if self._is_operator_action_request(lowered):
             return 1200
         return 900
+
+    @staticmethod
+    def _is_operator_package_install_request(user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content).strip().lower()
+        if not lowered:
+            return False
+        package_markers = (
+            "apt install",
+            "apt-get install",
+            "sudo apt install",
+            "sudo apt-get install",
+            "apt upgrade",
+            "apt-get upgrade",
+            "apt update",
+            "apt-get update",
+        )
+        return any(marker in lowered for marker in package_markers)
 
     def _operator_model_for_task(self, selected_model: str | None, user_content: str) -> str | None:
         cleaned_selected = (selected_model or "").strip() or None
@@ -3051,6 +3419,322 @@ class ChatService:
             title = f"{title[:53].rstrip()}..."
         return title
 
+    @classmethod
+    def _is_general_browser_screenshot_request(cls, user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content or "").strip().lower()
+        if not lowered:
+            return False
+
+        has_action = any(marker in lowered for marker in cls._GENERAL_SCREENSHOT_ACTION_MARKERS) or bool(
+            cls._SCREENSHOT_SS_TOKEN_RE.search(lowered)
+        )
+        if not has_action:
+            return False
+
+        has_target = any(marker in lowered for marker in cls._GENERAL_SCREENSHOT_TARGET_MARKERS)
+        target_url = cls._extract_screenshot_target_url(user_content)
+        return bool(has_target or target_url)
+
+    @classmethod
+    def _should_route_to_browser_screenshot(cls, mode: str, user_content: str) -> bool:
+        normalized_mode = cls._normalize_mode(mode)
+        if normalized_mode not in {"general", "operator", "tool_builder"}:
+            return False
+
+        if not cls._is_general_browser_screenshot_request(user_content):
+            return False
+
+        # In operator/tool-builder mode, keep routing strict so normal task prompts
+        # (which may include words like "capture" or "site") are not hijacked.
+        if normalized_mode in {"operator", "tool_builder"}:
+            lowered = re.sub(r"\s+", " ", user_content or "").strip().lower()
+            has_explicit_screenshot_marker = any(
+                marker in lowered for marker in ("screenshot", "screen shot", "snapshot")
+            ) or bool(cls._SCREENSHOT_SS_TOKEN_RE.search(lowered))
+            if not has_explicit_screenshot_marker:
+                return False
+            if not cls._extract_screenshot_target_url(user_content):
+                return False
+
+        return True
+
+    @classmethod
+    def _extract_screenshot_target_url(cls, user_content: str) -> str | None:
+        text = (user_content or "").strip()
+        if not text:
+            return None
+
+        explicit_match = cls._EXPLICIT_URL_RE.search(text)
+        if explicit_match:
+            normalized = cls._normalize_screenshot_url(explicit_match.group(1))
+            if normalized:
+                return normalized
+
+        # Prefer search intent inference before bare-domain fallback so
+        # prompts like "search for X on google.com" resolve to a search URL.
+        inferred = cls._infer_screenshot_target_url_from_text(text)
+        if inferred:
+            return inferred
+
+        domain_match = cls._DOMAIN_URL_RE.search(text)
+        if domain_match:
+            normalized = cls._normalize_screenshot_url(domain_match.group(1))
+            if normalized:
+                return normalized
+
+        return None
+
+    @classmethod
+    def _infer_screenshot_target_url_from_text(cls, text: str) -> str | None:
+        lowered = re.sub(r"\s+", " ", text or "").strip().lower()
+        if not lowered:
+            return None
+
+        prefer_image_search = bool(re.search(r"\b(image|images|photo|photos|pic|pics|picture|pictures)\b", lowered))
+
+        for pattern, pattern_kind in cls._SCREENSHOT_SITE_SEARCH_PATTERNS:
+            match = pattern.search(lowered)
+            if not match:
+                continue
+            if pattern_kind == "query_site":
+                raw_query = match.group(1)
+                site_slug = match.group(2)
+            else:
+                site_slug = match.group(1)
+                raw_query = match.group(2)
+            site_slug = cls._normalize_screenshot_site_slug(site_slug)
+            query = cls._sanitize_inferred_search_query(raw_query)
+            if not query:
+                continue
+            base_template = cls._SCREENSHOT_SITE_SEARCH_BASE_URLS.get(site_slug)
+            if prefer_image_search:
+                base_template = cls._SCREENSHOT_SITE_IMAGE_SEARCH_BASE_URLS.get(site_slug, base_template)
+            if not base_template:
+                continue
+            return base_template.format(query=quote_plus(query))
+
+        if "amazon" in lowered:
+            return cls._SCREENSHOT_SITE_HOME_URLS["amazon"]
+        if "flipkart" in lowered:
+            return cls._SCREENSHOT_SITE_HOME_URLS["flipkart"]
+        if "youtube" in lowered:
+            return cls._SCREENSHOT_SITE_HOME_URLS["youtube"]
+        if "google" in lowered:
+            return cls._SCREENSHOT_SITE_HOME_URLS["google"]
+        if "brave" in lowered:
+            return cls._SCREENSHOT_SITE_HOME_URLS["brave"]
+        return None
+
+    @staticmethod
+    def _normalize_screenshot_site_slug(site_value: str) -> str:
+        normalized = re.sub(r"\s+", "", site_value or "").strip().lower()
+        if normalized.startswith("www."):
+            normalized = normalized[4:]
+        if normalized.endswith(".com"):
+            normalized = normalized[: -len(".com")]
+        return normalized
+
+    @staticmethod
+    def _sanitize_inferred_search_query(raw_value: str) -> str:
+        candidate = re.sub(r"\s+", " ", raw_value or "").strip()
+        if not candidate:
+            return ""
+        candidate = re.split(r"\b(?:and\s+give|give|show|with|please)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0]
+        candidate = candidate.strip(" \"'`.,;:!?()[]{}")
+        return candidate[:120].strip()
+
+    @staticmethod
+    def _normalize_screenshot_url(raw_value: str) -> str | None:
+        candidate = str(raw_value or "").strip().strip("<>").strip("'\"").strip(".,;:!?)]}")
+        if not candidate:
+            return None
+
+        if "://" not in candidate:
+            candidate = f"https://{candidate}"
+
+        parsed = urlsplit(candidate)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"}:
+            return None
+        if not parsed.netloc:
+            return None
+
+        normalized_path = parsed.path or "/"
+        return urlunsplit((scheme, parsed.netloc, normalized_path, parsed.query, ""))
+
+    @classmethod
+    def _extract_screenshot_dimensions(cls, user_content: str) -> tuple[int, int]:
+        default_width = 1366
+        default_height = 900
+        match = cls._SCREENSHOT_DIMENSION_RE.search(user_content or "")
+        if not match:
+            return default_width, default_height
+
+        try:
+            width = int(match.group(1))
+            height = int(match.group(2))
+        except (TypeError, ValueError):
+            return default_width, default_height
+
+        width = max(640, min(3840, width))
+        height = max(480, min(3840, height))
+        # Keep screenshot viewport landscape even if users provide portrait dimensions.
+        if height > width:
+            width, height = height, width
+        return width, height
+
+    @staticmethod
+    def _is_full_page_screenshot_requested(user_content: str) -> bool:
+        _ = user_content
+        # Force viewport screenshots so rendered outputs remain landscape.
+        return False
+
+    def _run_general_browser_screenshot_task(
+        self,
+        session_id: str,
+        user_content: str,
+    ) -> dict[str, Any]:
+        if self._browser_screenshot_service is None:
+            return {
+                "assistantText": (
+                    "I could not capture a website screenshot right now because the browser screenshot service "
+                    "is not configured."
+                ),
+                "rawLogs": "Browser screenshot service is not configured in backend runtime.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        target_url = self._extract_screenshot_target_url(user_content)
+        if not target_url:
+            return {
+                "assistantText": (
+                    "I can capture that, but I need a valid website URL. "
+                    "Please include a full link like `https://example.com`."
+                ),
+                "rawLogs": "Screenshot request did not include a valid URL.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        width, height = self._extract_screenshot_dimensions(user_content)
+        full_page = self._is_full_page_screenshot_requested(user_content)
+        try:
+            capture = self._browser_screenshot_service.capture_screenshot(
+                url=target_url,
+                width=width,
+                height=height,
+                full_page=full_page,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return {
+                "assistantText": f"I could not capture the website screenshot right now. {exc}",
+                "rawLogs": f"Screenshot capture failed for {target_url}: {exc}",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        image_bytes = capture.get("imageBytes")
+        if not isinstance(image_bytes, bytes) or not image_bytes:
+            return {
+                "assistantText": "I could not capture a usable screenshot from that URL.",
+                "rawLogs": f"Screenshot service returned invalid image payload for {target_url}.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        content_type = str(capture.get("contentType") or "image/png").strip() or "image/png"
+        page_title = str(capture.get("pageTitle") or "").strip()
+        final_url = str(capture.get("finalUrl") or target_url).strip() or target_url
+        safe_title = re.sub(r"[^a-zA-Z0-9._-]+", "-", (page_title or "website")).strip("-").lower() or "website"
+        file_name = f"screenshot-{safe_title}.png"
+
+        try:
+            saved = self._codex_service.save_chat_attachment(
+                session_id=session_id,
+                file_name=file_name,
+                content_type=content_type,
+                data=image_bytes,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return {
+                "assistantText": f"I captured the screenshot but could not store it in chat attachments. {exc}",
+                "rawLogs": f"Screenshot captured for {target_url} but attachment save failed: {exc}",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        attachment_id = str(saved.get("id") or "").strip() if isinstance(saved, dict) else ""
+        if not attachment_id:
+            return {
+                "assistantText": "I captured the screenshot but could not resolve the stored attachment.",
+                "rawLogs": f"Attachment ID missing after screenshot capture for {target_url}.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        alt = page_title or f"Screenshot of {final_url}"
+        image_url = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
+        # Return clickable markdown so users can open screenshots in full size from chat.
+        assistant_text = f"[![{alt}]({image_url})]({image_url})"
+        if final_url and final_url != target_url:
+            assistant_text = f"{assistant_text}\n\nCaptured from: {final_url}"
+
+        return {
+            "assistantText": assistant_text,
+            "rawLogs": (
+                "website screenshot captured via dedicated browser container "
+                f"({width}x{height}, fullPage={str(full_page).lower()}, url={final_url})"
+            ),
+            "success": True,
+            "exitCode": 0,
+        }
+
+    @classmethod
+    def _is_general_image_generation_request(cls, user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content or "").strip().lower()
+        if not lowered:
+            return False
+        if lowered.startswith(("how to ", "why ", "what is ", "what's ")):
+            return False
+        if "code" in lowered and "generate image" not in lowered:
+            return False
+
+        if re.match(r"^(an?\s+)?(image|photo|picture|portrait|illustration)\s+of\b", lowered):
+            return True
+
+        has_action = any(marker in lowered for marker in cls._GENERAL_IMAGE_ACTION_MARKERS)
+        has_target = any(marker in lowered for marker in cls._GENERAL_IMAGE_TARGET_MARKERS)
+        return has_action and has_target
+
+    @staticmethod
+    def _general_image_prompt(user_content: str) -> str:
+        base_prompt = re.sub(r"\s+", " ", user_content or "").strip()
+        if not base_prompt:
+            return "Generate a high-quality image."
+
+        lowered = base_prompt.lower()
+        cartoon_markers = ("shin chan", "cartoon", "anime", "illustration", "comic", "sketch")
+        photoreal_markers = ("realistic", "real-looking", "real looking", "photoreal", "portrait", "look like", "resemble")
+
+        if any(marker in lowered for marker in cartoon_markers):
+            return base_prompt
+        if any(marker in lowered for marker in photoreal_markers):
+            return (
+                f"{base_prompt}. Output style: photorealistic, natural skin texture, realistic lighting, "
+                "high detail, camera-real image."
+            )
+        return base_prompt
+
+    @staticmethod
+    def _image_alt_text_for_prompt(user_content: str) -> str:
+        cleaned = re.sub(r"\s+", " ", user_content or "").strip()
+        if not cleaned:
+            return "Generated image"
+        if len(cleaned) > 72:
+            cleaned = f"{cleaned[:69].rstrip()}..."
+        return cleaned
+
     @staticmethod
     def _chunk_text(text: str, size: int = 64) -> Iterable[str]:
         if not text:
@@ -3341,5 +4025,6 @@ class ChatService:
         return (
             "You are a helpful engineering assistant for a self-hosted AI tool platform. "
             "Be precise, practical, and honest about uncertainty. "
-            "Answer directly with final results and avoid narrating intermediate checks."
+            "Answer directly with final results and avoid narrating intermediate checks. "
+            "When users request image creation or editing, generate the image instead of only describing it."
         )

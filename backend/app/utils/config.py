@@ -111,6 +111,22 @@ class Settings(BaseSettings):
     brevo_sender_email: str | None = Field(default=None, alias="BREVO_SENDER_EMAIL")
     alert_recipient_email: str | None = Field(default=None, alias="ALERT_RECIPIENT_EMAIL")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_image_api_base: str = Field(default="https://api.openai.com/v1", alias="OPENAI_IMAGE_API_BASE")
+    openai_image_model: str = Field(default="gpt-image-1", alias="OPENAI_IMAGE_MODEL")
+    openai_image_size: str = Field(default="1024x1024", alias="OPENAI_IMAGE_SIZE")
+    openai_image_quality: str = Field(default="high", alias="OPENAI_IMAGE_QUALITY")
+    openai_image_timeout_seconds: int = Field(default=60, alias="OPENAI_IMAGE_TIMEOUT_SECONDS")
+    browser_screenshot_internal_base_url: str = Field(
+        default="http://browser_screenshot:4300",
+        alias="BROWSER_SCREENSHOT_INTERNAL_BASE_URL",
+    )
+    browser_screenshot_timeout_seconds: int = Field(default=80, alias="BROWSER_SCREENSHOT_TIMEOUT_SECONDS")
+    browser_screenshot_navigation_timeout_ms: int = Field(
+        default=30_000,
+        alias="BROWSER_SCREENSHOT_NAVIGATION_TIMEOUT_MS",
+    )
+    browser_screenshot_post_load_delay_ms: int = Field(default=700, alias="BROWSER_SCREENSHOT_POST_LOAD_DELAY_MS")
+    browser_screenshot_max_image_bytes: int = Field(default=20 * 1024 * 1024, alias="BROWSER_SCREENSHOT_MAX_IMAGE_BYTES")
 
     max_build_attempts: int = Field(default=3, alias="MAX_BUILD_ATTEMPTS")
     build_timeout_seconds: int = Field(default=900, alias="BUILD_TIMEOUT_SECONDS")
@@ -182,6 +198,7 @@ class Settings(BaseSettings):
     operator_timeout_seconds: int = Field(default=1800, alias="OPERATOR_TIMEOUT_SECONDS")
     operator_github_token: str | None = Field(default=None, alias="OPERATOR_GITHUB_TOKEN")
     operator_github_username: str = Field(default="x-access-token", alias="OPERATOR_GITHUB_USERNAME")
+    operator_sudo_password: str | None = Field(default=None, alias="OPERATOR_SUDO_PASSWORD")
 
     @property
     def cors_origins(self) -> list[str]:

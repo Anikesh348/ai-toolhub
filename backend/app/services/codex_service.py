@@ -2,7 +2,9 @@ import base64
 from datetime import datetime, timezone
 import json
 import mimetypes
+import posixpath
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import requests
 import shlex
@@ -45,6 +47,15 @@ class CodexService:
         "https://chatgpt.com/backend-api/wham/usage",
         "https://chat.openai.com/backend-api/wham/usage",
     )
+    _LOCAL_IMAGE_EXTENSIONS = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+    }
+    _MAX_GENERATED_IMAGE_BYTES = 20 * 1024 * 1024
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
         self._settings = settings
@@ -215,6 +226,206 @@ class CodexService:
             "hostPath": str(attachment_host_path),
         }
 
+    def generate_chat_image(self, session_id: str, prompt: str) -> tuple[dict[str, object] | None, str | None]:
+        api_key = str(getattr(self._settings, "openai_api_key", "") or "").strip()
+        if not api_key:
+            return None, "Image generation is unavailable because OPENAI_API_KEY is not configured."
+
+        cleaned_prompt = str(prompt or "").strip()
+        if not cleaned_prompt:
+            return None, "Image prompt is empty."
+
+        model = str(getattr(self._settings, "openai_image_model", "") or "").strip() or "gpt-image-1"
+        size = str(getattr(self._settings, "openai_image_size", "") or "").strip() or "1024x1024"
+        quality = str(getattr(self._settings, "openai_image_quality", "") or "").strip() or "high"
+        timeout_seconds = max(10, int(getattr(self._settings, "openai_image_timeout_seconds", 60) or 60))
+        base_url = str(getattr(self._settings, "openai_image_api_base", "") or "").strip() or "https://api.openai.com/v1"
+        endpoint = f"{base_url.rstrip('/')}/images/generations"
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": cleaned_prompt,
+            "size": size,
+            "quality": quality,
+            "response_format": "b64_json",
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=timeout_seconds)
+        except requests.RequestException as exc:
+            return None, f"Image generation request failed: {exc}"
+
+        if response.status_code >= 400:
+            response_text = (response.text or "").strip()
+            if len(response_text) > 280:
+                response_text = f"{response_text[:280].rstrip()}..."
+            detail = response_text or "No error details were returned."
+            return None, f"Image generation failed (HTTP {response.status_code}): {detail}"
+
+        try:
+            body = response.json()
+        except ValueError:
+            return None, "Image generation response was not valid JSON."
+
+        image_bytes, content_type, file_name = self._extract_generated_image_bytes(body)
+        if not image_bytes:
+            return None, "Image generation did not return image bytes."
+
+        if len(image_bytes) > self._MAX_GENERATED_IMAGE_BYTES:
+            return None, "Generated image is too large to store."
+
+        try:
+            saved = self.save_chat_attachment(
+                session_id=session_id,
+                file_name=file_name,
+                content_type=content_type,
+                data=image_bytes,
+            )
+        except RuntimeError as exc:
+            return None, str(exc)
+        return saved, None
+
+    def _extract_generated_image_bytes(self, payload: Any) -> tuple[bytes | None, str, str]:
+        if not isinstance(payload, dict):
+            return None, "image/png", "generated-image.png"
+
+        items = payload.get("data")
+        if not isinstance(items, list):
+            return None, "image/png", "generated-image.png"
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            b64_value = item.get("b64_json")
+            if isinstance(b64_value, str) and b64_value.strip():
+                try:
+                    decoded = base64.b64decode(b64_value)
+                except ValueError:
+                    continue
+                if decoded:
+                    return decoded, "image/png", "generated-image.png"
+            url_value = item.get("url")
+            if isinstance(url_value, str) and url_value.strip():
+                downloaded = self._download_generated_image(url_value.strip())
+                if downloaded is not None:
+                    return downloaded
+
+        return None, "image/png", "generated-image.png"
+
+    def _download_generated_image(self, url: str) -> tuple[bytes, str, str] | None:
+        try:
+            response = requests.get(url, timeout=20)
+        except requests.RequestException:
+            return None
+        if response.status_code >= 400:
+            return None
+
+        content = response.content or b""
+        if not content:
+            return None
+
+        content_type = str(response.headers.get("Content-Type") or "image/png").split(";", 1)[0].strip() or "image/png"
+        extension = ".png"
+        guessed_extension = mimetypes.guess_extension(content_type) or ""
+        if guessed_extension:
+            extension = guessed_extension
+        file_name = f"generated-image{extension}"
+        return content, content_type, file_name
+
+    def materialize_chat_generated_image(self, session_id: str, image_reference: str) -> dict[str, object] | None:
+        host_path = self._resolve_chat_generated_image_host_path(session_id=session_id, image_reference=image_reference)
+        if host_path is None:
+            return None
+        if not host_path.exists() or not host_path.is_file():
+            return None
+
+        try:
+            size = host_path.stat().st_size
+        except OSError:
+            return None
+        if size <= 0 or size > self._MAX_GENERATED_IMAGE_BYTES:
+            return None
+
+        guessed_type = (mimetypes.guess_type(str(host_path))[0] or "").lower()
+        content_type = guessed_type if guessed_type.startswith("image/") else self._LOCAL_IMAGE_EXTENSIONS.get(host_path.suffix.lower(), "")
+        if not content_type.startswith("image/"):
+            return None
+
+        try:
+            data = host_path.read_bytes()
+        except OSError:
+            return None
+        if not data:
+            return None
+
+        try:
+            return self.save_chat_attachment(
+                session_id=session_id,
+                file_name=host_path.name,
+                content_type=content_type,
+                data=data,
+            )
+        except RuntimeError:
+            return None
+
+    def _resolve_chat_generated_image_host_path(self, session_id: str, image_reference: str) -> Path | None:
+        cleaned = str(image_reference or "").strip().strip("<>").strip("'\"")
+        if not cleaned:
+            return None
+        lowered = cleaned.lower()
+        if lowered.startswith(("http://", "https://", "data:", "blob:")):
+            return None
+        if lowered.startswith("/chat/sessions/"):
+            return None
+
+        request_id = f"chat-{session_id}"
+        host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
+        workspace_host_root = Path(self._settings.codex_workspace_host).resolve()
+        workspace_container_root = PurePosixPath(self._settings.codex_workspace_container.rstrip("/") or "/")
+        container_job_root = PurePosixPath(container_job_path)
+
+        # Keep only the path segment if references include query/fragment suffixes.
+        ref_path = cleaned.split("?", 1)[0].split("#", 1)[0].strip()
+        if not ref_path:
+            return None
+
+        def _within_root(path: Path, root: Path) -> bool:
+            try:
+                path.resolve().relative_to(root.resolve())
+                return True
+            except ValueError:
+                return False
+
+        if ref_path.startswith("/"):
+            normalized_container_path = PurePosixPath(posixpath.normpath(ref_path))
+            try:
+                relative = normalized_container_path.relative_to(workspace_container_root)
+            except ValueError:
+                host_absolute = Path(ref_path).resolve()
+                return host_absolute if _within_root(host_absolute, workspace_host_root) else None
+            mapped = (workspace_host_root / Path(*relative.parts)).resolve()
+            return mapped if _within_root(mapped, workspace_host_root) else None
+
+        normalized_relative = posixpath.normpath(ref_path).lstrip("/")
+        if not normalized_relative or normalized_relative.startswith(".."):
+            return None
+
+        if "/" in normalized_relative:
+            normalized_container_path = PurePosixPath("/") / container_job_root / PurePosixPath(normalized_relative)
+            try:
+                relative = normalized_container_path.relative_to(workspace_container_root)
+            except ValueError:
+                return None
+            mapped = (workspace_host_root / Path(*relative.parts)).resolve()
+            return mapped if _within_root(mapped, workspace_host_root) else None
+
+        mapped = (host_job_path / normalized_relative).resolve()
+        return mapped if _within_root(mapped, workspace_host_root) else None
+
     def run_operator(
         self,
         session_id: str,
@@ -241,7 +452,7 @@ class CodexService:
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.operator_timeout_seconds,
             extra_volumes=extra_volumes,
-            extra_environment=self._operator_git_auth_env(),
+            extra_environment=self._operator_runtime_env(),
         )
 
     def get_login_status(self) -> dict[str, object]:
@@ -461,6 +672,18 @@ class CodexService:
             for index, (key, value) in enumerate(config_entries):
                 environment[f"GIT_CONFIG_KEY_{index}"] = key
                 environment[f"GIT_CONFIG_VALUE_{index}"] = value
+
+        return environment
+
+    def _operator_runtime_env(self) -> dict[str, str]:
+        environment = self._operator_git_auth_env()
+        # Keep package managers non-interactive inside operator runs.
+        environment["DEBIAN_FRONTEND"] = "noninteractive"
+
+        sudo_password = str(getattr(self._settings, "operator_sudo_password", "") or "").strip()
+        if sudo_password:
+            # Optional secret for non-interactive sudo flows during remote/server package installs.
+            environment["OPERATOR_SUDO_PASSWORD"] = sudo_password
 
         return environment
 
