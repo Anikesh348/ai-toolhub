@@ -10,6 +10,7 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 
 - `backend` container: FastAPI API + workflow orchestrator.
 - `codex` container: long-running Codex runtime container with workspace-only mount.
+- `browser_screenshot` container: dedicated Playwright-based website screenshot service for chat references.
 - `ui` container: Vite + React + Tailwind dashboard for request submission and live tracking.
 - `mongo` container: self-hosted MongoDB with Docker-managed lifecycle and persistent host-mounted data directories.
 - ephemeral builder container: started per build attempt using `CODEX_IMAGE_NAME`.
@@ -20,6 +21,8 @@ FastAPI backend that accepts a natural-language tool prompt, runs Codex in an ep
 - Persistent chat sessions with Codex-backed responses (`/chat/*` APIs + `/chat` UI page).
 - Chat model selection with configurable available-model dropdown (`CODEX_CHAT_MODELS`, `CODEX_DEFAULT_CHAT_MODEL`).
 - Chat image attachments (upload image in composer, pass to Codex via `codex exec --image`).
+- Website screenshot capture via dedicated browser container (General + Operator + Tool Builder modes; supports explicit screenshot prompts plus `SS` shorthand with inferred target URLs for common search-style prompts).
+- Raspberry Pi-aware screenshot runtime defaults (ARM auto-detection, conservative concurrency, warm browser reuse, and low-memory Chromium flags).
 - Operator mode supports host operations tasks (project edits, Docker summaries, health checks/restarts).
 - Prompt refinement with system constraints for generated tools.
 - Prompt refinement defaults generated apps/tools to a lightweight UI stack (server-rendered/static HTML + JS) unless prompt explicitly requests a heavier frontend framework.
@@ -131,6 +134,24 @@ scripts/
    - `USD_INR_RATE_TIMEOUT_SECONDS` (HTTP timeout for FX lookup, default `4.0`).
    - `USD_INR_RATE_CACHE_TTL_SECONDS` (seconds to reuse cached live rate before refreshing, default `1800`).
    - `USD_INR_RATE_FALLBACK` (fallback USD->INR value when live fetch is unavailable, default `83.0`).
+13. Optional chat image-generation tuning (General mode image prompts):
+   - `OPENAI_IMAGE_API_BASE` (default `https://api.openai.com/v1`)
+   - `OPENAI_IMAGE_MODEL` (default `gpt-image-1`)
+   - `OPENAI_IMAGE_SIZE` (default `1024x1024`)
+   - `OPENAI_IMAGE_QUALITY` (default `high`)
+   - `OPENAI_IMAGE_TIMEOUT_SECONDS` (default `60`)
+14. Optional browser screenshot container tuning:
+   - `BROWSER_SCREENSHOT_INTERNAL_BASE_URL` (backend -> screenshot container base URL, default `http://browser_screenshot:4300`)
+   - `BROWSER_SCREENSHOT_PORT` (published host port for screenshot container, default `4300`)
+   - `BROWSER_SCREENSHOT_TIMEOUT_SECONDS` (backend HTTP timeout for capture request, default `80`)
+   - `BROWSER_SCREENSHOT_NAVIGATION_TIMEOUT_MS` (browser navigation timeout, default `30000`)
+   - `BROWSER_SCREENSHOT_POST_LOAD_DELAY_MS` (extra wait before capture, default `700`)
+   - `BROWSER_SCREENSHOT_MAX_IMAGE_BYTES` (max stored screenshot bytes, default `20971520`)
+   - `BROWSER_SCREENSHOT_PLATFORM_PROFILE` (`auto`, `pi`, `standard`; default `auto`)
+   - `BROWSER_SCREENSHOT_CONCURRENCY` (optional override; default auto by profile: Pi/ARM=1, non-Pi=2)
+   - `BROWSER_SCREENSHOT_WARM_START` (pre-launch browser on service startup, default `1`)
+   - `BROWSER_SCREENSHOT_CPU_LIMIT` (Compose CPU cap for screenshot container, default `0.75`)
+   - `BROWSER_SCREENSHOT_MEMORY_LIMIT` (Compose memory cap for screenshot container, default `512m`)
 
 ## Database Persistence
 
@@ -217,6 +238,8 @@ scripts/
   - `OPERATOR_ALLOWED_PATHS`: comma-separated absolute host paths allowed for operator execution.
   - `OPERATOR_DENIED_PATHS`: comma-separated absolute host paths fully blocked (wins over allow list).
   - If `OPERATOR_ALLOWED_PATHS` is empty, operator mode defaults to broad host access with deny-path overlays.
+  - Operator runtime exports `DEBIAN_FRONTEND=noninteractive` so apt workflows avoid blocking prompts.
+  - Optional `OPERATOR_SUDO_PASSWORD` can be provided for non-interactive `sudo` in remote SSH package tasks.
   - Git SSH integration key is stored at `${CODEX_WORKSPACE_HOST}/.ssh/id_ed25519_operator`.
   - Optional GitHub HTTPS auth bridge for operator git operations:
     - `OPERATOR_GITHUB_USERNAME` (default `x-access-token`)

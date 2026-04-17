@@ -42,6 +42,32 @@ services:
     volumes:
       - ${CODEX_WORKSPACE_HOST}:${CODEX_WORKSPACE_CONTAINER}
 
+  browser_screenshot:
+    build:
+      context: .
+      dockerfile: docker/BrowserScreenshot.Dockerfile
+    container_name: tool-builder-browser-screenshot
+    restart: unless-stopped
+    cpus: ${BROWSER_SCREENSHOT_CPU_LIMIT:-0.75}
+    mem_limit: ${BROWSER_SCREENSHOT_MEMORY_LIMIT:-512m}
+    environment:
+      TZ: ${BROWSER_SCREENSHOT_TIMEZONE:-Asia/Kolkata}
+      SCREENSHOT_PLATFORM_PROFILE: ${BROWSER_SCREENSHOT_PLATFORM_PROFILE:-auto}
+      SCREENSHOT_CONCURRENCY: ${BROWSER_SCREENSHOT_CONCURRENCY:-}
+      SCREENSHOT_WARM_START: ${BROWSER_SCREENSHOT_WARM_START:-1}
+    ports:
+      - "${BROWSER_SCREENSHOT_PORT:-4300}:4300"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4300/health', timeout=2).read()\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 25s
+
   backend:
     build:
       context: .
@@ -53,11 +79,14 @@ services:
         condition: service_started
       mongo:
         condition: service_healthy
+      browser_screenshot:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       MONGO_URI: ${MONGO_URI:-mongodb://${MONGO_INITDB_ROOT_USERNAME:-toolhub}:${MONGO_INITDB_ROOT_PASSWORD:-toolhub-dev-password}@mongo:27017/${MONGO_DB_NAME:-ai-toolhub}?authSource=admin}
       MONGO_DB_NAME: ${MONGO_DB_NAME:-ai-toolhub}
+      BROWSER_SCREENSHOT_INTERNAL_BASE_URL: ${BROWSER_SCREENSHOT_INTERNAL_BASE_URL:-http://browser_screenshot:4300}
     ports:
       - "${APP_PORT:-8000}:${APP_PORT:-8000}"
     extra_hosts:
