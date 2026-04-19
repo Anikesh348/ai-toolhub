@@ -152,6 +152,7 @@ export type StopJobResponse = {
 export type CodexAuthStatus = {
   loggedIn: boolean;
   provider: string | null;
+  email: string | null;
   message: string;
   exitCode: number;
 };

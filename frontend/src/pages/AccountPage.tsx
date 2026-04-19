@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAuth, useClerk, useUser } from "@clerk/clerk-react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -26,6 +25,7 @@ import {
   saveThinkingPanelMode,
   ThinkingPanelMode
 } from "@/lib/chat-thinking-panel";
+import { useLocalAuth } from "@/lib/local-auth";
 
 const GIT_SSH_HOST_STORAGE_KEY = "toolhub.git.ssh.host";
 const GIT_SSH_USERNAME_STORAGE_KEY = "toolhub.git.ssh.username";
@@ -92,15 +92,12 @@ function formatPercent(value: number | null | undefined): string {
 
 export default function AccountPage() {
   const navigate = useNavigate();
-  const { isLoaded: googleLoaded, isSignedIn } = useAuth();
-  const { user } = useUser();
-  const { signOut } = useClerk();
+  const { isAuthenticated, signOut, username } = useLocalAuth();
 
   const [auth, setAuth] = useState<CodexAuthStatus | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [loginInProgress, setLoginInProgress] = useState(false);
   const [logoutInProgress, setLogoutInProgress] = useState(false);
-  const [googleSignOutInProgress, setGoogleSignOutInProgress] = useState(false);
   const [authLogs, setAuthLogs] = useState("");
   const [codexUsage, setCodexUsage] = useState<CodexUsageStatus | null>(null);
   const [loadingCodexUsage, setLoadingCodexUsage] = useState(false);
@@ -129,16 +126,6 @@ export default function AccountPage() {
     );
   }, [gitVerification, gitHost, gitUsername]);
 
-  const googleStatusLabel = useMemo(() => {
-    if (!googleLoaded) {
-      return "Checking";
-    }
-    if (isSignedIn) {
-      return "Connected";
-    }
-    return "Not connected";
-  }, [googleLoaded, isSignedIn]);
-
   const codexStatusLabel = useMemo(() => {
     if (loadingAuth) {
       return "Checking";
@@ -161,12 +148,12 @@ export default function AccountPage() {
   }, [gitVerifying, gitConnected]);
 
   const profileName = useMemo(() => {
-    return user?.fullName?.trim() || user?.firstName?.trim() || user?.primaryEmailAddress?.emailAddress || "ToolHub User";
-  }, [user]);
+    return username?.trim() || "ToolHub User";
+  }, [username]);
 
   const profileSubtitle = useMemo(() => {
-    return user?.primaryEmailAddress?.emailAddress || "Workspace user";
-  }, [user]);
+    return "Local credential session";
+  }, []);
 
   const profileInitials = useMemo(() => {
     const words = profileName.trim().split(/\s+/).filter(Boolean);
@@ -332,19 +319,9 @@ export default function AccountPage() {
     }
   }
 
-  async function handleGoogleSignOut(): Promise<void> {
-    if (googleSignOutInProgress) {
-      return;
-    }
-
+  function handleAppSignOut(): void {
     setError(null);
-    setGoogleSignOutInProgress(true);
-    try {
-      await signOut({ redirectUrl: "/" });
-    } catch (signOutError) {
-      setError(signOutError instanceof Error ? signOutError.message : "Unable to sign out of Google");
-      setGoogleSignOutInProgress(false);
-    }
+    signOut();
   }
 
   async function handleCopyGitKey(): Promise<void> {
@@ -420,6 +397,7 @@ export default function AccountPage() {
           <div>
             <p className="text-sm font-medium text-[color:var(--text-main)]">{profileName}</p>
             <p className="text-xs text-muted">{profileSubtitle}</p>
+            {auth?.email && <p className="text-xs text-muted">ChatGPT: {auth.email}</p>}
           </div>
         </div>
       </header>
@@ -434,20 +412,20 @@ export default function AccountPage() {
           <article className="border border-amber/14 bg-black/40 px-4 py-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <p className="text-sm font-medium text-[color:var(--text-main)]">Google</p>
-                <p className="mt-1 text-xs text-muted">Primary account sign-in for AI ToolHub.</p>
+                <p className="text-sm font-medium text-[color:var(--text-main)]">App Access</p>
+                <p className="mt-1 text-xs text-muted">Username/password session for AI ToolHub.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2 md:justify-end">
-                <span className={`rounded-full px-3 py-1 text-xs ${isSignedIn ? "bg-mint/20 text-mint" : "bg-coral/15 text-coral"}`}>
-                  {googleStatusLabel}
+                <span className={`rounded-full px-3 py-1 text-xs ${isAuthenticated ? "bg-mint/20 text-mint" : "bg-coral/15 text-coral"}`}>
+                  {isAuthenticated ? "Connected" : "Not connected"}
                 </span>
                 <button
                   type="button"
-                  onClick={() => void handleGoogleSignOut()}
-                  disabled={googleSignOutInProgress || !isSignedIn}
+                  onClick={handleAppSignOut}
+                  disabled={!isAuthenticated}
                   className="btn-ghost border-coral/35 bg-coral/10 px-4 py-2 text-sm text-coral disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {googleSignOutInProgress ? "Signing out..." : "Sign out"}
+                  Sign out
                 </button>
               </div>
             </div>
@@ -458,6 +436,7 @@ export default function AccountPage() {
               <div>
                 <p className="text-sm font-medium text-[color:var(--text-main)]">ChatGPT</p>
                 <p className="mt-1 text-xs text-muted">Codex authentication used by chat and tool workflows.</p>
+                {auth?.email && <p className="mt-1 text-xs text-muted">Account email: {auth.email}</p>}
                 <p className="mt-2 text-xs text-muted">{auth?.message ?? "No status message yet."}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2 md:justify-end">

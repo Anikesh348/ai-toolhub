@@ -1,35 +1,15 @@
-import { useAuth, useSignIn } from "@clerk/clerk-react";
 import { Outlet, useLocation } from "react-router-dom";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { FormEvent, MouseEvent as ReactMouseEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Sidebar } from "@/components/Sidebar";
+import { useLocalAuth } from "@/lib/local-auth";
 
 const DEFAULT_SIDEBAR_WIDTH = 268;
 const MIN_SIDEBAR_WIDTH = 236;
 const MAX_SIDEBAR_WIDTH = 420;
 const MOBILE_BREAKPOINT_QUERY = "(max-width: 1023px)";
 const DISPLAY_MODE_STANDALONE_QUERY = "(display-mode: standalone)";
-const LAST_SIGNED_IN_STORAGE_KEY = "toolhub.auth.lastSignedIn";
-
-function getErrorMessage(error: unknown): string {
-  if (!error) {
-    return "Unable to complete Google sign in. Please retry.";
-  }
-
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  if (typeof error === "object" && error !== null && "errors" in error && Array.isArray((error as { errors: unknown[] }).errors)) {
-    const first = (error as { errors: Array<{ message?: string }> }).errors[0];
-    if (first?.message) {
-      return first.message;
-    }
-  }
-
-  return "Unable to complete Google sign in. Please retry.";
-}
 
 function getPhoneViewState(): boolean {
   if (typeof window === "undefined") {
@@ -49,55 +29,178 @@ function getStandalonePwaState(): boolean {
   return displayModeStandalone || iosStandalone;
 }
 
-function GoogleSignInLayer() {
-  const { isLoaded, signIn } = useSignIn();
-  const [signingIn, setSigningIn] = useState(false);
+function CredentialSetupLayer() {
+  const { completeSetup, defaultSetupUsername } = useLocalAuth();
+  const [username, setUsername] = useState(defaultSetupUsername);
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleGoogleSignIn(): Promise<void> {
-    if (!isLoaded || !signIn || signingIn) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    if (submitting) {
       return;
     }
 
     setError(null);
-    setSigningIn(true);
-
-    try {
-      await signIn.authenticateWithRedirect({
-        strategy: "oauth_google",
-        redirectUrl: "/sso-callback",
-        redirectUrlComplete: "/chat"
-      });
-    } catch (signInError) {
-      setSigningIn(false);
-      setError(getErrorMessage(signInError));
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
     }
+
+    setSubmitting(true);
+    const result = completeSetup(username, password);
+    if (!result.ok) {
+      setSubmitting(false);
+      setError(result.message);
+      return;
+    }
+
+    setPassword("");
+    setConfirmPassword("");
+    setSubmitting(false);
+  }
+
+  return (
+    <main className="mx-auto flex min-h-screen w-full max-w-3xl items-center justify-center px-4 py-8">
+      <section className="w-full border border-amber/25 bg-black/50 p-6 backdrop-blur md:p-8">
+        <p className="text-[11px] uppercase tracking-[0.2em] text-muted">First-Time Setup</p>
+        <h1 className="mt-2 text-3xl font-semibold text-[color:var(--text-main)] md:text-4xl">Create Login Credentials</h1>
+        <p className="mt-2 text-sm text-muted">
+          Pick a username and password for this browser. These are saved locally and used for future sign-ins.
+        </p>
+
+        <form onSubmit={handleSubmit} className="mt-5 space-y-3 border border-amber/20 bg-black/45 p-4">
+          <label className="block text-xs text-muted">
+            Username
+            <input
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              className="mt-1 w-full border border-amber/20 bg-black/35 px-3 py-2 text-sm text-[color:var(--text-main)] outline-none focus:border-amber/40"
+              placeholder="Choose username"
+            />
+          </label>
+
+          <label className="block text-xs text-muted">
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="new-password"
+              className="mt-1 w-full border border-amber/20 bg-black/35 px-3 py-2 text-sm text-[color:var(--text-main)] outline-none focus:border-amber/40"
+              placeholder="Choose password"
+            />
+          </label>
+
+          <label className="block text-xs text-muted">
+            Confirm password
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+              autoComplete="new-password"
+              className="mt-1 w-full border border-amber/20 bg-black/35 px-3 py-2 text-sm text-[color:var(--text-main)] outline-none focus:border-amber/40"
+              placeholder="Re-enter password"
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="submit"
+              disabled={submitting}
+              className="btn-primary px-5 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {submitting ? "Saving..." : "Save & Continue"}
+            </button>
+          </div>
+        </form>
+
+        {error && <p className="mt-3 border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
+      </section>
+    </main>
+  );
+}
+
+function UsernamePasswordSignInLayer() {
+  const { signIn, savedUsername } = useLocalAuth();
+  const [username, setUsername] = useState(savedUsername ?? "");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (savedUsername) {
+      setUsername(savedUsername);
+    }
+  }, [savedUsername]);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    if (submitting) {
+      return;
+    }
+
+    setError(null);
+    setSubmitting(true);
+    const result = signIn(username, password);
+    if (!result.ok) {
+      setSubmitting(false);
+      setError(result.message);
+      return;
+    }
+
+    setPassword("");
+    setSubmitting(false);
   }
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-3xl items-center justify-center px-4 py-8">
       <section className="w-full border border-amber/25 bg-black/50 p-6 backdrop-blur md:p-8">
         <p className="text-[11px] uppercase tracking-[0.2em] text-muted">Authentication Required</p>
-        <h1 className="mt-2 text-3xl font-semibold text-[color:var(--text-main)] md:text-4xl">Sign In With Google</h1>
+        <h1 className="mt-2 text-3xl font-semibold text-[color:var(--text-main)] md:text-4xl">Sign In</h1>
         <p className="mt-2 text-sm text-muted">
-          Sign in with your Google account to access AI ToolHub. After login, connect ChatGPT from your Profile page.
+          Enter your local username and password to access AI ToolHub.
         </p>
 
-        <div className="mt-5 border border-amber/20 bg-black/45 p-4">
-          <p className="text-[11px] uppercase tracking-[0.16em] text-muted">Step 1</p>
-          <p className="mt-1 text-sm text-[color:var(--text-main)]">Continue to Google authentication</p>
-        </div>
+        <form onSubmit={handleSubmit} className="mt-5 space-y-3 border border-amber/20 bg-black/45 p-4">
+          <label className="block text-xs text-muted">
+            Username
+            <input
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              className="mt-1 w-full border border-amber/20 bg-black/35 px-3 py-2 text-sm text-[color:var(--text-main)] outline-none focus:border-amber/40"
+              placeholder="Enter username"
+            />
+          </label>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => void handleGoogleSignIn()}
-            disabled={!isLoaded || signingIn}
-            className="btn-primary px-5 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {signingIn ? "Redirecting To Google..." : "Continue with Google"}
-          </button>
-        </div>
+          <label className="block text-xs text-muted">
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="current-password"
+              className="mt-1 w-full border border-amber/20 bg-black/35 px-3 py-2 text-sm text-[color:var(--text-main)] outline-none focus:border-amber/40"
+              placeholder="Enter password"
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="submit"
+              disabled={submitting}
+              className="btn-primary px-5 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {submitting ? "Signing in..." : "Sign in"}
+            </button>
+          </div>
+        </form>
 
         {error && <p className="mt-3 border border-coral/35 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</p>}
       </section>
@@ -106,15 +209,12 @@ function GoogleSignInLayer() {
 }
 
 export function AppShell() {
-  const { isLoaded, isSignedIn } = useAuth();
+  const { isReady, needsSetup, isAuthenticated } = useLocalAuth();
   const { pathname } = useLocation();
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [isPhoneView, setIsPhoneView] = useState(false);
   const [isStandalonePwa, setIsStandalonePwa] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [optimisticSignedIn, setOptimisticSignedIn] = useState(false);
-  const [allowSignedOutUi, setAllowSignedOutUi] = useState(false);
-  const isEffectivelySignedIn = Boolean(isSignedIn) || (!isLoaded && optimisticSignedIn);
 
   const clampSidebarWidth = useCallback((width: number): number => {
     return Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width));
@@ -137,31 +237,11 @@ export function AppShell() {
 
   useEffect(() => {
     try {
-      setOptimisticSignedIn(window.localStorage.getItem(LAST_SIGNED_IN_STORAGE_KEY) === "1");
-    } catch {
-      // Ignore storage errors.
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
       window.localStorage.setItem("toolhub.sidebar.width", String(sidebarWidth));
     } catch {
       // Ignore storage errors.
     }
   }, [sidebarWidth]);
-
-  useEffect(() => {
-    if (!isLoaded) {
-      return;
-    }
-
-    try {
-      window.localStorage.setItem(LAST_SIGNED_IN_STORAGE_KEY, isSignedIn ? "1" : "0");
-    } catch {
-      // Ignore storage errors.
-    }
-  }, [isLoaded, isSignedIn]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) {
@@ -214,21 +294,6 @@ export function AppShell() {
     setMobileMenuOpen(false);
   }, [pathname]);
 
-  useEffect(() => {
-    if (!isLoaded || isSignedIn) {
-      setAllowSignedOutUi(false);
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setAllowSignedOutUi(true);
-    }, 450);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [isLoaded, isSignedIn]);
-
   const handleSidebarResizeStart = useCallback(
     (event: ReactMouseEvent<HTMLButtonElement>): void => {
       event.preventDefault();
@@ -258,16 +323,16 @@ export function AppShell() {
     [sidebarWidth, clampSidebarWidth]
   );
 
-  if (!isEffectivelySignedIn) {
-    if (pathname.startsWith("/sso-callback")) {
-      return <Outlet />;
-    }
+  if (!isReady) {
+    return <main className="min-h-screen" aria-hidden="true" />;
+  }
 
-    if (!isLoaded || !allowSignedOutUi) {
-      return <main className="min-h-screen" aria-hidden="true" />;
-    }
+  if (needsSetup) {
+    return <CredentialSetupLayer />;
+  }
 
-    return <GoogleSignInLayer />;
+  if (!isAuthenticated) {
+    return <UsernamePasswordSignInLayer />;
   }
 
   if (isPhoneView) {

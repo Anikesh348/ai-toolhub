@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,18 @@ class _StubDockerService:
             return self._results.pop(0)
         return CommandResult(success=True, exit_code=0, logs="ok")
 
+    def run_builder_container(
+        self,
+        request_id: str,
+        shell_command: str,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        del request_id, shell_command, timeout_seconds
+        self.calls += 1
+        if self._results:
+            return self._results.pop(0)
+        return CommandResult(success=True, exit_code=0, logs="ok")
+
 
 def _settings(*, retries: int, delay_seconds: float) -> SimpleNamespace:
     return SimpleNamespace(
@@ -58,6 +71,13 @@ def _settings(*, retries: int, delay_seconds: float) -> SimpleNamespace:
         openai_image_quality="high",
         openai_image_timeout_seconds=60,
     )
+
+
+def _unsigned_jwt(payload: dict[str, object]) -> str:
+    header = {"alg": "none", "typ": "JWT"}
+    header_b64 = base64.urlsafe_b64encode(json.dumps(header).encode("utf-8")).decode("ascii").rstrip("=")
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{header_b64}.{payload_b64}."
 
 
 def test_run_chat_retries_transient_transport_failure_then_succeeds(tmp_path) -> None:
@@ -142,6 +162,60 @@ def test_get_usage_status_returns_unavailable_for_non_chatgpt_auth(tmp_path) -> 
     assert payload["available"] is False
     assert payload["authMode"] == "api_key"
     assert "ChatGPT-authenticated sessions" in str(payload["message"])
+
+
+def test_get_login_status_includes_chatgpt_email_from_id_token(tmp_path) -> None:
+    docker_service = _StubDockerService(
+        root=tmp_path,
+        results=[CommandResult(success=True, exit_code=0, logs="Logged in with ChatGPT")],
+    )
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    auth_path = tmp_path / ".codex" / "auth.json"
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(
+        json.dumps({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": _unsigned_jwt({"email": "codex.user@example.com"}),
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    payload = service.get_login_status()
+
+    assert payload["loggedIn"] is True
+    assert payload["email"] == "codex.user@example.com"
+
+
+def test_get_login_status_omits_email_for_non_chatgpt_auth(tmp_path) -> None:
+    docker_service = _StubDockerService(
+        root=tmp_path,
+        results=[CommandResult(success=True, exit_code=0, logs="Logged in")],
+    )
+    settings = _settings(retries=0, delay_seconds=0)
+    settings.codex_workspace_host = str(tmp_path)
+    service = CodexService(settings=settings, docker_service=docker_service)
+
+    auth_path = tmp_path / ".codex" / "auth.json"
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    auth_path.write_text(
+        json.dumps({
+            "auth_mode": "api_key",
+            "tokens": {
+                "id_token": _unsigned_jwt({"email": "hidden@example.com"}),
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    payload = service.get_login_status()
+
+    assert payload["loggedIn"] is True
+    assert payload["email"] is None
 
 
 def test_get_usage_status_maps_wham_usage_payload(tmp_path, monkeypatch) -> None:

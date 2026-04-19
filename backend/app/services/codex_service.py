@@ -463,9 +463,12 @@ class CodexService:
         )
         message = self.clean_cli_output(result.logs)
         logged_in, provider = self._parse_login_state(message, command_success=result.success)
+        auth_payload, _ = self._load_codex_auth_payload()
+        email = self._extract_chatgpt_email_from_auth_payload(auth_payload)
         return {
             "loggedIn": logged_in,
             "provider": provider,
+            "email": email if logged_in else None,
             "message": message or "Unable to determine Codex login status.",
             "exitCode": result.exit_code,
         }
@@ -500,6 +503,7 @@ class CodexService:
         return {
             "loggedIn": logged_in,
             "provider": provider,
+            "email": status_after_logout.get("email"),
             "message": message,
             "exitCode": result.exit_code,
         }
@@ -700,6 +704,57 @@ class CodexService:
         if not isinstance(raw_payload, dict):
             return None, "Codex auth file has an unexpected format."
         return raw_payload, None
+
+    @classmethod
+    def _extract_chatgpt_email_from_auth_payload(cls, payload: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+
+        auth_mode = str(payload.get("auth_mode") or "").strip().lower()
+        if auth_mode != "chatgpt":
+            return None
+
+        tokens = payload.get("tokens")
+        if not isinstance(tokens, dict):
+            return None
+
+        id_token = str(tokens.get("id_token") or "").strip()
+        if not id_token:
+            return None
+
+        claims = cls._decode_jwt_payload(id_token)
+        if not isinstance(claims, dict):
+            return None
+
+        for key in ("email", "preferred_username", "upn"):
+            value = claims.get(key)
+            if not isinstance(value, str):
+                continue
+            candidate = value.strip()
+            if "@" in candidate and candidate:
+                return candidate
+        return None
+
+    @staticmethod
+    def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+
+        payload_segment = parts[1].strip()
+        if not payload_segment:
+            return None
+
+        padding = "=" * ((4 - len(payload_segment) % 4) % 4)
+        encoded = f"{payload_segment}{padding}"
+
+        try:
+            decoded = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            parsed = json.loads(decoded.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+        return parsed if isinstance(parsed, dict) else None
 
     def _codex_auth_file_path(self) -> Path:
         return Path(self._settings.codex_workspace_host) / ".codex" / "auth.json"

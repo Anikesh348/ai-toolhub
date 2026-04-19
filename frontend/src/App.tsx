@@ -5,13 +5,10 @@ import AccountPage from "@/pages/AccountPage";
 import BuildToolPage from "@/pages/BuildToolPage";
 import ChatPage from "@/pages/ChatPage";
 import RequestsPage from "@/pages/RequestsPage";
-import SsoCallbackPage from "@/pages/SsoCallbackPage";
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/sso-callback/*" element={<SsoCallbackPage />} />
-
       <Route element={<AppShell />}>
         <Route path="/" element={<Navigate to="/chat" replace />} />
         <Route path="/chat" element={<ChatPage />} />

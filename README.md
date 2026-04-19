@@ -116,8 +116,10 @@ scripts/
    - `TOOL_FRONTEND_BASE_URL` (tool-builder chat status UI URL, fallback `http://localhost`)
    - `TOOL_BACKEND_BASE_URL` (tool-builder chat status backend/service URLs, fallback `http://localhost`)
 5. Codex image is built locally by Compose from `docker/Codex.Dockerfile`.
-6. Configure Google sign-in by setting `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` in `.env`.
-7. Authenticate Codex (choose one, from Profile after Google sign-in):
+6. On first launch, set a local username and password from the UI setup screen.
+   - Credentials are persisted in browser local storage for future sign-ins.
+   - Optional: `NEXT_PUBLIC_AUTH_USERNAME` can prefill the suggested setup username.
+7. Authenticate Codex (choose one, from Profile after username/password sign-in):
    - ChatGPT Pro login (no API key): run login command below once.
    - API key auth: set `OPENAI_API_KEY` in `.env`.
 8. Start the stack:

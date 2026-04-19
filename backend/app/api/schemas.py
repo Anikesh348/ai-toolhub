@@ -98,6 +98,7 @@ class StopJobResponse(BaseModel):
 class CodexAuthStatusResponse(BaseModel):
     loggedIn: bool
     provider: Optional[str] = None
+    email: Optional[str] = None
     message: str
     exitCode: int
 
