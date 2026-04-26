@@ -230,6 +230,27 @@ def test_sanitize_operator_output_keeps_code_when_diff_requested() -> None:
     assert "+ print('hello')" in sanitized
 
 
+def test_sanitize_operator_output_does_not_treat_codebase_as_code_request() -> None:
+    output = (
+        "Implemented on branch backend-python-rewrite.\n\n"
+        "Added the Python dev compose setup and the app is running at http://localhost:3100.\n\n"
+        "diff --git a/docker-compose.yml b/docker-compose.yml\n"
+        "+frontend-python:\n"
+        "+  ports:\n"
+        "+    - \"3100:3000\"\n"
+    )
+
+    sanitized = ChatService._sanitize_operator_output(
+        "inspect the backend codebase, fix issues and redeploy the containers",
+        output,
+    )
+
+    assert "Implemented on branch" in sanitized
+    assert "http://localhost:3100" in sanitized
+    assert "diff --git" not in sanitized
+    assert "frontend-python:" not in sanitized
+
+
 def test_sanitize_operator_output_removes_unfenced_patch_noise_by_default() -> None:
     output = (
         "Added a live search box in the toolbar that filters the current folder view by name, "
@@ -274,6 +295,23 @@ def test_sanitize_operator_output_still_filters_code_when_user_says_verify() -> 
     assert "Fixed the issue" in sanitized
     assert "const noisy" not in sanitized
     assert "/srv/app.js" not in sanitized
+
+
+def test_sanitize_operator_output_removes_bulleted_code_and_codex_diagnostic() -> None:
+    output = (
+        "Fixed the login endpoint and redeployed the containers.\n\n"
+        "• tokens = issue_tokens(user[\"userId\"], user.get(\"role\", \"USER\"), user.get(\"email\", \"\"))\n"
+        "• col(\"users\").update_one({\"userId\": user[\"userId\"]}, {\"$set\": {\"updatedAt\": now_iso()}})\n"
+        "@app.post(\"/v2/token/refresh\")\n\n"
+        "2026-04-26T14:57:05.299712Z ERROR codex_core::session: failed to record rollout items: thread 019dca46 not found"
+    )
+
+    sanitized = ChatService._sanitize_operator_output("Fix the backend codebase and redeploy", output)
+
+    assert "Fixed the login endpoint" in sanitized
+    assert "issue_tokens" not in sanitized
+    assert "@app.post" not in sanitized
+    assert "failed to record rollout items" not in sanitized
 
 
 def test_sanitize_assistant_output_collapses_consecutive_duplicate_lines() -> None:
@@ -1216,6 +1254,16 @@ def test_is_general_browser_screenshot_request_detects_url_prompt() -> None:
 def test_is_general_browser_screenshot_request_detects_ss_shorthand_prompt() -> None:
     prompt = "can you search for shoes on amazon and give me the SS here"
     assert ChatService._is_general_browser_screenshot_request(prompt) is True
+
+
+def test_is_general_browser_screenshot_request_ignores_incidental_ss_word() -> None:
+    prompt = (
+        "can you properly inspect the backend codebase for all the endpoints, "
+        "i see the login endpoint is returning error in SS when the login type is google, "
+        "fix issues and redeploy the containers"
+    )
+    assert ChatService._is_general_browser_screenshot_request(prompt) is False
+    assert ChatService._should_route_to_browser_screenshot(mode="operator", user_content=prompt) is False
 
 
 def test_extract_screenshot_target_url_infers_amazon_search_url() -> None:

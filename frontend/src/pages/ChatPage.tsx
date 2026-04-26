@@ -2273,8 +2273,8 @@ function ChatPageContent() {
   const allowCompanionExternalOpen = !isPhoneViewport && !isStandalonePwa;
 
   return (
-    <main className="chat-page-root relative flex h-full min-h-0 flex-col overflow-hidden lg:flex-row">
-      <div className="flex min-h-0 flex-1 flex-col">
+    <main className="chat-page-root relative flex h-full min-h-0 w-full min-w-0 max-w-full flex-col overflow-hidden lg:flex-row">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="chat-page-header shrink-0 flex items-center justify-between gap-3 border-b border-amber/15 px-2 pb-3 lg:px-4">
           <div>
             <p className="text-[11px] uppercase tracking-[0.18em] text-muted">Chat</p>
@@ -2295,8 +2295,8 @@ function ChatPageContent() {
           </div>
         </header>
 
-        <section className="flex min-h-0 flex-1 flex-col">
-          <div className="flex-1 overflow-y-auto px-2 pb-4 pt-5 lg:px-4">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-4 pt-5 lg:px-4">
             {loadingMessages && <p className="text-sm text-muted">Loading messages...</p>}
 
             {showCenteredWelcome && (

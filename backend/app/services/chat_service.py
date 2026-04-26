@@ -99,6 +99,12 @@ class ChatService:
     )
     _SCREENSHOT_DIMENSION_RE = re.compile(r"\b(\d{3,4})\s*[xX]\s*(\d{3,4})\b")
     _SCREENSHOT_SS_TOKEN_RE = re.compile(r"\bss\b", flags=re.IGNORECASE)
+    _SCREENSHOT_SS_REQUEST_RE = re.compile(
+        r"\b(?:give|send|show|take|get|capture|grab|provide|return|share)\s+"
+        r"(?:me\s+)?(?:the\s+|a\s+|an\s+)?ss\b"
+        r"|\bss\b\s+(?:of|for|from)\b",
+        flags=re.IGNORECASE,
+    )
     _SCREENSHOT_SITE_SEARCH_PATTERNS = (
         (
             re.compile(
@@ -1998,6 +2004,7 @@ class ChatService:
         lowered_request = user_content.lower()
         requested_details = ChatService._operator_requested_verbose_output(lowered_request)
         requested_code = ChatService._operator_requested_code_output(lowered_request)
+        cleaned = ChatService._strip_codex_diagnostic_lines(cleaned)
         if requested_details:
             return cleaned
 
@@ -2021,6 +2028,7 @@ class ChatService:
 
         normalized = "\n".join(filtered_lines).strip()
         if not requested_code:
+            normalized = ChatService._truncate_at_unrequested_diff(normalized)
             normalized = ChatService._strip_fenced_code_blocks(normalized)
             normalized = ChatService._strip_diff_noise_lines(normalized)
             normalized = ChatService._strip_operator_unrequested_detail_lines(normalized)
@@ -2044,18 +2052,45 @@ class ChatService:
 
     @staticmethod
     def _operator_requested_code_output(lowered_request: str) -> bool:
-        code_markers = (
-            "code",
-            "snippet",
-            "diff",
-            "patch",
-            "file contents",
-            "show file",
-            "show the file",
-            "source",
-            "implementation",
+        explicit_output_pattern = re.compile(
+            r"\b(?:show|send|paste|print|return|include|display|share|give)\s+"
+            r"(?:me\s+)?(?:the\s+|a\s+|an\s+)?"
+            r"(?:code|snippet|diff|patch|source|implementation|file contents?|full file)\b"
         )
-        return any(token in lowered_request for token in code_markers)
+        if explicit_output_pattern.search(lowered_request):
+            return True
+        exact_markers = (
+            "show me the diff",
+            "show the diff",
+            "give me the diff",
+            "paste the diff",
+            "include the diff",
+            "show patch",
+            "show the patch",
+            "file contents",
+            "full file contents",
+        )
+        return any(marker in lowered_request for marker in exact_markers)
+
+    @staticmethod
+    def _strip_codex_diagnostic_lines(value: str) -> str:
+        kept: list[str] = []
+        for raw_line in value.split("\n"):
+            stripped = raw_line.strip()
+            if stripped and ChatService._is_codex_diagnostic_line(stripped):
+                continue
+            kept.append(raw_line.rstrip())
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(kept).strip())
+
+    @staticmethod
+    def _truncate_at_unrequested_diff(value: str) -> str:
+        lines: list[str] = []
+        for raw_line in value.split("\n"):
+            stripped = raw_line.strip()
+            if re.match(r"^(diff --git|index [0-9a-f]+\.\.[0-9a-f]+|--- |\+\+\+ |@@ )", stripped):
+                break
+            lines.append(raw_line.rstrip())
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _strip_fenced_code_blocks(value: str) -> str:
@@ -2131,10 +2166,12 @@ class ChatService:
 
     @staticmethod
     def _is_operator_unrequested_code_line(stripped: str) -> bool:
-        normalized = stripped.lstrip("+-").strip()
+        normalized = re.sub(r"^[+\-*•]\s*", "", stripped).strip()
         lowered = normalized.lower()
         if not normalized:
             return False
+        if normalized.startswith("@"):
+            return True
         if normalized.startswith(("<", "</", "{", "}", "});", "];")):
             return True
         if re.match(
@@ -3684,9 +3721,7 @@ class ChatService:
         if not lowered:
             return False
 
-        has_action = any(marker in lowered for marker in cls._GENERAL_SCREENSHOT_ACTION_MARKERS) or bool(
-            cls._SCREENSHOT_SS_TOKEN_RE.search(lowered)
-        )
+        has_action = any(marker in lowered for marker in cls._GENERAL_SCREENSHOT_ACTION_MARKERS) or cls._is_ss_shorthand_screenshot_request(lowered)
         if not has_action:
             return False
 
@@ -3709,13 +3744,20 @@ class ChatService:
             lowered = re.sub(r"\s+", " ", user_content or "").strip().lower()
             has_explicit_screenshot_marker = any(
                 marker in lowered for marker in ("screenshot", "screen shot", "snapshot")
-            ) or bool(cls._SCREENSHOT_SS_TOKEN_RE.search(lowered))
+            ) or cls._is_ss_shorthand_screenshot_request(lowered)
             if not has_explicit_screenshot_marker:
                 return False
             if not cls._extract_screenshot_target_url(user_content):
                 return False
 
         return True
+
+    @classmethod
+    def _is_ss_shorthand_screenshot_request(cls, user_content: str) -> bool:
+        normalized = re.sub(r"\s+", " ", user_content or "").strip()
+        if not normalized or not cls._SCREENSHOT_SS_TOKEN_RE.search(normalized):
+            return False
+        return bool(cls._SCREENSHOT_SS_REQUEST_RE.search(normalized))
 
     @classmethod
     def _is_general_browser_recording_request(cls, user_content: str) -> bool:

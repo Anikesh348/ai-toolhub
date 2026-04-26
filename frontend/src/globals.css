@@ -27,9 +27,12 @@ html {
   color-scheme: dark;
   scrollbar-gutter: stable;
   overflow-x: hidden;
+  max-width: 100%;
 }
 
 body {
+  width: 100%;
+  max-width: 100%;
   min-height: 100vh;
   color: var(--text-main);
   background:
@@ -38,6 +41,12 @@ body {
     radial-gradient(circle at 50% 96%, rgba(161, 112, 27, 0.13) 0%, rgba(161, 112, 27, 0) 42%),
     linear-gradient(150deg, var(--bg-main), var(--bg-soft) 52%, var(--bg-warm));
   background-attachment: fixed;
+  overflow-x: hidden;
+}
+
+#root {
+  width: 100%;
+  max-width: 100%;
   overflow-x: hidden;
 }
 

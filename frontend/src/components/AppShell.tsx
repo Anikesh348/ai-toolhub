@@ -379,10 +379,10 @@ export function AppShell() {
   }
 
   return (
-    <div className="flex min-h-screen w-full flex-col lg:h-screen lg:flex-row lg:overflow-hidden">
+    <div className="flex min-h-screen w-full min-w-0 max-w-full flex-col overflow-x-hidden lg:h-screen lg:flex-row lg:overflow-hidden">
       <Sidebar sidebarWidth={sidebarWidth} onResizeStart={handleSidebarResizeStart} />
-      <div className="fade-in min-h-0 flex-1 overflow-auto lg:h-full lg:overflow-hidden">
-        <div className="h-full px-3 py-3 lg:px-6 lg:py-5">
+      <div className="fade-in min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto lg:h-full lg:overflow-hidden">
+        <div className="h-full min-w-0 max-w-full overflow-x-hidden px-3 py-3 lg:px-6 lg:py-5">
           <Outlet />
         </div>
       </div>
