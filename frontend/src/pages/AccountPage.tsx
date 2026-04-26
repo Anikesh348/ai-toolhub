@@ -172,6 +172,10 @@ export default function AccountPage() {
 
   const codexPrimaryWindow = useMemo(() => codexUsage?.rateLimit?.primaryWindow ?? null, [codexUsage]);
   const codexSecondaryWindow = useMemo(() => codexUsage?.rateLimit?.secondaryWindow ?? null, [codexUsage]);
+  const pendingDeviceCode = useMemo(() => {
+    const match = (authLogs || "").match(/\b[A-Z0-9]{4}-[A-Z0-9]{5}\b/);
+    return match ? match[0] : null;
+  }, [authLogs]);
 
   async function loadAuthStatus(): Promise<void> {
     setLoadingAuth(true);
@@ -438,6 +442,11 @@ export default function AccountPage() {
                 <p className="mt-1 text-xs text-muted">Codex authentication used by chat and tool workflows.</p>
                 {auth?.email && <p className="mt-1 text-xs text-muted">Account email: {auth.email}</p>}
                 <p className="mt-2 text-xs text-muted">{auth?.message ?? "No status message yet."}</p>
+                {pendingDeviceCode && (
+                  <p className="mt-2 text-xs text-amber">
+                    Device code: <span className="font-[var(--font-mono)]">{pendingDeviceCode}</span>
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 md:justify-end">
                 <span className={`rounded-full px-3 py-1 text-xs ${auth?.loggedIn ? "bg-mint/20 text-mint" : "bg-coral/15 text-coral"}`}>

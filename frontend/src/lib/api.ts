@@ -1071,9 +1071,63 @@ export async function uploadChatAttachment(sessionId: string, file: File): Promi
 export async function streamCodexLogin(
   onEvent: (event: CodexLoginStreamEvent) => void
 ): Promise<void> {
+  const streamUrl = `${API_BASE_URL}/codex/auth/login/events?ts=${Date.now()}`;
+
+  if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let receivedEvent = false;
+        let completed = false;
+        const source = new EventSource(streamUrl);
+
+        const closeSource = (): void => {
+          source.close();
+        };
+
+        source.onmessage = (messageEvent: MessageEvent<string>) => {
+          let parsed: CodexLoginStreamEvent;
+          try {
+            parsed = JSON.parse(messageEvent.data) as CodexLoginStreamEvent;
+          } catch {
+            return;
+          }
+          receivedEvent = true;
+          onEvent(parsed);
+          if (parsed.type === "done") {
+            completed = true;
+            closeSource();
+            resolve();
+          }
+        };
+
+        source.onerror = () => {
+          if (completed) {
+            return;
+          }
+          closeSource();
+          if (!receivedEvent) {
+            const fallbackError = new Error("EventSource login stream failed before receiving any events.");
+            fallbackError.name = "CodexLoginEventSourceFallback";
+            reject(fallbackError);
+            return;
+          }
+          reject(new Error("Codex login stream disconnected before completion."));
+        };
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "CodexLoginEventSourceFallback") {
+        throw error;
+      }
+    }
+  }
+
   const response = await fetch(`${API_BASE_URL}/codex/auth/login/events`, {
     method: "GET",
-    cache: "no-store"
+    cache: "no-store",
+    headers: {
+      Accept: "text/event-stream"
+    }
   });
   if (!response.ok) {
     const text = await response.text();
@@ -1088,7 +1142,7 @@ export async function streamCodexLogin(
   let buffer = "";
 
   const flushPackets = (): string[] => {
-    const normalized = buffer.replace(/\r\n/g, "\n");
+    const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const packets: string[] = [];
     let cursor = 0;
 
@@ -1108,6 +1162,7 @@ export async function streamCodexLogin(
   const parseDataPayload = (packet: string): string | null => {
     const dataLines = packet
       .split("\n")
+      .map((line) => line.trimStart())
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trimStart());
 
