@@ -357,6 +357,21 @@ def test_extract_assistant_text_ignores_codex_diagnostic_log_line() -> None:
     assert extracted == "Heyy. What can I help you with?"
 
 
+def test_strip_codex_diagnostic_lines_removes_rollout_thread_not_found_noise() -> None:
+    raw_logs = (
+        "2026-04-26T19:27:51.037580Z ERROR codex_core::session: "
+        "failed to record rollout items: thread 019dcb43-1d1a-78c2-baca-3bf7bf6d7959 not found\n"
+        "Tokens used: 1024 input, 256 output\n"
+        "assistant: All checks completed."
+    )
+
+    cleaned = ChatService._strip_codex_diagnostic_lines(raw_logs)
+
+    assert "failed to record rollout items" not in cleaned
+    assert "Tokens used: 1024 input, 256 output" in cleaned
+    assert "assistant: All checks completed." in cleaned
+
+
 def test_build_chat_prompt_general_mode_includes_image_generation_instruction() -> None:
     service = ChatService(
         session_repository=Mock(),

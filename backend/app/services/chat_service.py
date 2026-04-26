@@ -952,8 +952,9 @@ class ChatService:
         if not self._should_capture_execution_logs(mode):
             return
 
+        sanitized_raw_logs = self._strip_codex_diagnostic_lines(raw_logs or "")
         token_usage = self._derive_token_usage(
-            raw_logs=raw_logs,
+            raw_logs=sanitized_raw_logs,
             user_content=user_content,
             assistant_content=assistant_content,
         )
@@ -966,7 +967,7 @@ class ChatService:
                 assistant_message_id=(assistant_message_id or "").strip() or None,
                 user_content=user_content.strip(),
                 assistant_content=assistant_content.strip(),
-                raw_logs=self._truncate_chat_execution_logs(raw_logs),
+                raw_logs=self._truncate_chat_execution_logs(sanitized_raw_logs),
                 success=success,
                 exit_code=exit_code,
                 quick_path=quick_path,
@@ -2074,8 +2075,9 @@ class ChatService:
 
     @staticmethod
     def _strip_codex_diagnostic_lines(value: str) -> str:
+        normalized = (value or "").replace("\r\n", "\n").replace("\r", "\n")
         kept: list[str] = []
-        for raw_line in value.split("\n"):
+        for raw_line in normalized.split("\n"):
             stripped = raw_line.strip()
             if stripped and ChatService._is_codex_diagnostic_line(stripped):
                 continue
