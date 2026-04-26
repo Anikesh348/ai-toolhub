@@ -94,6 +94,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${CODEX_WORKSPACE_HOST}:${CODEX_WORKSPACE_HOST}
+      - ${HOME}/.codex:/host-codex-config:ro
 
   ui:
     build:

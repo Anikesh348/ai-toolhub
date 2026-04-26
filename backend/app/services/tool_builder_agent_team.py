@@ -204,7 +204,7 @@ class VisionaryAgent:
                 continue
             if lowered.endswith(":"):
                 continue
-            if lowered.startswith(("requirements", "user request", "change request", "clarifications")):
+            if lowered.startswith(("requirements", "user request", "original tool request", "change request", "clarifications")):
                 continue
             if lowered.startswith("build a production-ready tool"):
                 continue
@@ -224,7 +224,7 @@ class VisionaryAgent:
             if len(candidate) < 12:
                 continue
             lowered = candidate.lower()
-            if lowered.startswith(("requirements", "user request", "build a production-ready tool")):
+            if lowered.startswith(("requirements", "user request", "original tool request", "build a production-ready tool")):
                 continue
             sentences.append(candidate.rstrip("."))
         return sentences[:10]
@@ -284,10 +284,14 @@ class VisionaryAgent:
         lowered = prompt.lower()
         edge_cases = [
             "Invalid or incomplete user input payloads.",
-            "External dependency downtime (network, API provider, or MongoDB transient failures).",
             "No matching results for filters or query criteria.",
-            "Duplicate notifications/alerts across scheduler runs.",
         ]
+        if _needs_external_data(lowered):
+            edge_cases.append("External dependency downtime (network or API provider transient failures).")
+        if _needs_persistence(lowered):
+            edge_cases.append("Persistence dependency downtime or serialization failures.")
+        if _needs_alerts(lowered):
+            edge_cases.append("Duplicate notifications/alerts across repeated runs.")
 
         if any(token in lowered for token in ("movie", "show", "bookmyshow", "district")):
             edge_cases.append("Source catalog changes between polling cycles (new/removed listings).")
@@ -302,11 +306,18 @@ class VisionaryAgent:
     def _build_constraints_and_assumptions(prompt: str) -> list[str]:
         lowered = prompt.lower()
         constraints = [
-            "Use shared MongoDB with tool-specific collections instead of provisioning a dedicated database by default.",
-            "Default alert integration is Brevo unless the user explicitly requests another provider.",
             "Keep implementation lightweight for constrained environments and containerized deployment.",
             "Use deterministic validation gates before deployment (tests, smoke checks, API verification).",
+            "Do not add unrelated generic features; every module, endpoint, and UI control should trace to a user requirement or platform runtime contract.",
         ]
+        if _needs_persistence(lowered):
+            constraints.append("Use shared MongoDB with tool-specific collections instead of provisioning a dedicated database by default.")
+        else:
+            constraints.append("Avoid adding database persistence unless the requested workflow needs durable state.")
+        if _needs_alerts(lowered):
+            constraints.append("Default email alert integration is Brevo unless the user explicitly requests another provider.")
+        else:
+            constraints.append("Do not add Brevo/email notification plumbing unless alerts or notifications are part of the request.")
         if "timezone" not in lowered:
             constraints.append("Assume `Asia/Kolkata` timezone defaults unless the user requests a different timezone.")
         return _dedupe(constraints)
@@ -318,10 +329,10 @@ class BlueprintAgent:
     def run(self, request_prompt: str, visionary: VisionaryArtifact) -> BlueprintArtifact:
         _ = visionary
         requires_ui = _requires_ui(request_prompt)
-        architecture = self._build_architecture_diagram(requires_ui=requires_ui)
-        components = self._build_component_breakdown(requires_ui=requires_ui)
-        api_design = self._build_api_design(requires_ui=requires_ui)
-        db_schema = self._build_db_schema()
+        architecture = self._build_architecture_diagram(request_prompt=request_prompt, requires_ui=requires_ui)
+        components = self._build_component_breakdown(request_prompt=request_prompt, requires_ui=requires_ui)
+        api_design = self._build_api_design(request_prompt=request_prompt, requires_ui=requires_ui)
+        db_schema = self._build_db_schema(request_prompt=request_prompt)
         tech_decisions = self._build_tech_decisions(request_prompt=request_prompt, requires_ui=requires_ui)
         return BlueprintArtifact(
             architecture_diagram=architecture,
@@ -332,56 +343,82 @@ class BlueprintAgent:
         )
 
     @staticmethod
-    def _build_architecture_diagram(requires_ui: bool) -> str:
+    def _build_architecture_diagram(request_prompt: str, requires_ui: bool) -> str:
         ui_node = "[React/Lightweight UI] -> " if requires_ui else ""
+        lowered = request_prompt.lower()
+        persistence_node = " -> [MongoDB (shared collections)]" if _needs_persistence(lowered) else ""
+        scheduler_node = "\n                                 +-> [Scheduler/Cron Jobs]" if _needs_schedule(lowered) else ""
+        alert_node = "\n                                 +-> [Brevo/Notification Adapter]" if _needs_alerts(lowered) else ""
         return (
             "User -> "
-            f"{ui_node}[API Service] -> [Domain Services] -> [MongoDB (shared collections)]\n"
-            "                                 |\n"
-            "                                 +-> [Scheduler/Cron Jobs]\n"
-            "                                 +-> [Brevo Alert Adapter]\n"
+            f"{ui_node}[API Service] -> [Domain Services]{persistence_node}\n"
+            "                                 |"
+            f"{scheduler_node}"
+            f"{alert_node}\n"
             "                                 +-> [Structured Logs + Health Endpoints]"
         )
 
     @staticmethod
-    def _build_component_breakdown(requires_ui: bool) -> list[str]:
+    def _build_component_breakdown(request_prompt: str, requires_ui: bool) -> list[str]:
+        lowered = request_prompt.lower()
         components = [
             "API service layer: request validation, contracts, and status endpoints.",
             "Domain orchestrator: core business logic, rule evaluation, and workflow control.",
-            "Persistence adapter: MongoDB repositories using tool-scoped collections (jobs, results, alerts, history).",
-            "Scheduler worker: periodic polling and retry-safe execution.",
-            "Notification adapter: Brevo email delivery with idempotent send safeguards.",
             "Observability: structured logs, build artifacts, and runtime diagnostics.",
         ]
+        if _needs_persistence(lowered):
+            components.insert(2, "Persistence adapter: MongoDB repositories using tool-scoped collections for requested durable state.")
+        if _needs_schedule(lowered):
+            components.insert(-1, "Scheduler worker: requested polling/scheduled runs with overlap protection and bounded retries.")
+        if _needs_alerts(lowered):
+            components.insert(-1, "Notification adapter: Brevo/email delivery with idempotent send safeguards.")
         if requires_ui:
             components.insert(0, "Frontend app: user configuration, status dashboards, and action triggers.")
             components.insert(1, "UX state layer: loading, empty, error, and clear/reset interaction handling.")
         return components
 
     @staticmethod
-    def _build_api_design(requires_ui: bool) -> list[str]:
+    def _build_api_design(request_prompt: str, requires_ui: bool) -> list[str]:
+        lowered = request_prompt.lower()
         endpoints = [
             "GET /status -> health contract for smoke and runtime probes.",
-            "GET /api/config -> fetch current tool configuration.",
-            "PUT /api/config -> upsert validated configuration and alert settings.",
-            "POST /api/jobs/run -> trigger immediate execution for deterministic validation.",
-            "GET /api/results -> return latest computed results with optional filters.",
-            "GET /api/history -> execution history (run id, timestamp, status, summary).",
-            "POST /api/alerts/test -> validate Brevo integration with a safe test notification.",
+            "Expose only the feature endpoints needed for the requested workflow, with stable JSON request/response contracts.",
         ]
+        if _needs_persistence(lowered):
+            endpoints.extend(
+                [
+                    "GET /api/config -> fetch persisted tool configuration when configuration is part of the workflow.",
+                    "PUT /api/config -> upsert validated configuration when users need saved settings.",
+                    "GET /api/history -> return persisted history when the workflow records runs or results.",
+                ]
+            )
+        if _needs_schedule(lowered):
+            endpoints.append("POST /api/jobs/run -> trigger an immediate run for deterministic validation of scheduled workflows.")
+        if _needs_alerts(lowered):
+            endpoints.append("POST /api/alerts/test -> validate notification integration with a safe test notification.")
         if requires_ui:
             endpoints.append("GET / -> serve UI application shell and static assets.")
         return endpoints
 
     @staticmethod
-    def _build_db_schema() -> list[str]:
-        return [
-            "Collection `tool_jobs`: schedule metadata, job state, lock/version fields for safe retries.",
-            "Collection `tool_results`: normalized result payloads and calculated summaries per run.",
-            "Collection `tool_alerts`: user alert rules, channels, dedupe keys, and delivery state.",
-            "Collection `tool_history`: immutable run history with diagnostics and execution duration.",
-            "Collection `tool_config`: singleton tool settings (filters, timezone, provider configuration).",
+    def _build_db_schema(request_prompt: str) -> list[str]:
+        lowered = request_prompt.lower()
+        if not _needs_persistence(lowered):
+            return [
+                "No database schema is required unless implementation discovers durable state is necessary for the requested workflow.",
+                "If durable state becomes necessary, use platform MongoDB with tool-scoped collections instead of local files.",
+            ]
+
+        schema = [
+            "Collection `tool_config`: saved tool settings only when users need configurable preferences.",
+            "Collection `tool_results`: normalized result payloads and calculated summaries when results must persist.",
         ]
+        if _needs_schedule(lowered):
+            schema.append("Collection `tool_jobs`: schedule metadata, job state, lock/version fields for safe retries.")
+            schema.append("Collection `tool_history`: immutable run history with diagnostics and execution duration.")
+        if _needs_alerts(lowered):
+            schema.append("Collection `tool_alerts`: user alert rules, channels, dedupe keys, and delivery state.")
+        return schema
 
     @staticmethod
     def _build_tech_decisions(request_prompt: str, requires_ui: bool) -> list[str]:
@@ -399,11 +436,12 @@ class BlueprintAgent:
             else "Frontend: no mandatory UI layer (API-first) when the request is backend-only."
         )
         db_choice = (
-            "Database strategy: shared MongoDB with isolated collections per tool to reduce operational overhead "
-            "while keeping logical isolation."
+            "Database strategy: use shared MongoDB with isolated collections only when the requested workflow needs durable state."
         )
-        scheduler_choice = "Scheduling: cron-driven worker with idempotent runs and bounded retries."
-        integration_choice = "Alerts: Brevo by default, overridable only via explicit user instruction."
+        scheduler_choice = (
+            "Scheduling: add cron/polling workers only when requested, with idempotent runs and bounded retries."
+        )
+        integration_choice = "Alerts: use Brevo only for requested email/notification workflows."
 
         decisions = [backend_choice, vertx_note, frontend_choice, db_choice, scheduler_choice, integration_choice]
         if requires_ui:
@@ -426,13 +464,17 @@ class BackendEngineerAgent:
     ) -> BackendEngineerArtifact:
         _ = visionary
         _ = blueprint
+        lowered = request_prompt.lower()
         complex_backend = _is_complex_backend_request(request_prompt)
         implementation_focus = [
-            "Own API handlers, domain services, repositories, and scheduler workers with clear module boundaries.",
+            "Own API handlers, domain services, and any requested persistence/scheduler workers with clear module boundaries.",
             "Enforce strict request/response validation and deterministic error contracts (4xx for client errors, 5xx for server faults).",
-            "Persist jobs, results, alerts, and history in shared MongoDB collections with predictable indexes.",
-            "Implement Brevo adapter and alert dedupe keys so repeated scheduler runs avoid duplicate sends.",
+            "Implement the requested workflow directly; avoid boilerplate resources that are not needed by the tool.",
         ]
+        if _needs_persistence(lowered):
+            implementation_focus.append("Persist requested durable state in shared MongoDB collections with predictable indexes.")
+        if _needs_alerts(lowered):
+            implementation_focus.append("Implement Brevo/email adapter and alert dedupe keys so repeated runs avoid duplicate sends.")
         if complex_backend:
             implementation_focus.append(
                 "Use explicit orchestration boundaries for concurrent workflows (locks/versioning/idempotency) to prevent race conditions."
@@ -450,10 +492,11 @@ class BackendEngineerAgent:
 
         reliability_contracts = [
             "Guard external dependencies with timeouts and bounded retries.",
-            "Do not crash startup on transient Mongo unavailability; keep status endpoint alive during recovery.",
-            "Emit structured logs for each critical workflow phase (input validation, fetch, persist, notify).",
+            "Emit structured logs for each critical workflow phase (input validation, fetch/process, persist/notify when present).",
             "Provide deterministic test fixtures for core domain logic and failure paths.",
         ]
+        if _needs_persistence(lowered):
+            reliability_contracts.append("Do not crash startup on transient Mongo unavailability; keep status endpoint alive during recovery.")
         if complex_backend:
             reliability_contracts.append(
                 "Add regression tests for concurrency, idempotency, and partial-failure recovery paths."
@@ -535,21 +578,23 @@ class GuardianAgent:
 
     def run(self, visionary: VisionaryArtifact, blueprint: BlueprintArtifact) -> GuardianArtifact:
         requires_ui = any("frontend app" in item.lower() for item in blueprint.component_breakdown)
+        combined = "\n".join([*visionary.acceptance_criteria, *blueprint.component_breakdown]).lower()
         test_plan = [
             "Validate all acceptance criteria from Visionary before deploy approval.",
             "Run preflight checks for Docker artifacts, test assets, and status route contract.",
             "Run automated tests (`python -m pytest -q`) with failure triage notes.",
             "Run runtime smoke checks and API verification against live containerized service.",
-            "Run data reliability checks for dynamic/live-data workflows.",
+            "Run data reliability checks for dynamic/live-data workflows only when external data is part of the request.",
         ]
         test_cases = [
-            "Happy path: valid configuration produces successful result payload and persisted history.",
+            "Happy path: requested primary workflow produces the expected output from realistic inputs.",
             "Validation path: malformed input returns deterministic 4xx errors with actionable messages.",
             "Resilience path: transient dependency outage does not crash service and preserves health endpoint.",
-            "Scheduler path: repeated runs dedupe alerts and avoid duplicate notifications.",
             "Regression path: `/status` remains stable while feature endpoints evolve.",
         ]
 
+        if "scheduler" in combined or "cron" in combined or "poll" in combined:
+            test_cases.append("Scheduler path: repeated runs are idempotent and avoid duplicate work.")
         if any("alert" in criterion.lower() for criterion in visionary.acceptance_criteria):
             test_cases.append("Alert path: Brevo send failures are retried or surfaced without data loss.")
         if requires_ui:
@@ -571,22 +616,23 @@ class GuardianAgent:
 class ShipmasterAgent:
     nickname = "Shipmaster"
 
-    def run(self) -> ShipmasterArtifact:
+    def run(self, request_prompt: str) -> ShipmasterArtifact:
+        lowered = request_prompt.lower()
         deployment_plan = [
             "Allocate free host ports before runtime container startup.",
             "Build and tag image with request-scoped identifier for traceability.",
             "Run runtime precheck container, then smoke test and API verification before final deploy.",
             "Start production runtime with assigned ports and persisted metadata.",
             "Store deployment logs/artifacts and expose runtime status in the UI.",
-            "Keep restart-safe setup by persisting tool metadata and port allocations in MongoDB.",
+            "Keep restart-safe platform metadata for generated tools and port allocations.",
         ]
         env_variables = [
-            "MONGO_URI",
-            "MONGO_DB_NAME",
-            "BREVO_API_KEY",
-            "BREVO_SENDER_EMAIL",
             "TZ (default `Asia/Kolkata` unless explicitly overridden)",
         ]
+        if _needs_persistence(lowered):
+            env_variables.extend(["MONGO_URI", "MONGO_DB_NAME"])
+        if _needs_alerts(lowered):
+            env_variables.extend(["BREVO_API_KEY", "BREVO_SENDER_EMAIL"])
         runtime_checks = [
             "Container starts successfully with declared port mappings.",
             "`GET /status` returns `{\"status\":\"ok\"}` from allocated runtime host port.",
@@ -636,7 +682,14 @@ class CraftsmanAgent:
             "- No hacks, no placeholder logic, and no fake data unless explicitly requested.",
             "- Validate inputs, handle errors robustly, and log meaningful events.",
             "- Keep dependencies lean and suitable for lightweight environments.",
-            "- Reuse shared MongoDB and Brevo integration defaults unless the user explicitly overrides.",
+            "- Use MongoDB, Brevo, schedulers, auth, or background workers only when the user request or platform contract requires them.",
+            "- If an upstream handoff suggests generic features that are not grounded in the user request, treat them as non-goals.",
+            "",
+            "Operator-grade execution protocol:",
+            "- Inspect the workspace and generated artifacts before editing or declaring success.",
+            "- Convert each explicit user requirement into an acceptance criterion and at least one code/test/docs mapping.",
+            "- Implement the primary user workflow first, then add supporting endpoints/UI states needed to make it usable.",
+            "- Run the relevant tests and runtime checks yourself; fix failures before handing off.",
             "",
             "Specialized implementation pod protocol:",
             "- Backend Engineer \"Atlas\" owns API/domain/persistence/scheduler contracts.",
@@ -718,7 +771,7 @@ class ToolBuilderAgentTeam:
             else None
         )
         guardian = self._guardian.run(visionary=visionary, blueprint=blueprint)
-        shipmaster = self._shipmaster.run()
+        shipmaster = self._shipmaster.run(request_prompt=normalized_request)
         craftsman_prompt = self._craftsman.build_prompt(
             refined_prompt=refined_prompt,
             request_context_prompt=context_prompt,
@@ -839,3 +892,112 @@ def _is_complex_backend_request(prompt: str) -> bool:
     )
     score = sum(1 for marker in backend_markers if marker in lowered)
     return score >= 2
+
+
+def _needs_persistence(lowered_prompt: str) -> bool:
+    if _has_opt_out(
+        lowered_prompt,
+        ("database", "db", "mongodb", "mongo", "persistence", "persistent", "storage"),
+    ):
+        return False
+    persistence_markers = (
+        "persist",
+        "persistent",
+        "database",
+        "db",
+        "mongodb",
+        "mongo",
+        "save",
+        "saved",
+        "store",
+        "history",
+        "watchlist",
+        "tracker",
+        "alert",
+        "login",
+        "account",
+        "remember",
+    )
+    return any(marker in lowered_prompt for marker in persistence_markers)
+
+
+def _needs_alerts(lowered_prompt: str) -> bool:
+    if _has_opt_out(
+        lowered_prompt,
+        ("alert", "alerts", "notification", "notifications", "email", "mail", "brevo"),
+    ):
+        return False
+    alert_markers = (
+        "alert",
+        "alerts",
+        "notify",
+        "notification",
+        "email",
+        "mail",
+        "brevo",
+        "sendinblue",
+        "webhook",
+    )
+    return any(marker in lowered_prompt for marker in alert_markers)
+
+
+def _needs_schedule(lowered_prompt: str) -> bool:
+    if _has_opt_out(
+        lowered_prompt,
+        ("scheduler", "schedule", "scheduling", "cron", "polling", "background job"),
+    ):
+        return False
+    schedule_markers = (
+        "cron",
+        "schedule",
+        "scheduled",
+        "poll",
+        "polling",
+        "interval",
+        "every ",
+        "daily",
+        "hourly",
+        "reminder",
+        "background job",
+    )
+    return any(marker in lowered_prompt for marker in schedule_markers)
+
+
+def _needs_external_data(lowered_prompt: str) -> bool:
+    if _has_opt_out(
+        lowered_prompt,
+        ("external api", "external apis", "external dependency", "external dependencies", "scraping", "live data"),
+    ):
+        return False
+    external_markers = (
+        "scrape",
+        "scraping",
+        "external api",
+        "live data",
+        "latest",
+        "today",
+        "news",
+        "weather",
+        "stock",
+        "price",
+        "current listings",
+    )
+    return any(marker in lowered_prompt for marker in external_markers)
+
+
+def _has_opt_out(lowered_prompt: str, terms: tuple[str, ...]) -> bool:
+    for term in terms:
+        escaped = re.escape(term)
+        patterns = (
+            rf"\bno\b[^.;\n]{{0,120}}\b{escaped}\b",
+            rf"\bwithout\b[^.;\n]{{0,120}}\b{escaped}\b",
+            rf"\bdo\s+not\s+(?:use|include|add)\b[^.;\n]{{0,120}}\b{escaped}\b",
+            rf"\bnot\s+(?:use|using|include|including|add|adding)\b[^.;\n]{{0,120}}\b{escaped}\b",
+            rf"\bno\s+{escaped}\b",
+            rf"\bwithout\s+{escaped}\b",
+            rf"\bnot\s+(?:use|using|include|including|add|adding)\s+(?:a\s+|an\s+|any\s+)?{escaped}\b",
+            rf"\bdo\s+not\s+(?:use|include|add)\s+(?:a\s+|an\s+|any\s+)?{escaped}\b",
+        )
+        if any(re.search(pattern, lowered_prompt) for pattern in patterns):
+            return True
+    return False

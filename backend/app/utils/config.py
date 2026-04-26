@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_CODEX_CHAT_MODELS = (
+    "gpt-5.5,"
     "gpt-5.4,"
     "gpt-5.4-mini,"
     "gpt-5.3-codex,"
@@ -80,7 +81,7 @@ class Settings(BaseSettings):
 
     codex_workspace_host: str = Field(alias="CODEX_WORKSPACE_HOST")
     codex_workspace_container: str = Field(alias="CODEX_WORKSPACE_CONTAINER")
-    codex_image_name: str = Field(alias="CODEX_IMAGE_NAME")
+    codex_image_name: str = Field(default="tool-builder-codex:latest", alias="CODEX_IMAGE_NAME")
     codex_command_template: str = Field(
         default=(
             "cd {job_dir} && codex exec --skip-git-repo-check "
@@ -89,12 +90,14 @@ class Settings(BaseSettings):
         alias="CODEX_COMMAND_TEMPLATE",
     )
     codex_chat_models: str = Field(default=DEFAULT_CODEX_CHAT_MODELS, alias="CODEX_CHAT_MODELS")
-    codex_default_chat_model: str | None = Field(default="gpt-5.3-codex", alias="CODEX_DEFAULT_CHAT_MODEL")
+    codex_default_chat_model: str | None = Field(default=None, alias="CODEX_DEFAULT_CHAT_MODEL")
     codex_tool_builder_model: str | None = Field(default=None, alias="CODEX_TOOL_BUILDER_MODEL")
-    codex_models_cache_path: str | None = Field(default="~/.codex/models_cache.json", alias="CODEX_MODELS_CACHE_PATH")
-    codex_config_path: str | None = Field(default="~/.codex/config.toml", alias="CODEX_CONFIG_PATH")
+    codex_models_cache_path: str | None = Field(default="/host-codex-config/models_cache.json", alias="CODEX_MODELS_CACHE_PATH")
+    codex_config_path: str | None = Field(default="/host-codex-config/config.toml", alias="CODEX_CONFIG_PATH")
     codex_transient_retries: int = Field(default=2, alias="CODEX_TRANSIENT_RETRIES")
     codex_transient_retry_delay_seconds: float = Field(default=2.0, alias="CODEX_TRANSIENT_RETRY_DELAY_SECONDS")
+    agent_memory_enabled: bool = Field(default=True, alias="AGENT_MEMORY_ENABLED")
+    agent_memory_path: str | None = Field(default=None, alias="AGENT_MEMORY_PATH")
 
     port_range_start: int = Field(default=3001, alias="PORT_RANGE_START")
     port_range_end: int = Field(default=3999, alias="PORT_RANGE_END")
@@ -127,6 +130,7 @@ class Settings(BaseSettings):
     )
     browser_screenshot_post_load_delay_ms: int = Field(default=700, alias="BROWSER_SCREENSHOT_POST_LOAD_DELAY_MS")
     browser_screenshot_max_image_bytes: int = Field(default=20 * 1024 * 1024, alias="BROWSER_SCREENSHOT_MAX_IMAGE_BYTES")
+    browser_screenshot_max_video_bytes: int = Field(default=80 * 1024 * 1024, alias="BROWSER_SCREENSHOT_MAX_VIDEO_BYTES")
 
     max_build_attempts: int = Field(default=3, alias="MAX_BUILD_ATTEMPTS")
     build_timeout_seconds: int = Field(default=900, alias="BUILD_TIMEOUT_SECONDS")
@@ -216,16 +220,45 @@ class Settings(BaseSettings):
     def project_paths(self) -> list[str]:
         return [path.strip() for path in self.operator_project_paths.split(",") if path.strip()]
 
+    @property
+    def resolved_agent_memory_path(self) -> str:
+        configured = (self.agent_memory_path or "").strip()
+        if configured:
+            return configured
+        return str(Path(self.codex_workspace_host) / "memory.md")
+
     def _configured_chat_models(self) -> list[str]:
         return dedupe_model_slugs(self.codex_chat_models.split(","))
 
-    def _desktop_visible_chat_models(self) -> list[str]:
-        raw_path = (self.codex_models_cache_path or "").strip()
-        if not raw_path:
-            return []
+    def _codex_metadata_paths(self, configured_path: str | None, filename: str) -> list[Path]:
+        raw_paths = [
+            (configured_path or "").strip(),
+            str(Path(self.codex_workspace_host) / ".codex" / filename),
+            str(Path(self.codex_workspace_container) / ".codex" / filename),
+        ]
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for raw_path in raw_paths:
+            if not raw_path:
+                continue
+            path = Path(raw_path).expanduser()
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+        return paths
 
-        cache_path = Path(raw_path).expanduser()
-        if not cache_path.exists() or not cache_path.is_file():
+    def _desktop_visible_chat_models(self) -> list[str]:
+        cache_path = next(
+            (
+                path
+                for path in self._codex_metadata_paths(self.codex_models_cache_path, "models_cache.json")
+                if path.exists() and path.is_file()
+            ),
+            None,
+        )
+        if cache_path is None:
             return []
 
         try:
@@ -255,22 +288,19 @@ class Settings(BaseSettings):
         return dedupe_model_slugs([slug for _, slug in ordered_slugs])
 
     def _desktop_default_chat_model(self) -> str | None:
-        raw_path = (self.codex_config_path or "").strip()
-        if not raw_path:
-            return None
+        for config_path in self._codex_metadata_paths(self.codex_config_path, "config.toml"):
+            if not config_path.exists() or not config_path.is_file():
+                continue
+            try:
+                with config_path.open("rb") as handle:
+                    payload = tomllib.load(handle)
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
 
-        config_path = Path(raw_path).expanduser()
-        if not config_path.exists() or not config_path.is_file():
-            return None
-
-        try:
-            with config_path.open("rb") as handle:
-                payload = tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError):
-            return None
-
-        candidate = str(payload.get("model") or "").strip()
-        return candidate or None
+            candidate = str(payload.get("model") or "").strip()
+            if candidate:
+                return candidate
+        return None
 
     @property
     def available_chat_models(self) -> list[str]:
@@ -282,12 +312,12 @@ class Settings(BaseSettings):
     @property
     def default_chat_model(self) -> str | None:
         available = self.available_chat_models
-        configured = (self.codex_default_chat_model or "").strip()
-        if configured and configured in available:
-            return configured
         desktop_default = self._desktop_default_chat_model()
         if desktop_default and desktop_default in available:
             return desktop_default
+        configured = (self.codex_default_chat_model or "").strip()
+        if configured and configured in available:
+            return configured
         return available[0] if available else None
 
     @property
@@ -295,6 +325,10 @@ class Settings(BaseSettings):
         configured = (self.codex_tool_builder_model or "").strip()
         if configured:
             return configured
+
+        desktop_default = self._desktop_default_chat_model()
+        if desktop_default and desktop_default in self.available_chat_models:
+            return desktop_default
 
         desktop_codex_models = [model for model in self._desktop_visible_chat_models() if "codex" in model]
         if desktop_codex_models:

@@ -39,6 +39,53 @@ def test_agent_team_defaults_include_shared_mongo_and_brevo() -> None:
     assert "Brevo" in combined_decisions
 
 
+def test_agent_team_does_not_force_mongo_brevo_or_scheduler_for_simple_tools() -> None:
+    package = ToolBuilderAgentTeam().prepare(
+        request_prompt="Build a simple unit converter with a clean web UI and no database, alerts, scheduler, or external API.",
+        refined_prompt="Refined prompt with platform constraints.",
+        request_context_prompt="Build a simple unit converter with a clean web UI and no database, alerts, scheduler, or external API.",
+    )
+
+    combined_constraints = "\n".join(package.visionary.constraints_and_assumptions)
+    combined_components = "\n".join(package.blueprint.component_breakdown)
+    combined_endpoints = "\n".join(package.blueprint.api_design)
+    combined_schema = "\n".join(package.blueprint.db_schema)
+
+    assert "Avoid adding database persistence" in combined_constraints
+    assert "Do not add Brevo" in combined_constraints
+    assert "Persistence adapter" not in combined_components
+    assert "Scheduler worker" not in combined_components
+    assert "Notification adapter" not in combined_components
+    assert "POST /api/alerts/test" not in combined_endpoints
+    assert "No database schema is required" in combined_schema
+    assert "Original tool request" not in package.visionary.problem_statement
+
+
+def test_agent_team_respects_do_not_add_comma_list_opt_outs() -> None:
+    package = ToolBuilderAgentTeam().prepare(
+        request_prompt=(
+            "Build a habit tracker with MongoDB. "
+            "Do not add email alerts, external APIs, authentication, or scheduler jobs."
+        ),
+        refined_prompt="Refined prompt with platform constraints.",
+        request_context_prompt=(
+            "Build a habit tracker with MongoDB. "
+            "Do not add email alerts, external APIs, authentication, or scheduler jobs."
+        ),
+    )
+
+    combined_components = "\n".join(package.blueprint.component_breakdown)
+    combined_endpoints = "\n".join(package.blueprint.api_design)
+    combined_env = "\n".join(package.shipmaster.env_variables)
+
+    assert "Persistence adapter" in combined_components
+    assert "Scheduler worker" not in combined_components
+    assert "Notification adapter" not in combined_components
+    assert "POST /api/alerts/test" not in combined_endpoints
+    assert "MONGO_URI" in combined_env
+    assert "BREVO_API_KEY" not in combined_env
+
+
 def test_agent_team_respects_backend_only_requests() -> None:
     package = ToolBuilderAgentTeam().prepare(
         request_prompt="Build a backend only API for rule management and scheduling.",

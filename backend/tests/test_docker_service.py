@@ -57,6 +57,41 @@ def test_build_service_environment_includes_shared_mongo_defaults() -> None:
     assert environment["TZ"] == "Asia/Kolkata"
 
 
+def test_build_service_environment_resolves_required_compose_env_from_runtime_defaults() -> None:
+    settings = _docker_settings()
+    runtime_plan = RuntimePlan(
+        mode="compose",
+        services=[ServiceRuntimeSpec(name="app", container_port=3000, is_ui=True, is_smoke=True)],
+        ui_service="app",
+        smoke_service="app",
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch("app.services.docker_service.docker.from_env", return_value=Mock()):
+            service = DockerService(settings=settings)  # type: ignore[arg-type]
+
+        compose_env = service._compose_env(  # pylint: disable=protected-access
+            service_host_ports={"app": 3101},
+            runtime_plan=runtime_plan,
+        )
+        environment = service._build_service_environment(  # pylint: disable=protected-access
+            service_config={
+                "environment": {
+                    "MONGO_URI": "${MONGO_URI:?MONGO_URI is required}",
+                    "MONGO_DB_NAME": "${MONGO_DB_NAME:?MONGO_DB_NAME is required}",
+                    "PORT": "${APP_INTERNAL_PORT:-3000}",
+                }
+            },
+            compose_env=compose_env,
+        )
+
+    assert environment["MONGO_URI"] == (
+        "mongodb://toolhub:toolhub-dev-password@tool-builder-mongo:27017/ai-toolhub?authSource=admin"
+    )
+    assert environment["MONGO_DB_NAME"] == "ai-toolhub"
+    assert environment["PORT"] == "3000"
+
+
 def test_run_tool_container_passes_shared_mongo_environment_to_runtime() -> None:
     settings = _docker_settings()
     docker_client = Mock()

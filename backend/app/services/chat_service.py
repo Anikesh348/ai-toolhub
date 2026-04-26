@@ -15,6 +15,7 @@ from app.repositories.chat_session_repository import ChatSessionRepository
 from app.services.browser_screenshot_service import BrowserScreenshotService
 from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
+from app.services.memory_service import MemoryService
 from app.services.operator_access_service import OperatorAccessService
 from app.services.system_context_service import SystemContextService
 from app.services.tool_builder_service import ToolBuilderService
@@ -75,6 +76,22 @@ class ChatService:
         "site",
         "link",
     )
+    _GENERAL_BROWSER_RECORDING_ACTION_MARKERS = (
+        "record",
+        "recording",
+        "screen recording",
+        "capture video",
+    )
+    _GENERAL_BROWSER_RECORDING_TARGET_MARKERS = (
+        "video",
+        "browser session",
+        "screen recording",
+        "recording",
+    )
+    _BROWSER_RECORDING_DURATION_RE = re.compile(
+        r"\b(\d{1,3})\s*(seconds?|secs?|s|minutes?|mins?|m)\b",
+        flags=re.IGNORECASE,
+    )
     _EXPLICIT_URL_RE = re.compile(r"(https?://[^\s<>()\"']+)", flags=re.IGNORECASE)
     _DOMAIN_URL_RE = re.compile(
         r"(?<!@)\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?:/[^\s<>()\"']*)?)",
@@ -83,6 +100,14 @@ class ChatService:
     _SCREENSHOT_DIMENSION_RE = re.compile(r"\b(\d{3,4})\s*[xX]\s*(\d{3,4})\b")
     _SCREENSHOT_SS_TOKEN_RE = re.compile(r"\bss\b", flags=re.IGNORECASE)
     _SCREENSHOT_SITE_SEARCH_PATTERNS = (
+        (
+            re.compile(
+                r"\bsearch(?:\s+for)?\s+((?:www\.)?(?:amazon|flipkart|google|youtube|brave)(?:\.com)?)"
+                r"\s+(?:for|about)\s+(.+)",
+                flags=re.IGNORECASE,
+            ),
+            "site_query",
+        ),
         (
             re.compile(
                 r"\bsearch(?:\s+for)?\s+(.+?)\s+on\s+((?:www\.)?(?:amazon|flipkart|google|youtube|brave)(?:\.com)?)"
@@ -132,6 +157,7 @@ class ChatService:
         chat_execution_log_repository: ChatExecutionLogRepository | None = None,
         tool_frontend_base_url: str = "http://localhost",
         tool_backend_base_url: str = "http://localhost",
+        memory_service: MemoryService | None = None,
         usd_inr_rate_api_url: str = "https://open.er-api.com/v6/latest/USD",
         usd_inr_rate_timeout_seconds: float = 4.0,
         usd_inr_rate_cache_ttl_seconds: int = 1800,
@@ -146,6 +172,7 @@ class ChatService:
         self._system_context_service = system_context_service
         self._tool_builder_service = tool_builder_service
         self._chat_execution_log_repository = chat_execution_log_repository
+        self._memory_service = memory_service
         self._tool_frontend_base_url = self._normalize_runtime_base_url(tool_frontend_base_url)
         self._tool_backend_base_url = self._normalize_runtime_base_url(tool_backend_base_url)
         self._usd_inr_rate_api_url = (usd_inr_rate_api_url or "").strip()
@@ -210,17 +237,19 @@ class ChatService:
         if not existing_messages:
             session = self._auto_name_session(session, content)
 
+        normalized_mode = self._normalize_mode(session["mode"])
+        self._update_memory_from_user_message(content=content, mode=normalized_mode)
         recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=18)
         selected_model = (
             self._resolve_model(model=model, fallback_to_default=False)
             or self._resolve_model(model=session.get("model"), fallback_to_default=False)
             or self._resolve_model(model=None, fallback_to_default=True)
         )
-        normalized_mode = self._normalize_mode(session["mode"])
         image_paths = [str(item.get("containerPath")) for item in attachments if item.get("containerPath")]
         prompt = self._build_chat_prompt(
             mode=normalized_mode,
             messages=recent_messages,
+            memory_context=self._memory_prompt_context(),
         )
         quick_answer = None
         if self._should_use_operator_quick_reply(mode=normalized_mode, user_content=content):
@@ -236,6 +265,15 @@ class ChatService:
                 assistant_text = quick_answer
                 success = True
                 exit_code = 0
+            elif self._should_route_to_browser_recording(mode=normalized_mode, user_content=content):
+                recording_result = self._run_general_browser_recording_task(
+                    session_id=session_id,
+                    user_content=content,
+                )
+                assistant_text = str(recording_result.get("assistantText") or "")
+                success = bool(recording_result.get("success", False))
+                exit_code = int(recording_result.get("exitCode", 1))
+                raw_execution_logs = str(recording_result.get("rawLogs") or "")
             elif self._should_route_to_browser_screenshot(mode=normalized_mode, user_content=content):
                 screenshot_result = self._run_general_browser_screenshot_task(
                     session_id=session_id,
@@ -370,17 +408,19 @@ class ChatService:
         yield {"type": "user_message", "session": session, "message": user_message}
         yield {"type": "status", "status": "thinking"}
 
+        normalized_mode = self._normalize_mode(session["mode"])
+        self._update_memory_from_user_message(content=user_content, mode=normalized_mode)
         recent_messages = self._message_repository.list_recent_for_session(session_id=session_id, limit=18)
         selected_model = (
             self._resolve_model(model=model, fallback_to_default=False)
             or self._resolve_model(model=session.get("model"), fallback_to_default=False)
             or self._resolve_model(model=None, fallback_to_default=True)
         )
-        normalized_mode = self._normalize_mode(session["mode"])
         image_paths = [str(item.get("containerPath")) for item in attachments if item.get("containerPath")]
         prompt = self._build_chat_prompt(
             mode=normalized_mode,
             messages=recent_messages,
+            memory_context=self._memory_prompt_context(),
         )
         quick_answer = None
         if self._should_use_operator_quick_reply(mode=normalized_mode, user_content=user_content):
@@ -399,6 +439,15 @@ class ChatService:
                 assistant_text = quick_answer
                 success = True
                 exit_code = 0
+            elif self._should_route_to_browser_recording(mode=normalized_mode, user_content=user_content):
+                recording_result = self._run_general_browser_recording_task(
+                    session_id=session_id,
+                    user_content=user_content,
+                )
+                assistant_text = str(recording_result.get("assistantText") or "")
+                success = bool(recording_result.get("success", False))
+                exit_code = int(recording_result.get("exitCode", 1))
+                raw_execution_logs = str(recording_result.get("rawLogs") or "")
             elif self._should_route_to_browser_screenshot(mode=normalized_mode, user_content=user_content):
                 screenshot_result = self._run_general_browser_screenshot_task(
                     session_id=session_id,
@@ -1311,7 +1360,12 @@ class ChatService:
                 return True
         return False
 
-    def _build_chat_prompt(self, mode: str, messages: list[dict[str, Any]]) -> str:
+    def _build_chat_prompt(
+        self,
+        mode: str,
+        messages: list[dict[str, Any]],
+        memory_context: str | None = None,
+    ) -> str:
         normalized_mode = self._normalize_mode(mode)
         system_prompt = self._system_prompt_for_mode(normalized_mode)
         lines = [system_prompt, "", "Conversation:"]
@@ -1323,6 +1377,16 @@ class ChatService:
                 "",
                 "Conversation:",
             ]
+        if memory_context:
+            memory_block = (
+                "Saved agent memory from memory.md (use only when relevant; user-editable):\n"
+                f"{memory_context.strip()}\n"
+            )
+            if "Conversation:" in lines:
+                conversation_index = lines.index("Conversation:")
+                lines[conversation_index:conversation_index] = [memory_block, ""]
+            else:
+                lines.extend([memory_block, ""])
         for message in messages:
             role = message["role"].upper()
             # Keep history entries on one serialized line so echoed prompts
@@ -1349,6 +1413,23 @@ class ChatService:
         lines.append("Return only the final answer. Do not include tool logs, search traces, or intermediate status narration.")
         return "\n".join(lines)
 
+    def _memory_prompt_context(self) -> str:
+        if self._memory_service is None:
+            return ""
+        try:
+            return self._memory_service.prompt_context()
+        except Exception:  # pylint: disable=broad-except
+            self._logger.warning("Unable to load agent memory context", exc_info=True)
+            return ""
+
+    def _update_memory_from_user_message(self, content: str, mode: str) -> None:
+        if self._memory_service is None:
+            return
+        try:
+            self._memory_service.update_from_user_message(content=content, mode=mode)
+        except Exception:  # pylint: disable=broad-except
+            self._logger.warning("Unable to update agent memory", exc_info=True)
+
     def _build_assistant_text(self, raw_logs: str, success: bool) -> str:
         parsed = self._extract_assistant_text(raw_logs)
         if parsed:
@@ -1371,6 +1452,8 @@ class ChatService:
                     filtered_lines.append("")
                 continue
             if ChatService._is_prompt_echo_line(stripped):
+                continue
+            if ChatService._is_codex_diagnostic_line(stripped):
                 continue
             lowered = stripped.lower()
             if lowered.startswith("assistant:"):
@@ -1794,8 +1877,10 @@ class ChatService:
             "- For remote apt installs, run through SSH and use `sudo -n` first to avoid interactive prompts.\n"
             "- If sudo requires a password and `OPERATOR_SUDO_PASSWORD` is present, pass it via stdin; never print secrets.\n"
             "- After package installation, verify with `dpkg -s <package>` and/or `<package> --version`.\n"
+            "- Final answer must be only a concise user-facing summary: what changed, whether it was verified, and any URL/port needed to use it.\n"
             "- Keep response crisp and readable (3-6 short lines by default).\n"
-            "- Include verification details, branch names, modified file lists, and environment diagnostics only when the user explicitly asks.\n"
+            "- Do not include modified file lists, file paths, raw patches, code snippets, or environment diagnostics unless the user explicitly asks.\n"
+            "- Include verification details and branch names only when the user explicitly asks.\n"
             "- Do not paste full file contents, full diffs, or long code/config blocks unless the user explicitly asks for code/log output.\n"
             "- Never access denied paths.\n"
             "- Resolve follow-up references (for example: 'that repo', 'continue', 'as discussed') using conversation context.\n"
@@ -1938,6 +2023,7 @@ class ChatService:
         if not requested_code:
             normalized = ChatService._strip_fenced_code_blocks(normalized)
             normalized = ChatService._strip_diff_noise_lines(normalized)
+            normalized = ChatService._strip_operator_unrequested_detail_lines(normalized)
             if not normalized:
                 return "I omitted verbose code output. Ask for `diff` or `logs` if you want full details."
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
@@ -1946,8 +2032,6 @@ class ChatService:
     @staticmethod
     def _operator_requested_verbose_output(lowered_request: str) -> bool:
         verbose_markers = (
-            "verify",
-            "verification",
             "logs",
             "log output",
             "details",
@@ -2001,6 +2085,76 @@ class ChatService:
                 continue
             lines.append(line)
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _strip_operator_unrequested_detail_lines(value: str) -> str:
+        kept: list[str] = []
+        for raw_line in value.split("\n"):
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                if kept and kept[-1] != "":
+                    kept.append("")
+                continue
+            lowered = stripped.lower()
+            if lowered in {
+                "modified files:",
+                "changed files:",
+                "files changed:",
+                "modified:",
+                "changes:",
+                "diff:",
+                "patch:",
+            }:
+                continue
+            if ChatService._is_operator_unrequested_file_reference(stripped):
+                continue
+            if ChatService._is_operator_unrequested_code_line(stripped):
+                continue
+            kept.append(line)
+
+        cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept).strip())
+        blocks = [block.strip() for block in cleaned.split("\n\n") if block.strip()]
+        if len(blocks) <= 3:
+            return cleaned
+        return "\n\n".join(blocks[:3]).strip()
+
+    @staticmethod
+    def _is_operator_unrequested_file_reference(stripped: str) -> bool:
+        if re.match(r"^[-*]\s+(/|~|\.\.?/|[A-Za-z0-9_.-]+/)", stripped):
+            return True
+        if re.match(r"^(/|~|\.\.?/)[^\s]+$", stripped):
+            return True
+        if re.match(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]+$", stripped):
+            return True
+        return False
+
+    @staticmethod
+    def _is_operator_unrequested_code_line(stripped: str) -> bool:
+        normalized = stripped.lstrip("+-").strip()
+        lowered = normalized.lower()
+        if not normalized:
+            return False
+        if normalized.startswith(("<", "</", "{", "}", "});", "];")):
+            return True
+        if re.match(
+            r"^(const|let|var|function|async function|class|return|if|for|while|switch|case|try|catch|import|export)\b",
+            normalized,
+        ):
+            return True
+        if re.match(r"^[A-Za-z_$][\w$]*\s*[:=]\s*.+[,;]?$", normalized):
+            return True
+        if re.match(r"^[.#]?[A-Za-z0-9_-]+\s*\{?$", normalized) and not normalized.endswith("."):
+            return True
+        if lowered.startswith(("state.", "document.", "window.", "row.", "event.", "searchinputel.", "entries")):
+            return True
+        code_punctuation_count = sum(normalized.count(token) for token in ("{", "}", "(", ")", ";", "=>", "`", "$", "<", ">"))
+        word_count = len(re.findall(r"[A-Za-z]{2,}", normalized))
+        if code_punctuation_count >= 4 and word_count <= 12:
+            return True
+        if stripped.startswith(("+", "-")) and code_punctuation_count >= 2:
+            return True
+        return False
 
     @staticmethod
     def _operator_branch_instruction(user_content: str) -> str:
@@ -3131,22 +3285,52 @@ class ChatService:
 
     @staticmethod
     def _build_tool_initial_prompt(user_content: str) -> str:
+        persistence_required = ChatService._tool_request_needs_persistence(user_content)
+        alerts_required = ChatService._tool_request_needs_alerts(user_content)
+        schedule_required = ChatService._tool_request_needs_schedule(user_content)
+        conditional_requirements: list[str] = []
+        if persistence_required:
+            conditional_requirements.extend(
+                [
+                    "- If the tool needs persistent application data, reuse the platform MongoDB instead of adding a separate database service.\n",
+                    "- Read Mongo connection settings from environment variables `MONGO_URI` and `MONGO_DB_NAME`.\n",
+                    "- If MongoDB is temporarily unavailable during startup, do not crash the HTTP server; use bounded retries or lazy initialization so `/status` can still respond while dependencies recover.\n",
+                ]
+            )
+        else:
+            conditional_requirements.append("- Do not add MongoDB/database persistence unless the requested workflow actually needs durable state.\n")
+        if alerts_required:
+            conditional_requirements.extend(
+                [
+                    "- Use Brevo for email alerts unless the user explicitly requested another provider.\n",
+                    "- Keep alert sending idempotent so repeated runs do not spam duplicates unless explicitly requested.\n",
+                ]
+            )
+        else:
+            conditional_requirements.append("- Do not add Brevo/email alert plumbing unless alerts or notifications are part of the request.\n")
+        if schedule_required:
+            conditional_requirements.append("- Implement scheduled/polling jobs with bounded retries and overlap protection.\n")
+        else:
+            conditional_requirements.append("- Do not add scheduler/cron workers unless the request includes background or repeated execution.\n")
+
         return (
             "Build a production-ready tool based on this request:\n"
             f"{user_content}\n\n"
             "Requirements:\n"
+            "- Work like a senior software operator: inspect the request, implement the exact workflow, run verification, and fix issues before handoff.\n"
             "- Clarify requirements first. Convert requirements into explicit acceptance criteria and list assumptions before implementation.\n"
             "- Save the clarified requirements in `docs/requirements.md` and save concrete test cases in `docs/test-cases.md` before implementation.\n"
             "- Preserve every explicit user requirement from the request. Do not summarize away fields, constraints, integrations, or must-not rules.\n"
             "- Create a checklist in `docs/requirements.md` that maps each user requirement to the code/tests that satisfy it.\n"
             "- Implement the exact requested workflow; avoid unrelated extra features.\n"
+            "- Do not add generic dashboards, auth, databases, schedulers, alerts, sample catalogs, or placeholder features unless they are required by the user request.\n"
             "- Convert the request into concrete acceptance criteria and satisfy each criterion in code/tests.\n"
             "- Follow TDD: write/update failing tests first, then implement backend changes until tests pass.\n"
             "- Choose a concise, domain-meaningful product name; avoid generic names based on filler words from the prompt.\n"
             "- Use Python 3.11.\n"
             "- Include a usable UI unless explicitly backend-only.\n"
             "- Make the UI feel modern and polished.\n"
-            "- Default the UI to a dark theme unless the user explicitly requests another theme.\n"
+            "- Choose a visual direction that fits the tool domain and request; do not force a dark theme unless it fits or is requested.\n"
             "- Default all user-facing dates, times, schedules, and cron behavior to IST using the `Asia/Kolkata` timezone unless the user explicitly requests another timezone.\n"
             "- Configure the generated app/runtime to honor `TZ=Asia/Kolkata` by default and keep frontend/backend time handling aligned with that timezone.\n"
             "- Prefer a lightweight UI stack (server-rendered/static HTML + JS) unless a heavier frontend framework is explicitly requested.\n"
@@ -3159,9 +3343,7 @@ class ChatService:
             "- Add a lightweight mock deployment validation step for docker-compose/runtime wiring.\n"
             "- Before launch, verify backend endpoints using real API calls; if scraping/external data is involved, cross-check sampled API output with live web search evidence and fix mismatches before publish.\n"
             "- For live-data tools, do not ship placeholder or stale sample datasets as the primary source of truth.\n"
-            "- If the tool needs persistent application data, reuse the platform MongoDB instead of adding a separate database service.\n"
-            "- Read Mongo connection settings from environment variables `MONGO_URI` and `MONGO_DB_NAME`.\n"
-            "- If MongoDB is temporarily unavailable during startup, do not crash the HTTP server; use bounded retries or lazy initialization so `/status` can still respond while dependencies recover.\n"
+            f"{''.join(conditional_requirements)}"
             "- Keep implementation practical and maintainable."
         )
 
@@ -3204,6 +3386,7 @@ class ChatService:
             f"Change request:\n{user_content}\n\n"
             f"{checklist_section}"
             "Requirements:\n"
+            "- Work like a senior software operator: inspect existing files, understand current behavior, make the smallest complete change, run tests/runtime checks, and fix regressions before handoff.\n"
             "- Clarify updated requirements and assumptions before changing implementation.\n"
             "- Keep `docs/requirements.md` and `docs/test-cases.md` in sync with the requested change before implementation.\n"
             "- Preserve all previously working requirements unless this change request explicitly replaces them.\n"
@@ -3211,19 +3394,95 @@ class ChatService:
             "- Implement exactly what the user asked in this change request.\n"
             "- Treat this as a focused modification request: make the smallest code change that satisfies it.\n"
             "- Preserve existing working behavior unless this request explicitly changes it.\n"
-            "- Keep the UI modern and polished; default to a dark theme unless this change request explicitly asks for another theme.\n"
+            "- Keep the UI modern and polished; preserve the existing visual direction unless this change request explicitly asks for another theme.\n"
             "- Keep user-facing dates, times, schedules, and cron behavior on IST using the `Asia/Kolkata` timezone unless this change request explicitly asks for another timezone.\n"
             "- Preserve or add runtime timezone configuration so the tool defaults to `TZ=Asia/Kolkata`.\n"
             "- Preserve or add `requirements.txt` plus pytest-discoverable tests under `tests/` so `python -m pytest -q` still passes.\n"
             "- Preserve `GET /status` returning exactly `{\"status\":\"ok\"}`.\n"
-            "- Keep Mongo persistence wired through `MONGO_URI` and `MONGO_DB_NAME`; do not add a separate database service.\n"
-            "- Do not let synchronous Mongo startup failures crash the HTTP server; keep `/status` available while dependencies reconnect.\n"
+            "- Preserve existing Mongo persistence if the tool already uses it; do not add a separate database service.\n"
+            "- If Mongo is used, keep it wired through `MONGO_URI` and `MONGO_DB_NAME` and keep `/status` available while dependencies reconnect.\n"
             "- Do not rewrite existing scraping/data-source logic unless the change request explicitly requires it.\n"
+            "- Do not introduce new databases, alert providers, schedulers, auth, or heavy frontend frameworks unless this change request explicitly requires them.\n"
             "- Keep the UI/runtime stack lightweight unless the request explicitly requires a heavier frontend framework.\n"
             "- Follow TDD: update/add tests first for the changed behavior and likely regressions, then implement backend changes.\n"
             "- Keep Docker/runtime compatibility intact, including required health/status checks.\n"
             "- Re-verify runtime APIs after the change; for scraping/live-data flows, compare sampled API results with live web evidence before publish."
         )
+
+    @staticmethod
+    def _tool_request_needs_persistence(user_content: str) -> bool:
+        lowered = user_content.lower()
+        if ChatService._tool_request_has_opt_out(
+            lowered,
+            ("database", "db", "mongodb", "mongo", "persistence", "persistent", "storage"),
+        ):
+            return False
+        return any(
+            marker in lowered
+            for marker in (
+                "persist",
+                "persistent",
+                "database",
+                "db",
+                "mongodb",
+                "mongo",
+                "save",
+                "saved",
+                "store",
+                "history",
+                "watcher",
+                "watchlist",
+                "tracker",
+                "alert",
+                "login",
+                "account",
+                "remember",
+            )
+        )
+
+    @staticmethod
+    def _tool_request_needs_alerts(user_content: str) -> bool:
+        lowered = user_content.lower()
+        if ChatService._tool_request_has_opt_out(
+            lowered,
+            ("alert", "alerts", "notification", "notifications", "email", "mail", "brevo"),
+        ):
+            return False
+        return any(
+            marker in lowered
+            for marker in ("alert", "alerts", "notify", "notification", "email", "mail", "brevo", "sendinblue", "webhook")
+        )
+
+    @staticmethod
+    def _tool_request_needs_schedule(user_content: str) -> bool:
+        lowered = user_content.lower()
+        if ChatService._tool_request_has_opt_out(
+            lowered,
+            ("scheduler", "schedule", "scheduling", "cron", "polling", "background job"),
+        ):
+            return False
+        return any(
+            marker in lowered
+            for marker in ("cron", "schedule", "scheduled", "poll", "polling", "interval", "every ", "daily", "hourly", "background job")
+        )
+
+    @staticmethod
+    def _tool_request_has_opt_out(lowered_prompt: str, terms: tuple[str, ...]) -> bool:
+        for term in terms:
+            escaped = re.escape(term)
+            patterns = (
+                rf"\bno\b[^.;\n]{{0,120}}\b{escaped}\b",
+                rf"\bwithout\b[^.;\n]{{0,120}}\b{escaped}\b",
+                rf"\bdo\s+not\s+(?:use|include|add)\b[^.;\n]{{0,120}}\b{escaped}\b",
+                rf"\bnot\s+(?:use|using|include|including|add|adding)\b[^.;\n]{{0,120}}\b{escaped}\b",
+                rf"\bno\s+{escaped}\b",
+                rf"\bwithout\s+{escaped}\b",
+                rf"\bnot\s+(?:use|using|include|including|add|adding)\s+(?:a\s+|an\s+|any\s+)?{escaped}\b",
+                rf"\bdo\s+not\s+(?:use|include|add)\s+(?:a\s+|an\s+|any\s+)?{escaped}\b",
+            )
+            if any(re.search(pattern, lowered_prompt) for pattern in patterns):
+                return True
+        return False
 
     @classmethod
     def _build_modification_must_implement_checklist(cls, user_content: str) -> list[str]:
@@ -3459,6 +3718,36 @@ class ChatService:
         return True
 
     @classmethod
+    def _is_general_browser_recording_request(cls, user_content: str) -> bool:
+        lowered = re.sub(r"\s+", " ", user_content or "").strip().lower()
+        if not lowered:
+            return False
+
+        has_action = any(marker in lowered for marker in cls._GENERAL_BROWSER_RECORDING_ACTION_MARKERS)
+        has_target_marker = any(marker in lowered for marker in cls._GENERAL_BROWSER_RECORDING_TARGET_MARKERS)
+        target_url = cls._extract_screenshot_target_url(user_content)
+        return bool(has_action and has_target_marker and target_url)
+
+    @classmethod
+    def _should_route_to_browser_recording(cls, mode: str, user_content: str) -> bool:
+        normalized_mode = cls._normalize_mode(mode)
+        if normalized_mode not in {"general", "operator", "tool_builder"}:
+            return False
+        if not cls._is_general_browser_recording_request(user_content):
+            return False
+
+        if normalized_mode in {"operator", "tool_builder"}:
+            # Keep operator/build prompts from being intercepted unless the
+            # user is clearly asking for a concrete browser recording.
+            lowered = re.sub(r"\s+", " ", user_content or "").strip().lower()
+            if "video" not in lowered and "recording" not in lowered and "browser session" not in lowered:
+                return False
+            if not cls._extract_screenshot_target_url(user_content):
+                return False
+
+        return True
+
+    @classmethod
     def _extract_screenshot_target_url(cls, user_content: str) -> str | None:
         text = (user_content or "").strip()
         if not text:
@@ -3539,6 +3828,13 @@ class ChatService:
         candidate = re.sub(r"\s+", " ", raw_value or "").strip()
         if not candidate:
             return ""
+        candidate = re.split(r"[.!?]", candidate, maxsplit=1)[0]
+        candidate = re.split(
+            r"\b(?:and\s+)?(?:record|capture|screenshot|screen\s+shot|snapshot)\b",
+            candidate,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
         candidate = re.split(r"\b(?:and\s+give|give|show|with|please)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0]
         candidate = candidate.strip(" \"'`.,;:!?()[]{}")
         return candidate[:120].strip()
@@ -3588,6 +3884,22 @@ class ChatService:
         _ = user_content
         # Force viewport screenshots so rendered outputs remain landscape.
         return False
+
+    @classmethod
+    def _extract_browser_recording_duration_seconds(cls, user_content: str) -> int:
+        default_seconds = 10
+        match = cls._BROWSER_RECORDING_DURATION_RE.search(user_content or "")
+        if not match:
+            return default_seconds
+
+        try:
+            amount = int(match.group(1))
+        except (TypeError, ValueError):
+            return default_seconds
+
+        unit_text = str(match.group(2) or "").lower()
+        seconds = amount * 60 if unit_text.startswith(("m", "min")) else amount
+        return max(1, min(120, seconds))
 
     def _run_general_browser_screenshot_task(
         self,
@@ -3643,6 +3955,23 @@ class ChatService:
                 "exitCode": 1,
             }
 
+        if bool(capture.get("isBlocked")):
+            block_reason = str(capture.get("blockReason") or "").strip()
+            message = (
+                "The page loaded, but it appears to require human verification or is blocking automated browsing. "
+                "I cannot bypass CAPTCHA or bot-detection systems. "
+                "A safe workaround is to use an official API/export, open the page in a user-controlled browser session, "
+                "or complete verification manually and retry with a permitted authenticated/profile-based flow."
+            )
+            if block_reason:
+                message = f"{message}\n\nDetected signal: {block_reason}"
+            return {
+                "assistantText": message,
+                "rawLogs": f"Screenshot blocked for {target_url}: {block_reason or 'bot/captcha challenge detected'}",
+                "success": False,
+                "exitCode": 1,
+            }
+
         content_type = str(capture.get("contentType") or "image/png").strip() or "image/png"
         page_title = str(capture.get("pageTitle") or "").strip()
         final_url = str(capture.get("finalUrl") or target_url).strip() or target_url
@@ -3685,6 +4014,123 @@ class ChatService:
             "rawLogs": (
                 "website screenshot captured via dedicated browser container "
                 f"({width}x{height}, fullPage={str(full_page).lower()}, url={final_url})"
+            ),
+            "success": True,
+            "exitCode": 0,
+        }
+
+    def _run_general_browser_recording_task(
+        self,
+        session_id: str,
+        user_content: str,
+    ) -> dict[str, Any]:
+        if self._browser_screenshot_service is None:
+            return {
+                "assistantText": (
+                    "I could not record a browser session right now because the browser screenshot service "
+                    "is not configured."
+                ),
+                "rawLogs": "Browser screenshot service is not configured in backend runtime.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        target_url = self._extract_screenshot_target_url(user_content)
+        if not target_url:
+            return {
+                "assistantText": (
+                    "I can record that, but I need a valid website URL. "
+                    "Please include a full link like `https://example.com`."
+                ),
+                "rawLogs": "Browser recording request did not include a valid URL.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        width, height = self._extract_screenshot_dimensions(user_content)
+        duration_seconds = self._extract_browser_recording_duration_seconds(user_content)
+        try:
+            recording = self._browser_screenshot_service.record_browser_session(
+                url=target_url,
+                width=width,
+                height=height,
+                duration_seconds=duration_seconds,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return {
+                "assistantText": f"I could not record the browser session right now. {exc}",
+                "rawLogs": f"Browser recording failed for {target_url}: {exc}",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        video_bytes = recording.get("videoBytes")
+        if not isinstance(video_bytes, bytes) or not video_bytes:
+            return {
+                "assistantText": "I could not record a usable video from that URL.",
+                "rawLogs": f"Browser recording service returned invalid video payload for {target_url}.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        if bool(recording.get("isBlocked")):
+            block_reason = str(recording.get("blockReason") or "").strip()
+            message = (
+                "The page loaded, but it appears to require human verification or is blocking automated browsing. "
+                "I cannot bypass CAPTCHA or bot-detection systems. "
+                "A safe workaround is to use an official API/export, open the page in a user-controlled browser session, "
+                "or complete verification manually and retry with a permitted authenticated/profile-based flow."
+            )
+            if block_reason:
+                message = f"{message}\n\nDetected signal: {block_reason}"
+            return {
+                "assistantText": message,
+                "rawLogs": f"Browser recording blocked for {target_url}: {block_reason or 'bot/captcha challenge detected'}",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        content_type = str(recording.get("contentType") or "video/webm").strip() or "video/webm"
+        page_title = str(recording.get("pageTitle") or "").strip()
+        final_url = str(recording.get("finalUrl") or target_url).strip() or target_url
+        saved_duration = int(recording.get("durationSeconds") or duration_seconds)
+        safe_title = re.sub(r"[^a-zA-Z0-9._-]+", "-", (page_title or "browser-session")).strip("-").lower()
+        file_name = f"browser-recording-{safe_title or 'session'}.webm"
+
+        try:
+            saved = self._codex_service.save_chat_attachment(
+                session_id=session_id,
+                file_name=file_name,
+                content_type=content_type,
+                data=video_bytes,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            return {
+                "assistantText": f"I recorded the browser session but could not store it in chat attachments. {exc}",
+                "rawLogs": f"Browser recording captured for {target_url} but attachment save failed: {exc}",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        attachment_id = str(saved.get("id") or "").strip() if isinstance(saved, dict) else ""
+        if not attachment_id:
+            return {
+                "assistantText": "I recorded the browser session but could not resolve the stored attachment.",
+                "rawLogs": f"Attachment ID missing after browser recording for {target_url}.",
+                "success": False,
+                "exitCode": 1,
+            }
+
+        video_url = f"/chat/sessions/{session_id}/attachments/{attachment_id}"
+        assistant_text = f"Recorded {saved_duration}s of the browser session: [{file_name}]({video_url})"
+        if final_url and final_url != target_url:
+            assistant_text = f"{assistant_text}\n\nRecorded from: {final_url}"
+
+        return {
+            "assistantText": assistant_text,
+            "rawLogs": (
+                "browser session recorded via dedicated browser container "
+                f"({width}x{height}, durationSeconds={saved_duration}, url={final_url})"
             ),
             "success": True,
             "exitCode": 0,
@@ -3923,6 +4369,8 @@ class ChatService:
                 continue
             if self._is_noise_line(stripped):
                 continue
+            if self._is_codex_diagnostic_line(stripped):
+                continue
             if re.fullmatch(r"[\d,]+", stripped):
                 continue
             filtered_lines.append(stripped)
@@ -3982,6 +4430,15 @@ class ChatService:
         )
 
     @staticmethod
+    def _is_codex_diagnostic_line(stripped: str) -> bool:
+        lowered = stripped.lower()
+        return (
+            "codex_core::session" in lowered
+            or "failed to record rollout items" in lowered
+            or re.match(r"^\d{4}-\d{2}-\d{2}t\S+\s+(error|warn)\s+codex", lowered) is not None
+        )
+
+    @staticmethod
     def _find_codex_marker(lines: list[str]) -> int | None:
         for index in range(len(lines) - 1, -1, -1):
             if lines[index].strip().lower() == "codex":
@@ -3995,6 +4452,8 @@ class ChatService:
             if stripped and self._is_noise_line(stripped):
                 if stripped.lower().startswith("tokens used"):
                     break
+                continue
+            if stripped and self._is_codex_diagnostic_line(stripped):
                 continue
             lowered = stripped.lower()
             if lowered == "tokens used":
@@ -4023,8 +4482,9 @@ class ChatService:
                 "Provide implementation-focused guidance, testing steps, and practical tradeoffs."
             )
         return (
-            "You are a helpful engineering assistant for a self-hosted AI tool platform. "
-            "Be precise, practical, and honest about uncertainty. "
-            "Answer directly with final results and avoid narrating intermediate checks. "
+            "You are ChatGPT, a helpful, friendly general-purpose assistant. "
+            "Be natural, concise, and honest about uncertainty. "
+            "For casual greetings or small talk, reply conversationally without mentioning tools or logs. "
+            "Answer directly and avoid narrating intermediate checks. "
             "When users request image creation or editing, generate the image instead of only describing it."
         )

@@ -230,6 +230,52 @@ def test_sanitize_operator_output_keeps_code_when_diff_requested() -> None:
     assert "+ print('hello')" in sanitized
 
 
+def test_sanitize_operator_output_removes_unfenced_patch_noise_by_default() -> None:
+    output = (
+        "Added a live search box in the toolbar that filters the current folder view by name, "
+        "and Cmd+K now focuses it.\n\n"
+        "Rebuilt and restarted the container as filemanager. Health check passed on port 3088.\n\n"
+        "Modified files:\n"
+        "/host/srv/filemanager/public/index.html\n"
+        "/host/srv/filemanager/public/styles.css\n"
+        "/host/srv/filemanager/public/app.js\n"
+        "rootPath: '/srv',\n"
+        "searchQuery: '', selectedPaths: new Set(), entries: [],\n"
+        "+const searchInputEl = document.getElementById('searchInput');\n"
+        "+function getFilteredEntries() {\n"
+        "const query = state.searchQuery.trim().toLowerCase();\n"
+        "<td colspan=\"4\">No matches found.</td>\n"
+        ".search-box {\n"
+        "display: inline-flex;\n"
+        "}\n"
+    )
+
+    sanitized = ChatService._sanitize_operator_output("Add search and support Cmd+K", output)
+
+    assert "Added a live search box" in sanitized
+    assert "Health check passed" in sanitized
+    assert "Modified files" not in sanitized
+    assert "/host/srv/filemanager" not in sanitized
+    assert "searchInputEl" not in sanitized
+    assert "getFilteredEntries" not in sanitized
+    assert ".search-box" not in sanitized
+
+
+def test_sanitize_operator_output_still_filters_code_when_user_says_verify() -> None:
+    output = (
+        "Fixed the issue and verified the app starts.\n\n"
+        "Modified files:\n"
+        "/srv/app.js\n"
+        "const noisy = true;\n"
+    )
+
+    sanitized = ChatService._sanitize_operator_output("Fix it and verify it works", output)
+
+    assert "Fixed the issue" in sanitized
+    assert "const noisy" not in sanitized
+    assert "/srv/app.js" not in sanitized
+
+
 def test_sanitize_assistant_output_collapses_consecutive_duplicate_lines() -> None:
     sanitized = ChatService._sanitize_assistant_output(
         "Hey! What can I help you with today?\nHey! What can I help you with today?"
@@ -244,6 +290,33 @@ def test_sanitize_assistant_output_preserves_consecutive_duplicate_lines_in_code
     )
 
     assert "print('x')\nprint('x')" in sanitized
+
+
+def test_sanitize_assistant_output_removes_codex_rollout_diagnostic() -> None:
+    sanitized = ChatService._sanitize_assistant_output(
+        "Heyy. What can I help you with?\n"
+        "2026-04-25T11:20:48.916142Z ERROR codex_core::session: "
+        "failed to record rollout items: thread 019dc45e-e03e-7393-9af9-22086de3edca not found"
+    )
+
+    assert sanitized == "Heyy. What can I help you with?"
+
+
+def test_extract_assistant_text_ignores_codex_diagnostic_log_line() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    extracted = service._extract_assistant_text(  # pylint: disable=protected-access
+        "Codex\n"
+        "Heyy. What can I help you with?\n"
+        "2026-04-25T11:20:48.916142Z ERROR codex_core::session: failed to record rollout items\n"
+        "Tokens used: 10 input, 5 output"
+    )
+
+    assert extracted == "Heyy. What can I help you with?"
 
 
 def test_build_chat_prompt_general_mode_includes_image_generation_instruction() -> None:
@@ -267,6 +340,51 @@ def test_build_chat_prompt_general_mode_includes_image_generation_instruction() 
 
     assert "generate or edit an image" in prompt
     assert "Markdown image output" in prompt
+    assert "You are ChatGPT" in prompt
+
+
+def test_build_chat_prompt_includes_memory_context_when_available() -> None:
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+    )
+
+    prompt = service._build_chat_prompt(  # pylint: disable=protected-access
+        mode="general",
+        messages=[{"id": "m-1", "role": "user", "content": "Hello", "metadata": {}}],
+        memory_context="# Agent Memory\n\n## Remembered Notes\n- Use compact summaries.",
+    )
+
+    assert "Saved agent memory from memory.md" in prompt
+    assert "Use compact summaries" in prompt
+    assert prompt.index("Saved agent memory") < prompt.index("Conversation:")
+
+
+def test_send_message_updates_memory_from_user_message() -> None:
+    session_repository = _StubSessionRepository()
+    session_repository._session["mode"] = "general"  # pylint: disable=protected-access
+    message_repository = _StubMessageRepository()
+    memory_service = Mock()
+    memory_service.prompt_context.return_value = ""
+
+    service = ChatService(
+        session_repository=session_repository,  # type: ignore[arg-type]
+        message_repository=message_repository,  # type: ignore[arg-type]
+        codex_service=_StubCodexService(),  # type: ignore[arg-type]
+        memory_service=memory_service,  # type: ignore[arg-type]
+    )
+
+    _user_message, _assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="Remember that I like compact summaries.",
+    )
+
+    assert error is None
+    memory_service.update_from_user_message.assert_called_once_with(
+        content="Remember that I like compact summaries.",
+        mode="general",
+    )
 
 
 def test_hydrate_assistant_generated_images_rewrites_local_markdown_image_paths() -> None:
@@ -371,7 +489,7 @@ def test_build_tool_modification_prompt_includes_prior_tool_context() -> None:
     assert "Add CSV export for job history." in prompt
     assert "focused modification request" in prompt
     assert "Do not rewrite existing scraping/data-source logic" in prompt
-    assert "default to a dark theme" in prompt
+    assert "preserve the existing visual direction" in prompt
     assert "Asia/Kolkata" in prompt
     assert "TZ=Asia/Kolkata" in prompt
 
@@ -398,10 +516,10 @@ def test_finalize_tool_builder_request_preserves_structured_requirements() -> No
     assert "15 minutes" in finalized
 
 
-def test_build_tool_initial_prompt_defaults_ui_to_dark_theme() -> None:
+def test_build_tool_initial_prompt_uses_domain_appropriate_ui_theme() -> None:
     prompt = ChatService._build_tool_initial_prompt("Build a monitoring dashboard.")
     assert "Make the UI feel modern and polished." in prompt
-    assert "Default the UI to a dark theme" in prompt
+    assert "Choose a visual direction that fits the tool domain" in prompt
     assert "Asia/Kolkata" in prompt
     assert "TZ=Asia/Kolkata" in prompt
 
@@ -415,6 +533,17 @@ def test_build_tool_initial_prompt_requires_python_pytest_and_mongo_contract() -
     assert "Place tests in `tests/`" in prompt
     assert "`MONGO_URI` and `MONGO_DB_NAME`" in prompt
     assert "do not crash the HTTP server" in prompt
+
+
+def test_build_tool_initial_prompt_does_not_force_platform_integrations_for_simple_tools() -> None:
+    prompt = ChatService._build_tool_initial_prompt(
+        "Build a simple unit converter with a clean web UI and no database, alerts, scheduler, or external API."
+    )
+
+    assert "Do not add MongoDB/database persistence" in prompt
+    assert "Do not add Brevo/email alert plumbing" in prompt
+    assert "Do not add scheduler/cron workers" in prompt
+    assert "Use Brevo for email alerts" not in prompt
 
 
 def test_build_tool_modification_prompt_preserves_runtime_contracts() -> None:
@@ -432,8 +561,9 @@ def test_build_tool_modification_prompt_preserves_runtime_contracts() -> None:
 
     assert "requirements.txt" in prompt
     assert "python -m pytest -q" in prompt
+    assert "Preserve existing Mongo persistence" in prompt
     assert "`MONGO_URI` and `MONGO_DB_NAME`" in prompt
-    assert "Do not let synchronous Mongo startup failures crash the HTTP server" in prompt
+    assert "keep `/status` available while dependencies reconnect" in prompt
 
 
 def test_build_tool_modification_prompt_includes_critical_change_checklist() -> None:
@@ -1094,6 +1224,12 @@ def test_extract_screenshot_target_url_infers_amazon_search_url() -> None:
     assert target == "https://www.amazon.com/s?k=shoes"
 
 
+def test_extract_screenshot_target_url_infers_site_first_amazon_search_url() -> None:
+    prompt = "can you search for amazon for tv cabinet. record and give the video"
+    target = ChatService._extract_screenshot_target_url(prompt)
+    assert target == "https://www.amazon.com/s?k=tv+cabinet"
+
+
 def test_extract_screenshot_target_url_infers_brave_image_search_url() -> None:
     prompt = "search for deepika padukone on brave image search and give me screenshot"
     target = ChatService._extract_screenshot_target_url(prompt)
@@ -1134,6 +1270,17 @@ def test_is_full_page_screenshot_requested_is_disabled_to_preserve_landscape() -
     assert ChatService._is_full_page_screenshot_requested("capture screenshot") is False
 
 
+def test_is_general_browser_recording_request_requires_url() -> None:
+    assert ChatService._is_general_browser_recording_request("record this browser session as a video") is False
+    assert ChatService._is_general_browser_recording_request("record a 5 second video of https://example.com") is True
+    assert ChatService._is_general_browser_recording_request("search for amazon for tv cabinet. record and give the video") is True
+
+
+def test_extract_browser_recording_duration_seconds_caps_minutes() -> None:
+    assert ChatService._extract_browser_recording_duration_seconds("record a 2 minute video of https://example.com") == 120
+    assert ChatService._extract_browser_recording_duration_seconds("record 8s video of https://example.com") == 8
+
+
 def test_run_general_browser_screenshot_task_returns_clickable_image_markdown() -> None:
     codex_service = Mock()
     codex_service.save_chat_attachment.return_value = {
@@ -1171,6 +1318,194 @@ def test_run_general_browser_screenshot_task_returns_clickable_image_markdown() 
         result["assistantText"]
         == "[![Example Domain](/chat/sessions/session-1/attachments/att-1)](/chat/sessions/session-1/attachments/att-1)"
     )
+
+
+def test_run_general_browser_screenshot_task_reports_bot_challenge_without_saving_image() -> None:
+    codex_service = Mock()
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.capture_screenshot.return_value = {
+        "imageBytes": b"\x89PNG\r\n\x1a\nfake",
+        "contentType": "image/png",
+        "pageTitle": "Just a moment...",
+        "finalUrl": "https://example.com/",
+        "isBlocked": True,
+        "blockReason": "Page appears to require human verification.",
+        "width": 1366,
+        "height": 900,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+    )
+
+    result = service._run_general_browser_screenshot_task(  # pylint: disable=protected-access
+        session_id="session-1",
+        user_content="capture screenshot of https://example.com",
+    )
+
+    assert result["success"] is False
+    assert "cannot bypass CAPTCHA" in result["assistantText"]
+    assert "human verification" in result["assistantText"]
+    codex_service.save_chat_attachment.assert_not_called()
+
+
+def test_run_general_browser_recording_task_returns_clickable_video_link() -> None:
+    codex_service = Mock()
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "browser-recording-example-domain.webm",
+        "contentType": "video/webm",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.record_browser_session.return_value = {
+        "videoBytes": b"fake-webm",
+        "contentType": "video/webm",
+        "pageTitle": "Example Domain",
+        "finalUrl": "https://example.com/",
+        "durationSeconds": 8,
+        "width": 1366,
+        "height": 900,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+
+    result = service._run_general_browser_recording_task(  # pylint: disable=protected-access
+        session_id="session-1",
+        user_content="record an 8 second video of https://example.com",
+    )
+
+    assert result["success"] is True
+    assert "Recorded 8s" in result["assistantText"]
+    assert "(/chat/sessions/session-1/attachments/att-1)" in result["assistantText"]
+    browser_screenshot_service.record_browser_session.assert_called_once_with(
+        url="https://example.com/",
+        width=1366,
+        height=900,
+        duration_seconds=8,
+    )
+    codex_service.save_chat_attachment.assert_called_once_with(
+        session_id="session-1",
+        file_name="browser-recording-example-domain.webm",
+        content_type="video/webm",
+        data=b"fake-webm",
+    )
+
+
+def test_run_general_browser_recording_task_reports_bot_challenge_without_saving_video() -> None:
+    codex_service = Mock()
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.record_browser_session.return_value = {
+        "videoBytes": b"fake-webm",
+        "contentType": "video/webm",
+        "pageTitle": "Just a moment...",
+        "finalUrl": "https://example.com/",
+        "isBlocked": True,
+        "blockReason": "Page appears to require human verification.",
+        "durationSeconds": 8,
+        "width": 1366,
+        "height": 900,
+    }
+    service = ChatService(
+        session_repository=Mock(),
+        message_repository=Mock(),
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+    )
+
+    result = service._run_general_browser_recording_task(  # pylint: disable=protected-access
+        session_id="session-1",
+        user_content="record an 8 second video of https://example.com",
+    )
+
+    assert result["success"] is False
+    assert "cannot bypass CAPTCHA" in result["assistantText"]
+    codex_service.save_chat_attachment.assert_not_called()
+
+
+def test_send_message_general_recording_request_uses_browser_recording_service() -> None:
+    session_repository = Mock()
+    session_repository.get_by_id.return_value = {
+        "id": "session-1",
+        "title": "General Session",
+        "mode": "general",
+        "model": "gpt-5.4",
+    }
+    message_repository = Mock()
+    message_repository.list_recent_for_session.side_effect = [[], []]
+    message_repository.create.side_effect = [
+        {
+            "id": "user-1",
+            "sessionId": "session-1",
+            "role": "user",
+            "content": "record a 6 second video of https://example.com",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+        {
+            "id": "assistant-1",
+            "sessionId": "session-1",
+            "role": "assistant",
+            "content": "[browser-recording-example-domain.webm](/chat/sessions/session-1/attachments/att-1)",
+            "metadata": {},
+            "createdAt": now_ist(),
+        },
+    ]
+    codex_service = Mock()
+    codex_service.is_supported_chat_model.return_value = True
+    codex_service.default_chat_model.return_value = "gpt-5.4"
+    codex_service.save_chat_attachment.return_value = {
+        "id": "att-1",
+        "fileName": "browser-recording-example-domain.webm",
+        "contentType": "video/webm",
+        "size": 1024,
+        "containerPath": "/workspace/chat-session-1/attachments/att-1",
+        "hostPath": "/tmp/chat-session-1/attachments/att-1",
+    }
+    browser_screenshot_service = Mock()
+    browser_screenshot_service.record_browser_session.return_value = {
+        "videoBytes": b"fake-webm",
+        "contentType": "video/webm",
+        "pageTitle": "Example Domain",
+        "finalUrl": "https://example.com/",
+        "durationSeconds": 6,
+        "width": 1366,
+        "height": 900,
+    }
+
+    service = ChatService(
+        session_repository=session_repository,
+        message_repository=message_repository,
+        codex_service=codex_service,  # type: ignore[arg-type]
+        browser_screenshot_service=browser_screenshot_service,  # type: ignore[arg-type]
+        chat_execution_log_repository=Mock(),  # type: ignore[arg-type]
+    )
+
+    _user_message, assistant_message, error = service.send_message(
+        session_id="session-1",
+        content="record a 6 second video of https://example.com",
+    )
+
+    assert error is None
+    assert assistant_message is not None
+    browser_screenshot_service.record_browser_session.assert_called_once_with(
+        url="https://example.com/",
+        width=1366,
+        height=900,
+        duration_seconds=6,
+    )
+    browser_screenshot_service.capture_screenshot.assert_not_called()
+    codex_service.save_chat_attachment.assert_called_once()
+    codex_service.run_chat.assert_not_called()
 
 
 def test_send_message_general_screenshot_request_uses_browser_screenshot_service() -> None:

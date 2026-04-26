@@ -13,6 +13,7 @@ class _StubDockerService:
         self._results = list(results)
         self.calls: int = 0
         self.last_extra_environment: dict[str, str] | None = None
+        self.last_shell_command: str | None = None
 
     def ensure_job_workspace(self, request_id: str) -> tuple[Path, str]:
         host_job_path = self._root / request_id
@@ -29,8 +30,9 @@ class _StubDockerService:
         working_dir_override: str | None = None,
         tty: bool = False,
     ) -> CommandResult:
-        del request_id, shell_command, timeout_seconds, extra_volumes, working_dir_override, tty
+        del request_id, timeout_seconds, extra_volumes, working_dir_override, tty
         self.calls += 1
+        self.last_shell_command = shell_command
         self.last_extra_environment = extra_environment
         if self._results:
             return self._results.pop(0)
@@ -104,6 +106,20 @@ def test_run_chat_retries_transient_transport_failure_then_succeeds(tmp_path) ->
     assert docker_service.calls == 2
     assert "Recovered after transient Codex transport issue on attempt 2/3." in result.logs
     assert "Broken pipe (os error 32)" in result.logs
+
+
+def test_run_chat_uses_ephemeral_json_cli_output_for_clean_general_chat(tmp_path) -> None:
+    docker_service = _StubDockerService(
+        root=tmp_path,
+        results=[CommandResult(success=True, exit_code=0, logs="assistant: ok")],
+    )
+    service = CodexService(settings=_settings(retries=0, delay_seconds=0), docker_service=docker_service)
+
+    result = service.run_chat(session_id="session-1", prompt="hello")
+
+    assert result.success is True
+    assert docker_service.last_shell_command is not None
+    assert "codex exec --json --color never --ephemeral" in docker_service.last_shell_command
 
 
 def test_run_chat_does_not_retry_non_transient_failures(tmp_path) -> None:

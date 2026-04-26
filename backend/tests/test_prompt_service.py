@@ -50,13 +50,38 @@ def test_refine_prompt_requires_shared_mongo_for_persistent_tools() -> None:
     assert "reuse the platform MongoDB" in refined
     assert "`MONGO_URI` and `MONGO_DB_NAME`" in refined
     assert "Create tool-specific collections" in refined
+    assert "Use Brevo for email alerts" in refined
 
 
-def test_refine_prompt_defaults_ui_to_modern_dark_theme() -> None:
+def test_refine_prompt_avoids_unrelated_platform_integrations_for_simple_tools() -> None:
+    refined = PromptService().refine_prompt(
+        "Build a simple unit converter with a clean web UI and no database, alerts, scheduler, or external API."
+    )
+
+    assert "Do not add MongoDB/database persistence" in refined
+    assert "Do not add Brevo/email alert plumbing" in refined
+    assert "Do not add scheduler/cron workers" in refined
+    assert "reuse the platform MongoDB" not in refined
+    assert "Use Brevo for email alerts" not in refined
+
+
+def test_refine_prompt_handles_do_not_add_comma_list_opt_outs() -> None:
+    refined = PromptService().refine_prompt(
+        "Build a habit tracker with MongoDB. Do not add email alerts, external APIs, authentication, or scheduler jobs."
+    )
+
+    assert "reuse the platform MongoDB" in refined
+    assert "Do not add Brevo/email alert plumbing" in refined
+    assert "Do not add scheduler/cron workers" in refined
+    assert "Use Brevo for email alerts" not in refined
+    assert "Implement scheduler/polling behavior" not in refined
+
+
+def test_refine_prompt_defaults_ui_to_modern_domain_appropriate_theme() -> None:
     refined = PromptService().refine_prompt("Build a dashboard for monitoring background jobs.")
 
     assert "modern, polished, and production-ready" in refined
-    assert "Default generated UIs to a dark theme" in refined
+    assert "Choose a visual direction that fits the tool domain" in refined
 
 
 def test_refine_prompt_defaults_timezone_to_ist() -> None:

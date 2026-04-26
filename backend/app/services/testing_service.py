@@ -100,6 +100,14 @@ class TestingService:
         re.compile(r"urllib\.request\.", flags=re.IGNORECASE),
         re.compile(r"fetch\(\s*[\"']https?://", flags=re.IGNORECASE),
     )
+    _DYNAMIC_DATA_OPT_OUT_PATTERNS = (
+        re.compile(r"\bno\b[^.;\n]{0,120}\b(?:external\s+api|external\s+apis|external\s+dependencies|scraping|live\s+data|scheduler)\b"),
+        re.compile(r"\bwithout\b[^.;\n]{0,120}\b(?:external\s+api|external\s+apis|external\s+dependencies|scraping|live\s+data|scheduler)\b"),
+        re.compile(r"\bdo\s+not\s+(?:use|include|add)\b[^.;\n]{0,120}\b(?:external\s+api|external\s+apis|external\s+dependencies|scraping|live\s+data|scheduler)\b"),
+        re.compile(r"\bno\s+(?:external\s+api|external\s+apis|external\s+dependencies|scraping|live\s+data|scheduler)\b"),
+        re.compile(r"\bwithout\s+(?:external\s+api|external\s+apis|external\s+dependencies|scraping|live\s+data|scheduler)\b"),
+        re.compile(r"\bdo\s+not\s+(?:use|include|add)\s+(?:external\s+api|external\s+apis|external\s+dependencies|scraping|live\s+data|scheduler)\b"),
+    )
     _UI_SOURCE_SUFFIXES = {".html", ".htm", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".py"}
 
     def __init__(self, settings: Settings, docker_service: DockerService) -> None:
@@ -369,7 +377,7 @@ class TestingService:
         source = "openapi" if endpoints else "workspace"
         if not endpoints:
             host_job_path, _ = self._docker_service.ensure_job_workspace(request_id)
-            endpoints = self._discover_workspace_get_endpoints(host_job_path=host_job_path, max_calls=max_calls)
+            endpoints = self._discover_workspace_endpoints(host_job_path=host_job_path, max_calls=max_calls)
 
         if not endpoints:
             endpoints = [("GET", "/status", None)]
@@ -546,6 +554,23 @@ class TestingService:
             if resolved_path is None:
                 continue
             endpoints.append(("GET", resolved_path, None))
+
+        for path, operations in paths.items():
+            if len(endpoints) >= max_calls:
+                break
+            if not isinstance(path, str) or not path.startswith("/") or "{" in path:
+                continue
+            if self._is_risky_probe_path(path):
+                continue
+            if not isinstance(operations, dict):
+                continue
+            post_op = operations.get("post")
+            if not isinstance(post_op, dict):
+                continue
+            body = self._build_openapi_probe_body(operation=post_op, payload=payload)
+            if body is None:
+                continue
+            endpoints.append(("POST", path, body))
         return endpoints
 
     def _fetch_openapi_payload(self, base_url: str, timeout_seconds: int) -> dict | None:
@@ -561,13 +586,124 @@ class TestingService:
             return None
         return payload if isinstance(payload, dict) else None
 
-    def _discover_workspace_get_endpoints(
+    @staticmethod
+    def _is_risky_probe_path(path: str) -> bool:
+        lowered = path.lower()
+        risky_terms = ("alert", "email", "notify", "notification", "webhook", "delete")
+        return any(term in lowered for term in risky_terms)
+
+    def _build_openapi_probe_body(self, operation: dict, payload: dict) -> dict | None:
+        request_body = operation.get("requestBody")
+        if not isinstance(request_body, dict):
+            return None
+        content = request_body.get("content")
+        if not isinstance(content, dict):
+            return None
+        json_content = content.get("application/json") or content.get("application/*+json")
+        if not isinstance(json_content, dict):
+            return None
+        schema = json_content.get("schema")
+        if not isinstance(schema, dict):
+            return None
+        resolved = self._resolve_openapi_schema(schema=schema, payload=payload)
+        if not isinstance(resolved, dict):
+            return None
+        sample = self._sample_openapi_schema(schema=resolved, payload=payload, name_hint="")
+        return sample if isinstance(sample, dict) and sample else None
+
+    def _resolve_openapi_schema(self, schema: dict, payload: dict) -> dict:
+        ref = schema.get("$ref")
+        if not isinstance(ref, str) or not ref.startswith("#/"):
+            return schema
+        node: object = payload
+        for part in ref.removeprefix("#/").split("/"):
+            if not isinstance(node, dict):
+                return schema
+            node = node.get(part)
+        return node if isinstance(node, dict) else schema
+
+    def _sample_openapi_schema(self, schema: dict, payload: dict, name_hint: str) -> object:
+        resolved = self._resolve_openapi_schema(schema=schema, payload=payload)
+        if "example" in resolved:
+            return resolved["example"]
+        if "default" in resolved:
+            return resolved["default"]
+        enum_values = resolved.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            return enum_values[0]
+
+        schema_type = resolved.get("type")
+        if schema_type == "object" or isinstance(resolved.get("properties"), dict):
+            properties = resolved.get("properties")
+            if not isinstance(properties, dict):
+                return {}
+            required = resolved.get("required")
+            required_fields = {str(item) for item in required} if isinstance(required, list) else set(properties)
+            sample: dict[str, object] = {}
+            for key, child_schema in properties.items():
+                if key not in required_fields and not self._should_include_optional_probe_field(str(key)):
+                    continue
+                if not isinstance(child_schema, dict):
+                    continue
+                sample[str(key)] = self._sample_openapi_schema(
+                    schema=child_schema,
+                    payload=payload,
+                    name_hint=str(key),
+                )
+            return sample
+        if schema_type == "array":
+            items = resolved.get("items")
+            if isinstance(items, dict):
+                return [self._sample_openapi_schema(schema=items, payload=payload, name_hint=name_hint)]
+            return []
+        if schema_type == "integer":
+            return self._sample_number(name_hint=name_hint, integer=True)
+        if schema_type == "number":
+            return self._sample_number(name_hint=name_hint, integer=False)
+        if schema_type == "boolean":
+            return True
+        return self._sample_string(name_hint=name_hint, schema=resolved)
+
+    @staticmethod
+    def _should_include_optional_probe_field(name: str) -> bool:
+        lowered = name.lower()
+        return any(term in lowered for term in ("description", "note", "title", "name", "keyword", "url"))
+
+    @staticmethod
+    def _sample_number(name_hint: str, integer: bool) -> int | float:
+        lowered = name_hint.lower()
+        if "interval" in lowered or "minute" in lowered:
+            return 30
+        if "count" in lowered or "limit" in lowered:
+            return 1
+        return 1 if integer else 1.0
+
+    @staticmethod
+    def _sample_string(name_hint: str, schema: dict) -> str:
+        lowered = name_hint.lower()
+        fmt = str(schema.get("format") or "").lower()
+        if "email" in lowered or fmt == "email":
+            return "probe@example.com"
+        if "url" in lowered or "uri" in lowered or fmt in {"uri", "url"}:
+            return "https://example.com/feed.xml"
+        if "date" in lowered or fmt == "date":
+            return "2026-04-25"
+        if "keyword" in lowered:
+            return "probe"
+        if "description" in lowered or "note" in lowered:
+            return "Created by runtime API verification."
+        if "title" in lowered or "name" in lowered:
+            return "API Verification Probe"
+        return "probe"
+
+    def _discover_workspace_endpoints(
         self,
         host_job_path: Path,
         max_calls: int,
     ) -> list[tuple[str, str, dict | None]]:
-        pattern = re.compile(r"@\w+\.(?:get|route)\(\s*['\"]([^'\"]+)['\"]", flags=re.IGNORECASE)
-        discovered: list[str] = []
+        pattern = re.compile(r"@\w+\.(get|post|route)\(\s*['\"]([^'\"]+)['\"]", flags=re.IGNORECASE)
+        discovered_gets: list[str] = []
+        discovered_posts: list[tuple[str, dict]] = []
 
         for file_path in host_job_path.rglob("*.py"):
             if any(part in {".venv", "node_modules", "__pycache__", ".pytest_cache"} for part in file_path.parts):
@@ -577,19 +713,45 @@ class TestingService:
             except OSError:
                 continue
             for match in pattern.finditer(content):
-                path = match.group(1).strip()
+                method = match.group(1).upper()
+                path = match.group(2).strip()
                 if not path.startswith("/") or "{" in path:
                     continue
-                if path not in discovered:
-                    discovered.append(path)
-                if len(discovered) >= max_calls:
-                    break
-            if len(discovered) >= max_calls:
-                break
+                if "<" in path or self._is_risky_probe_path(path):
+                    continue
+                if method == "GET" or method == "ROUTE":
+                    if path not in discovered_gets:
+                        discovered_gets.append(path)
+                elif method == "POST":
+                    body = self._workspace_post_probe_body(path)
+                    if body is not None and all(existing_path != path for existing_path, _ in discovered_posts):
+                        discovered_posts.append((path, body))
 
-        if "/status" not in discovered:
-            discovered.insert(0, "/status")
-        return [("GET", path, None) for path in discovered[:max_calls]]
+        if "/status" not in discovered_gets:
+            discovered_gets.insert(0, "/status")
+        endpoints = [("GET", path, None) for path in discovered_gets]
+        endpoints.extend(("POST", path, body) for path, body in discovered_posts)
+        return endpoints[:max_calls]
+
+    @staticmethod
+    def _workspace_post_probe_body(path: str) -> dict | None:
+        lowered = path.lower()
+        if "feed" in lowered:
+            return {"name": "API Verification Feed", "url": "https://example.com/feed.xml", "enabled": True}
+        if "rule" in lowered:
+            return {
+                "name": "API Verification Rule",
+                "keywords": ["probe"],
+                "recipient_email": "probe@example.com",
+                "enabled": True,
+            }
+        if "habit" in lowered:
+            return {"name": "API Verification Habit", "description": "Created by runtime API verification."}
+        if "scan" in lowered or "run" in lowered or "search" in lowered:
+            return {}
+        if any(term in lowered for term in ("create", "item", "task", "record")):
+            return {"name": "API Verification Probe", "description": "Created by runtime API verification."}
+        return None
 
     @staticmethod
     def _resolve_openapi_path_with_defaults(path: str, operation: dict) -> str | None:
@@ -853,6 +1015,8 @@ class TestingService:
     @classmethod
     def _is_dynamic_data_prompt(cls, prompt: str) -> bool:
         lowered = re.sub(r"\s+", " ", prompt.lower()).strip()
+        if any(pattern.search(lowered) for pattern in cls._DYNAMIC_DATA_OPT_OUT_PATTERNS):
+            return False
         return any(keyword in lowered for keyword in cls._DYNAMIC_DATA_KEYWORDS)
 
     @staticmethod
@@ -913,7 +1077,7 @@ class TestingService:
                 return True
             if any(domain in lowered for domain in ("bookmyshow", "district.in", "districtbyzomato", "district by zomato")):
                 return True
-            if ".text" in lowered and any(token in lowered for token in ("html", "parse", "regex", "selector")):
+            if re.search(r"\.text\b", lowered) and any(token in lowered for token in ("html", "parse", "regex", "selector")):
                 return True
             if any(pattern.search(content) for pattern in self._EXTERNAL_FETCH_PATTERNS):
                 return True

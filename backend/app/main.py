@@ -21,6 +21,7 @@ from app.services.chat_service import ChatService
 from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
 from app.services.instagram_service import InstagramService
+from app.services.memory_service import MemoryService
 from app.services.monitor_service import ToolMonitorService
 from app.services.operator_access_service import OperatorAccessService
 from app.services.port_allocator_service import PortAllocatorService
@@ -121,6 +122,10 @@ def create_app() -> FastAPI:
         prompt_service = PromptService()
         codex_service = CodexService(settings, docker_service)
         browser_screenshot_service = BrowserScreenshotService(settings=settings)
+        memory_service = MemoryService(
+            memory_path=settings.resolved_agent_memory_path,
+            enabled=settings.agent_memory_enabled,
+        )
         operator_access_service = OperatorAccessService(settings)
         system_context_service = SystemContextService()
         testing_service = TestingService(settings, docker_service)
@@ -177,6 +182,7 @@ def create_app() -> FastAPI:
             chat_execution_log_repository=chat_execution_log_repository,
             tool_frontend_base_url=settings.tool_frontend_base_url,
             tool_backend_base_url=settings.tool_backend_base_url,
+            memory_service=memory_service,
             usd_inr_rate_api_url=settings.usd_inr_rate_api_url,
             usd_inr_rate_timeout_seconds=settings.usd_inr_rate_timeout_seconds,
             usd_inr_rate_cache_ttl_seconds=settings.usd_inr_rate_cache_ttl_seconds,

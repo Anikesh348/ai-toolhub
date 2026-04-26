@@ -2312,14 +2312,14 @@ function ChatPageContent() {
               </div>
             )}
 
-            <div className="mx-auto w-full max-w-4xl space-y-4">
+            <div className="mx-auto w-full max-w-4xl min-w-0 space-y-4 overflow-x-hidden">
               {messages.map((message) => {
                 const messageAttachments = parseMessageAttachments(message.metadata ?? {});
                 const isCopied = copiedMessageId === message.id;
                 return (
-                  <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div key={message.id} className={`flex w-full min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                     <div
-                      className={`group relative max-w-[88%] px-3 py-2.5 ${
+                      className={`group relative min-w-0 max-w-[88%] overflow-hidden px-3 py-2.5 ${
                         message.role === "user"
                           ? "rounded-3xl bg-amber/15 text-[color:var(--text-main)]"
                           : "text-[color:var(--text-main)]"
@@ -2327,7 +2327,7 @@ function ChatPageContent() {
                     >
                       <ChatMarkdown content={message.content} isUser={message.role === "user"} />
                       {messageAttachments.length > 0 && (
-                        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        <div className="mt-2 grid min-w-0 gap-2 sm:grid-cols-2">
                           {messageAttachments.map((attachment) => (
                             <a
                               key={attachment.id}
@@ -2376,12 +2376,12 @@ function ChatPageContent() {
               })}
 
               {(streamActivity !== "ready" || streamingAssistant) && (
-                <div className="flex justify-start">
-                  <div className="max-w-[88%] px-3 py-2.5 text-[color:var(--text-main)]">
+                <div className="flex w-full min-w-0 justify-start">
+                  <div className="min-w-0 max-w-[88%] overflow-hidden px-3 py-2.5 text-[color:var(--text-main)]">
                     {streamingAssistant ? (
                       <ChatMarkdown content={streamingAssistant} />
                     ) : (
-                      <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
+                      <p className="whitespace-pre-wrap break-words text-[15px] leading-relaxed [overflow-wrap:anywhere]">
                         {streamActivity === "web_search" ? "Searching web..." : "Thinking..."}
                       </p>
                     )}

@@ -86,6 +86,104 @@ def test_verify_runtime_apis_fails_when_endpoint_returns_server_error(monkeypatc
     assert "/movies" in report["failedPaths"][0]
 
 
+def test_verify_runtime_apis_probes_openapi_post_bodies(monkeypatch, tmp_path: Path) -> None:
+    service, _ = _build_service(tmp_path=tmp_path)
+    openapi_payload = {
+        "paths": {
+            "/status": {"get": {}},
+            "/api/habits": {
+                "get": {},
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/HabitPayload"}
+                            }
+                        }
+                    }
+                },
+            },
+        },
+        "components": {
+            "schemas": {
+                "HabitPayload": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                    },
+                }
+            }
+        },
+    }
+    seen_post_body = {}
+
+    monkeypatch.setattr("app.services.testing_service.requests.get", lambda *_args, **_kwargs: _Response(200, openapi_payload))
+
+    def fake_request(method: str, url: str, timeout: int, json=None):  # type: ignore[no-untyped-def]
+        _ = timeout
+        if method == "GET":
+            return _Response(200, {"ok": True})
+        if method == "POST" and url.endswith("/api/habits"):
+            seen_post_body.update(json or {})
+            return _Response(500, {"error": "database failed"})
+        return _Response(404, {"error": "not-found"})
+
+    monkeypatch.setattr("app.services.testing_service.requests.request", fake_request)
+
+    ok, summary, report = service.verify_runtime_apis(request_id="req-post", host_port=3124, host="127.0.0.1")
+
+    assert ok is False
+    assert "failed" in summary.lower()
+    assert seen_post_body == {
+        "name": "API Verification Probe",
+        "description": "Created by runtime API verification.",
+    }
+    assert "/api/habits" in report["failedPaths"]
+    assert any(probe["method"] == "POST" and probe["path"] == "/api/habits" for probe in report["probes"])
+
+
+def test_verify_runtime_apis_probes_workspace_post_routes_without_openapi(monkeypatch, tmp_path: Path) -> None:
+    service, _ = _build_service(tmp_path=tmp_path)
+    (tmp_path / "app.py").write_text(
+        "\n".join(
+            [
+                "@app.get('/status')",
+                "def status(): pass",
+                "@app.get('/api/feeds')",
+                "def feeds(): pass",
+                "@app.post('/api/feeds')",
+                "def create_feed(): pass",
+                "@app.post('/api/alerts/test')",
+                "def alert(): pass",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    seen_post_body = {}
+
+    monkeypatch.setattr("app.services.testing_service.requests.get", lambda *_args, **_kwargs: _Response(404, {}))
+
+    def fake_request(method: str, url: str, timeout: int, json=None):  # type: ignore[no-untyped-def]
+        _ = timeout
+        if method == "GET":
+            return _Response(200, {"ok": True})
+        if method == "POST" and url.endswith("/api/feeds"):
+            seen_post_body.update(json or {})
+            return _Response(500, {"error": "database failed"})
+        return _Response(404, {"error": "not-found"})
+
+    monkeypatch.setattr("app.services.testing_service.requests.request", fake_request)
+
+    ok, _summary, report = service.verify_runtime_apis(request_id="req-workspace-post", host_port=3124, host="127.0.0.1")
+
+    assert ok is False
+    assert seen_post_body == {"name": "API Verification Feed", "url": "https://example.com/feed.xml", "enabled": True}
+    assert "/api/feeds" in report["failedPaths"]
+    assert not any(probe["path"] == "/api/alerts/test" for probe in report["probes"])
+
+
 def test_verify_runtime_apis_retries_and_recovers_from_transient_server_error(monkeypatch, tmp_path: Path) -> None:
     service, _ = _build_service(tmp_path=tmp_path)
     openapi_payload = {"paths": {"/rules": {"get": {}}}}
@@ -155,6 +253,21 @@ def test_should_skip_live_data_cross_check_for_simple_modify_request(tmp_path: P
     assert service.should_cross_check_live_data(
         request_id="req-3c",
         prompt=prompt,
+    ) is False
+
+
+def test_dynamic_data_prompt_respects_external_api_and_scheduler_opt_out(tmp_path: Path) -> None:
+    service, docker_service = _build_service(tmp_path=tmp_path)
+    (tmp_path / "static" / "app.js").parent.mkdir()
+    (tmp_path / "static" / "app.js").write_text(
+        "document.querySelector('#result').textContent = 'ready'; fetch('/api/convert')",
+        encoding="utf-8",
+    )
+    docker_service.ensure_job_workspace.return_value = (tmp_path, "/workspace/job")
+
+    assert service.should_cross_check_live_data(
+        request_id="req-3d",
+        prompt="Build a unit converter with no external API dependencies and no scheduler.",
     ) is False
 
 

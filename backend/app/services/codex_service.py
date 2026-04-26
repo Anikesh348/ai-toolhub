@@ -111,6 +111,7 @@ class CodexService:
             workspace=self._settings.codex_workspace_container,
             request_id=request_id,
         )
+        shell_command = self._apply_general_chat_exec_flags(shell_command)
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
         return self._run_builder_container_with_retries(
@@ -139,6 +140,7 @@ class CodexService:
             workspace=self._settings.codex_workspace_container,
             request_id=request_id,
         )
+        shell_command = self._apply_general_chat_exec_flags(shell_command)
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
         return self._docker_service.run_builder_container_stream_with_options(
@@ -153,6 +155,24 @@ class CodexService:
 
     def list_chat_models(self) -> list[str]:
         return self._settings.available_chat_models
+
+    @staticmethod
+    def _apply_general_chat_exec_flags(shell_command: str) -> str:
+        flags: list[str] = []
+        if "--json" not in shell_command:
+            flags.append("--json")
+        if "--color" not in shell_command:
+            flags.extend(["--color", "never"])
+        if "--ephemeral" not in shell_command:
+            flags.append("--ephemeral")
+        if not flags:
+            return shell_command
+        return re.sub(
+            r"\bcodex\s+exec\b",
+            lambda match: f"{match.group(0)} {' '.join(flags)}",
+            shell_command,
+            count=1,
+        )
 
     def default_chat_model(self) -> str | None:
         return self._settings.default_chat_model
@@ -938,7 +958,7 @@ class CodexService:
 
                 combined_logs = "\n\n".join([
                     *transient_attempt_logs,
-                    f"Recovered after transient Codex runtime issue on attempt {attempt}/{max_attempts}.",
+                    f"Recovered after transient Codex transport issue on attempt {attempt}/{max_attempts}.",
                     result.logs.strip(),
                 ]).strip()
                 return CommandResult(success=True, exit_code=result.exit_code, logs=combined_logs)
@@ -954,7 +974,7 @@ class CodexService:
                 return CommandResult(success=False, exit_code=result.exit_code, logs=combined_logs)
 
             transient_attempt_logs.append(
-                f"[Codex transient runtime failure attempt {attempt}/{max_attempts}]\n"
+                f"[Codex transient transport failure attempt {attempt}/{max_attempts}]\n"
                 f"{(result.logs or '').strip() or '(no logs)'}"
             )
             if attempt < max_attempts and retry_delay_seconds > 0:
@@ -969,7 +989,7 @@ class CodexService:
 
         combined_failure_logs = "\n\n".join([
             *transient_attempt_logs,
-            f"Transient Codex runtime issue persisted after {max_attempts} attempts.",
+            f"Transient Codex transport issue persisted after {max_attempts} attempts.",
             (last_result.logs or "").strip(),
         ]).strip()
         return CommandResult(success=False, exit_code=last_result.exit_code, logs=combined_failure_logs)

@@ -49,7 +49,7 @@ class RuntimePlan:
 
 
 class DockerService:
-    _COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-(.*?))?}")
+    _COMPOSE_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])(.*?))?}")
     _CONTAINER_EXTRA_HOSTS = {"host.docker.internal": "host-gateway"}
     _LOCAL_MONGO_HOSTS = {"mongo", "localhost", "127.0.0.1"}
     _SHARED_MONGO_CONTAINER_NAME = "tool-builder-mongo"
@@ -1171,9 +1171,14 @@ class DockerService:
 
     def _compose_env(self, service_host_ports: dict[str, int], runtime_plan: RuntimePlan) -> dict[str, str]:
         compose_env = {key: value for key, value in os.environ.items()}
-        for key, value in self._settings.model_dump().items():
+        if hasattr(self._settings, "model_dump"):
+            settings_items = self._settings.model_dump().items()
+        else:
+            settings_items = vars(self._settings).items()
+        for key, value in settings_items:
             compose_env.setdefault(key, str(value))
             compose_env.setdefault(key.upper(), str(value))
+        compose_env.update(self._tool_runtime_environment())
 
         if service_host_ports:
             compose_env["HOST_PORT"] = str(next(iter(service_host_ports.values())))
@@ -1209,11 +1214,18 @@ class DockerService:
     def _interpolate_compose_value(self, value: str, compose_env: dict[str, str]) -> str:
         def replacement(match: re.Match[str]) -> str:
             variable_name = match.group(1)
-            default_value = match.group(2)
-            if variable_name in compose_env:
-                return compose_env[variable_name]
-            if default_value is not None:
-                return default_value
+            operator = match.group(2)
+            fallback_value = match.group(3)
+            current_value = compose_env.get(variable_name)
+            is_set = current_value is not None
+            is_non_empty = bool(current_value)
+            if operator in {":-", ":?"}:
+                if is_non_empty:
+                    return str(current_value)
+            elif is_set:
+                return str(current_value)
+            if operator in {"-", ":-"} and fallback_value is not None:
+                return fallback_value
             return ""
 
         return self._COMPOSE_VAR_PATTERN.sub(replacement, value)
