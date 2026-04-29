@@ -24,7 +24,7 @@ from app.utils.time import now_ist
 
 CHAT_MODES = {"general", "tool_builder", "operator", "pi_operator"}
 MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024
-MAX_MESSAGE_ATTACHMENTS = 4
+MAX_MESSAGE_ATTACHMENTS = 5
 
 
 class ChatService:

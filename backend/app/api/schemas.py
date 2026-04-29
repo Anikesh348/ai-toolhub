@@ -232,7 +232,7 @@ class ChatSessionResponse(BaseModel):
 class CreateChatMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=16000)
     model: Optional[str] = Field(default=None, max_length=120)
-    attachmentIds: list[str] = Field(default_factory=list, max_length=4)
+    attachmentIds: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ChatMessageResponse(BaseModel):

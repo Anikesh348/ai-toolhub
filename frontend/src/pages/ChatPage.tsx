@@ -71,6 +71,7 @@ type ToolBuilderIntakeState = {
   requiresCron: boolean;
 };
 type ToolBuilderBooleanField = "requiresFrontend" | "requiresBackend" | "requiresMongo" | "requiresCron";
+type PendingImageAttachment = { file: File; previewUrl: string };
 
 const MODE_OPTIONS: Array<{ value: SelectableMode; label: string }> = [
   { value: "general", label: "General" },
@@ -81,6 +82,7 @@ const TECHNICAL_READING_WPM = 120;
 const MIN_KNOWLEDGE_ARTICLE_MINUTES = 10;
 const CHAT_COMPOSER_MAX_WIDTH_CLASS = "max-w-5xl";
 const CHAT_INPUT_MAX_HEIGHT_PX = 240;
+const MAX_CHAT_IMAGE_ATTACHMENTS = 5;
 
 const KNOWLEDGE_ARTICLES: KnowledgeArticle[] = [
   {
@@ -1116,7 +1118,7 @@ function ChatPageContent() {
   const [streamingAssistant, setStreamingAssistant] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pendingImage, setPendingImage] = useState<{ file: File; previewUrl: string } | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingImageAttachment[]>([]);
   const [thinkingPanelMode, setThinkingPanelMode] = useState<ThinkingPanelMode>("none");
   const [thinkingPanelCycle, setThinkingPanelCycle] = useState(0);
   const [companionOpen, setCompanionOpen] = useState(false);
@@ -1450,7 +1452,7 @@ function ChatPageContent() {
   }, [activeChat, defaultModel, availableModels]);
 
   useEffect(() => {
-    clearPendingImage();
+    clearPendingImages();
   }, [activeChatId]);
 
   useEffect(() => {
@@ -1613,11 +1615,11 @@ function ChatPageContent() {
 
   useEffect(() => {
     return () => {
-      if (pendingImage) {
+      for (const pendingImage of pendingImages) {
         URL.revokeObjectURL(pendingImage.previewUrl);
       }
     };
-  }, [pendingImage]);
+  }, [pendingImages]);
 
   useEffect(() => {
     return () => {
@@ -1961,37 +1963,91 @@ function ChatPageContent() {
     }
   }
 
-  function clearPendingImage(): void {
-    setPendingImage((current) => {
-      if (current) {
-        URL.revokeObjectURL(current.previewUrl);
+  function clearPendingImages(): void {
+    setPendingImages((current) => {
+      for (const item of current) {
+        URL.revokeObjectURL(item.previewUrl);
       }
-      return null;
+      return [];
     });
     if (imageInputRef.current) {
       imageInputRef.current.value = "";
     }
   }
 
-  function setPendingImageFromFile(file: File): boolean {
+  function removePendingImage(index: number): void {
+    setPendingImages((current) => {
+      if (index < 0 || index >= current.length) {
+        return current;
+      }
+      const next = [...current];
+      const [removed] = next.splice(index, 1);
+      if (removed) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return next;
+    });
+    if (imageInputRef.current) {
+      imageInputRef.current.value = "";
+    }
+  }
+
+  function validatePendingImageFile(file: File): string | null {
     if (!file.type.startsWith("image/")) {
-      setError("Please select an image file.");
-      return false;
+      return "Please select only image files.";
     }
     if (file.size > 10 * 1024 * 1024) {
-      setError("Image is too large. Maximum size is 10MB.");
-      return false;
+      return "Image is too large. Maximum size is 10MB.";
+    }
+    return null;
+  }
+
+  function attachImageFiles(files: File[]): void {
+    if (!files.length) {
+      return;
     }
 
-    setError(null);
-    const previewUrl = URL.createObjectURL(file);
-    setPendingImage((current) => {
-      if (current) {
-        URL.revokeObjectURL(current.previewUrl);
+    const remainingSlots = MAX_CHAT_IMAGE_ATTACHMENTS - pendingImages.length;
+    if (remainingSlots <= 0) {
+      setError(`You can attach up to ${MAX_CHAT_IMAGE_ATTACHMENTS} images per message.`);
+      if (imageInputRef.current) {
+        imageInputRef.current.value = "";
       }
-      return { file, previewUrl };
-    });
-    return true;
+      return;
+    }
+
+    const toAdd: PendingImageAttachment[] = [];
+    let firstValidationError: string | null = null;
+    for (const file of files) {
+      if (toAdd.length >= remainingSlots) {
+        break;
+      }
+      const validationError = validatePendingImageFile(file);
+      if (validationError) {
+        if (!firstValidationError) {
+          firstValidationError = validationError;
+        }
+        continue;
+      }
+      toAdd.push({ file, previewUrl: URL.createObjectURL(file) });
+    }
+
+    if (!toAdd.length) {
+      setError(firstValidationError ?? `You can attach up to ${MAX_CHAT_IMAGE_ATTACHMENTS} images per message.`);
+      if (imageInputRef.current) {
+        imageInputRef.current.value = "";
+      }
+      return;
+    }
+
+    setPendingImages((current) => [...current, ...toAdd]);
+    if (files.length > remainingSlots) {
+      setError(`Only ${MAX_CHAT_IMAGE_ATTACHMENTS} images can be attached per message.`);
+    } else if (firstValidationError) {
+      setError(firstValidationError);
+    } else {
+      setError(null);
+    }
   }
 
   function firstImageFileFromClipboardData(data: DataTransfer | null): File | null {
@@ -2053,19 +2109,16 @@ function ChatPageContent() {
           type: file.type || "image/png",
           lastModified: Date.now()
         });
-    const attached = setPendingImageFromFile(normalized);
-    if (!attached && imageInputRef.current) {
-      imageInputRef.current.value = "";
-    }
+    attachImageFiles([normalized]);
   }
 
   function handleImageSelection(event: ChangeEvent<HTMLInputElement>): void {
-    const file = event.target.files?.[0];
-    if (!file) {
+    const files = Array.from(event.target.files || []);
+    if (!files.length) {
       return;
     }
-    const attached = setPendingImageFromFile(file);
-    if (!attached && imageInputRef.current) {
+    attachImageFiles(files);
+    if (imageInputRef.current) {
       imageInputRef.current.value = "";
     }
   }
@@ -2101,12 +2154,12 @@ function ChatPageContent() {
   }
 
   async function submitPrompt(): Promise<void> {
-    if (!activeChatId || sending || (!prompt.trim() && !pendingImage)) {
+    if (!activeChatId || sending || (!prompt.trim() && pendingImages.length === 0)) {
       return;
     }
 
     const streamChatId = activeChatId;
-    const imageToUpload = pendingImage;
+    const imagesToUpload = [...pendingImages];
     sendingChatIdRef.current = streamChatId;
     setError(null);
     setSending(true);
@@ -2130,8 +2183,8 @@ function ChatPageContent() {
     setThinkingPanelCycle((current) => current + 1);
     streamTokenRef.current = streamToken;
     setPrompt("");
-    if (imageToUpload) {
-      clearPendingImage();
+    if (imagesToUpload.length > 0) {
+      clearPendingImages();
     }
 
     try {
@@ -2139,7 +2192,7 @@ function ChatPageContent() {
       setStreamingAssistant("");
       const selectedModel = resolveModelForRequest();
       const attachmentIds: string[] = [];
-      if (imageToUpload) {
+      for (const imageToUpload of imagesToUpload) {
         const uploaded = await uploadChatAttachment(streamChatId, imageToUpload.file);
         attachmentIds.push(uploaded.id);
       }
@@ -2514,20 +2567,34 @@ function ChatPageContent() {
                 </div>
               )}
 
-              {pendingImage && (
-                <div className="mb-2 flex items-center gap-3 rounded-2xl border border-amber/25 bg-black/35 px-3 py-2">
-                  <img src={pendingImage.previewUrl} alt={pendingImage.file.name} className="h-16 w-16 rounded-lg object-cover" />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs text-[color:var(--text-main)]">{pendingImage.file.name}</p>
-                    <p className="text-[11px] text-muted">{Math.max(1, Math.round(pendingImage.file.size / 1024))} KB</p>
+              {pendingImages.length > 0 && (
+                <div className="mb-2 rounded-2xl border border-amber/25 bg-black/35 px-3 py-2">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs text-muted">
+                      {pendingImages.length} / {MAX_CHAT_IMAGE_ATTACHMENTS} images selected
+                    </p>
+                    <button type="button" onClick={clearPendingImages} className="btn-ghost px-2 py-1 text-xs">
+                      Clear all
+                    </button>
                   </div>
-                  <button type="button" onClick={clearPendingImage} className="btn-ghost px-2 py-1 text-xs">
-                    Remove
-                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    {pendingImages.map((pendingImage, index) => (
+                      <div key={`${pendingImage.file.name}-${pendingImage.file.size}-${index}`} className="flex min-w-[220px] items-center gap-3 rounded-xl border border-amber/20 bg-black/35 px-2 py-2">
+                        <img src={pendingImage.previewUrl} alt={pendingImage.file.name} className="h-14 w-14 rounded-lg object-cover" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs text-[color:var(--text-main)]">{pendingImage.file.name}</p>
+                          <p className="text-[11px] text-muted">{Math.max(1, Math.round(pendingImage.file.size / 1024))} KB</p>
+                        </div>
+                        <button type="button" onClick={() => removePendingImage(index)} className="btn-ghost px-2 py-1 text-xs">
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
-              <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageSelection} />
+              <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleImageSelection} />
 
               <div className="flex items-end gap-2 rounded-3xl border border-amber/22 bg-[#1a1813]/90 px-3 py-2">
                 <textarea
@@ -2552,7 +2619,7 @@ function ChatPageContent() {
                 <button
                   type="button"
                   onClick={() => imageInputRef.current?.click()}
-                  disabled={!activeChat || sending}
+                  disabled={!activeChat || sending || pendingImages.length >= MAX_CHAT_IMAGE_ATTACHMENTS}
                   className="btn-ghost rounded-full px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Image
@@ -2569,7 +2636,7 @@ function ChatPageContent() {
                 ) : (
                   <button
                     type="submit"
-                    disabled={!activeChat || (!prompt.trim() && !pendingImage)}
+                    disabled={!activeChat || (!prompt.trim() && pendingImages.length === 0)}
                     className="btn-primary rounded-full px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     Send
@@ -2580,7 +2647,7 @@ function ChatPageContent() {
               <p className="mt-2 text-xs text-muted">
                 {shouldSubmitOnEnter ? "Enter to send, Shift + Enter for a new line." : "Enter for a new line. Tap Send to submit."}
                 {" "}
-                Paste an image from clipboard to attach.
+                Paste an image from clipboard to attach (up to {MAX_CHAT_IMAGE_ATTACHMENTS} images).
               </p>
             </div>
             {error && (
