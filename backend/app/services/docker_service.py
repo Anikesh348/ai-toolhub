@@ -94,6 +94,7 @@ class DockerService:
         extra_environment: dict[str, str] | None = None,
         working_dir_override: str | None = None,
         tty: bool = False,
+        network_mode: str | None = None,
     ) -> CommandResult:
         _, container_job_path = self.ensure_job_workspace(request_id)
         container = None
@@ -144,6 +145,7 @@ class DockerService:
                 pids_limit=self._settings.builder_pids_limit,
                 environment=environment if environment else None,
                 labels=builder_labels,
+                network_mode=network_mode,
             )
             started_at = time.monotonic()
             while True:
@@ -193,6 +195,7 @@ class DockerService:
         extra_environment: dict[str, str] | None = None,
         working_dir_override: str | None = None,
         tty: bool = False,
+        network_mode: str | None = None,
     ) -> Iterable[CommandStreamEvent]:
         _, container_job_path = self.ensure_job_workspace(request_id)
         container = None
@@ -241,6 +244,7 @@ class DockerService:
                 pids_limit=self._settings.builder_pids_limit,
                 environment=environment if environment else None,
                 labels=builder_labels,
+                network_mode=network_mode,
             )
 
             started_at = time.monotonic()
@@ -441,6 +445,20 @@ class DockerService:
             "status": status,
             "message": f"Container `{target.name}` health/status: {status}.",
         }
+
+    def get_request_container_logs(self, request_id: str, tail: int = 20000) -> dict[str, Any]:
+        container_name = self._builder_container_name(request_id)
+        target = self._find_container_by_name(container_name)
+        if target is None:
+            return {"found": False, "name": container_name, "logs": "", "status": None}
+        try:
+            target.reload()
+        except DockerException:
+            pass
+        logs = self._safe_container_logs(target)
+        if tail > 0 and len(logs) > tail:
+            logs = logs[-tail:]
+        return {"found": True, "name": target.name, "logs": logs, "status": target.status}
 
     def _find_container_by_name(self, container_name: str) -> Any | None:
         needle = container_name.strip().lower()

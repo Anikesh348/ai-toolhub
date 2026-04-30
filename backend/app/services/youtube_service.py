@@ -1,7 +1,9 @@
 import base64
 import json
 import re
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -145,19 +147,87 @@ class YouTubeService:
 
     def __init__(self, settings: Settings, session: requests.Session | None = None) -> None:
         self._api_key = (settings.youtube_data_api_key or "").strip()
-        self._region_code = settings.youtube_shorts_region_code_normalized
-        preferred_categories = self._parse_preferred_categories(
-            getattr(settings, "youtube_shorts_preferred_categories", "")
+        self._config_lock = threading.Lock()
+        self._settings_file_path = self._resolve_settings_file_path(settings)
+        self._region_code = self._normalize_region_code_value(settings.youtube_shorts_region_code_normalized)
+        self._preferred_categories = self._normalize_preferred_categories(
+            self._parse_preferred_categories_csv(getattr(settings, "youtube_shorts_preferred_categories", ""))
         )
-        boost_factor = self._normalize_boost_factor(
+        self._category_boost_factor = self._normalize_boost_factor(
             getattr(settings, "youtube_shorts_category_boost_factor", 3)
         )
-        self._query_seeds = self._parse_query_seeds(
+        self._configured_query_seeds = self._parse_query_seeds(
             settings.youtube_shorts_queries,
-            preferred_categories=preferred_categories,
-            boost_factor=boost_factor,
+            preferred_categories=None,
+            boost_factor=1,
         )
+        self._query_seeds = self._parse_query_seeds(
+            self._query_seeds_to_csv(self._configured_query_seeds),
+            preferred_categories={item.lower() for item in self._preferred_categories},
+            boost_factor=self._category_boost_factor,
+        )
+        persisted = self._load_persisted_shorts_settings()
+        if isinstance(persisted, dict):
+            try:
+                self._configured_query_seeds = self._normalize_query_seed_items(list(persisted.get("queries") or []))
+                self._preferred_categories = self._normalize_preferred_categories(
+                    list(persisted.get("preferredCategories") or [])
+                )
+                self._category_boost_factor = self._normalize_boost_factor(persisted.get("categoryBoostFactor", 3))
+                self._region_code = self._normalize_region_code_value(
+                    str(persisted.get("regionCode") or "").strip() or None
+                )
+                self._query_seeds = self._parse_query_seeds(
+                    self._query_seeds_to_csv(self._configured_query_seeds),
+                    preferred_categories={item.lower() for item in self._preferred_categories},
+                    boost_factor=self._category_boost_factor,
+                )
+            except ValueError:
+                # Keep env defaults when persisted payload is malformed.
+                pass
         self._session = session or requests.Session()
+
+    def get_shorts_settings(self) -> dict[str, Any]:
+        with self._config_lock:
+            configured = list(self._configured_query_seeds)
+            preferred = list(self._preferred_categories)
+            boost_factor = int(self._category_boost_factor)
+            region_code = self._region_code
+
+        return {
+            "queries": [{"category": item.category, "query": item.query} for item in configured],
+            "preferredCategories": preferred,
+            "categoryBoostFactor": boost_factor,
+            "regionCode": region_code,
+        }
+
+    def update_shorts_settings(
+        self,
+        queries: list[dict[str, Any]],
+        preferred_categories: list[str],
+        category_boost_factor: int,
+        region_code: str | None,
+    ) -> dict[str, Any]:
+        normalized_queries = self._normalize_query_seed_items(queries)
+        normalized_preferred = self._normalize_preferred_categories(preferred_categories)
+        normalized_boost = self._normalize_boost_factor(category_boost_factor)
+        normalized_region = self._normalize_region_code_value(region_code)
+        boosted_queries = self._parse_query_seeds(
+            self._query_seeds_to_csv(normalized_queries),
+            preferred_categories={item.lower() for item in normalized_preferred},
+            boost_factor=normalized_boost,
+        )
+
+        with self._config_lock:
+            self._configured_query_seeds = normalized_queries
+            self._preferred_categories = normalized_preferred
+            self._category_boost_factor = normalized_boost
+            self._region_code = normalized_region
+            self._query_seeds = boosted_queries
+
+        updated = self.get_shorts_settings()
+        self._persist_shorts_settings(updated)
+        return updated
 
     def fetch_shorts_feed(self, cursor: str | None, limit: int = 24) -> dict[str, Any]:
         normalized_limit = max(self._MIN_LIMIT, min(self._MAX_LIMIT, int(limit)))
@@ -726,12 +796,18 @@ class YouTubeService:
         return boosted
 
     @staticmethod
-    def _parse_preferred_categories(raw_value: str) -> set[str]:
-        categories: set[str] = set()
+    def _parse_preferred_categories_csv(raw_value: str) -> list[str]:
+        categories: list[str] = []
+        seen: set[str] = set()
         for raw_item in raw_value.split(","):
-            item = raw_item.strip().lower()
-            if item:
-                categories.add(item)
+            item = raw_item.strip()
+            if not item:
+                continue
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            categories.append(item)
         return categories
 
     @staticmethod
@@ -741,6 +817,92 @@ class YouTubeService:
         except (TypeError, ValueError):
             return 3
         return max(1, min(8, normalized))
+
+    @staticmethod
+    def _normalize_region_code_value(value: str | None) -> str | None:
+        candidate = str(value or "").strip().upper()
+        if not candidate:
+            return None
+        if len(candidate) != 2 or not candidate.isalpha():
+            raise ValueError("Region code must be a 2-letter ISO country code (for example, IN or US).")
+        return candidate
+
+    @staticmethod
+    def _normalize_preferred_categories(items: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_item in items:
+            item = str(raw_item or "").strip()
+            if not item:
+                continue
+            key = item.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(item[:40])
+        return normalized
+
+    @staticmethod
+    def _query_seeds_to_csv(items: list[QuerySeed]) -> str:
+        if not items:
+            return ""
+        return ",".join(f"{seed.category}::{seed.query}" for seed in items)
+
+    def _normalize_query_seed_items(self, items: list[dict[str, Any]]) -> list[QuerySeed]:
+        normalized: list[QuerySeed] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_item in items or []:
+            if not isinstance(raw_item, dict):
+                continue
+            category_raw = str(raw_item.get("category") or "").strip() or "General"
+            query_raw = str(raw_item.get("query") or "").strip()
+            if not query_raw:
+                continue
+            category = category_raw[:40]
+            query = query_raw[:200]
+            key = (category.lower(), query.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(QuerySeed(category=category, query=query))
+
+        if normalized:
+            return normalized
+
+        fallback: list[QuerySeed] = []
+        for seed in _DEFAULT_QUERY_SEEDS:
+            category, query = seed.split("::", 1)
+            fallback.append(QuerySeed(category=category, query=query))
+        return fallback
+
+    @staticmethod
+    def _resolve_settings_file_path(settings: Settings) -> Path | None:
+        workspace_host = str(getattr(settings, "codex_workspace_host", "") or "").strip()
+        if not workspace_host:
+            return None
+        return Path(workspace_host).resolve() / ".toolhub" / "youtube_shorts_settings.json"
+
+    def _load_persisted_shorts_settings(self) -> dict[str, Any] | None:
+        if self._settings_file_path is None:
+            return None
+        path = self._settings_file_path
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _persist_shorts_settings(self, payload: dict[str, Any]) -> None:
+        if self._settings_file_path is None:
+            return
+        path = self._settings_file_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError:
+            return
 
     def _fallback_items(self, start_index: int, limit: int) -> tuple[list[dict[str, str]], int]:
         fallback_pool = list(_DEFAULT_FALLBACK_SHORTS)

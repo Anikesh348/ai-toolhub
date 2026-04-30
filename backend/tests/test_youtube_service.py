@@ -204,3 +204,57 @@ def test_query_seed_weighting_boosts_preferred_categories() -> None:
     assert categories.count("Food") == 3
     assert categories.count("Travel") == 3
     assert categories.count("Nature") == 1
+
+
+def test_get_shorts_settings_reflects_runtime_configuration() -> None:
+    service = YouTubeService(
+        settings=_StubSettings(
+            youtube_data_api_key="",
+            youtube_shorts_queries="Tech::fast gadgets,Food::street snacks",
+            youtube_shorts_preferred_categories="Tech,Food",
+            youtube_shorts_category_boost_factor=4,
+            youtube_shorts_region_code_normalized="IN",
+        )
+    )
+
+    settings = service.get_shorts_settings()
+
+    assert settings["regionCode"] == "IN"
+    assert settings["categoryBoostFactor"] == 4
+    assert settings["preferredCategories"] == ["Tech", "Food"]
+    assert len(settings["queries"]) == 2
+    assert settings["queries"][0]["category"] == "Tech"
+    assert settings["queries"][0]["query"] == "fast gadgets"
+
+
+def test_update_shorts_settings_applies_queries_region_and_boost() -> None:
+    session = _FakeSession()
+    service = YouTubeService(
+        settings=_StubSettings(
+            youtube_data_api_key="test-key",
+            youtube_shorts_queries="Tech::fast gadgets",
+            youtube_shorts_region_code_normalized="US",
+        ),
+        session=session,
+    )
+
+    updated = service.update_shorts_settings(
+        queries=[
+            {"category": "Travel", "query": "coastal travel spots"},
+            {"category": "Tech", "query": "ai gadgets"},
+        ],
+        preferred_categories=["Travel"],
+        category_boost_factor=3,
+        region_code="IN",
+    )
+    assert updated["regionCode"] == "IN"
+    assert updated["categoryBoostFactor"] == 3
+    assert updated["preferredCategories"] == ["Travel"]
+    assert [item["category"] for item in updated["queries"]] == ["Travel", "Tech"]
+
+    result = service.fetch_shorts_feed(cursor=None, limit=1)
+
+    assert result["items"]
+    first_call_params = session.calls[0]["params"]
+    assert first_call_params["regionCode"] == "IN"
+    assert "coastal travel spots" in str(first_call_params["q"]).lower()

@@ -16,6 +16,7 @@ from app.services.browser_screenshot_service import BrowserScreenshotService
 from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
 from app.services.memory_service import MemoryService
+from app.services.mcp_service import McpService
 from app.services.operator_access_service import OperatorAccessService
 from app.services.system_context_service import SystemContextService
 from app.services.tool_builder_service import ToolBuilderService
@@ -28,6 +29,8 @@ MAX_MESSAGE_ATTACHMENTS = 5
 
 
 class ChatService:
+    _MCP_OAUTH_URL_RE = re.compile(r"https?://[^\s<>()\"']+/authorize\?[^\s<>()\"']+", re.IGNORECASE)
+    _MCP_OAUTH_SERVER_RE = re.compile(r"Authorize\s+`([^`]+)`", re.IGNORECASE)
     _FRONTEND_SERVICE_HINTS = ("frontend", "web", "ui", "client", "dashboard", "site", "next", "vite")
     _BACKEND_SERVICE_HINTS = ("backend", "api", "server", "worker", "gateway", "graphql", "rest")
     _FAST_OPERATOR_MODEL_CANDIDATES = ("gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex-mini")
@@ -168,6 +171,7 @@ class ChatService:
         usd_inr_rate_timeout_seconds: float = 4.0,
         usd_inr_rate_cache_ttl_seconds: int = 1800,
         usd_inr_rate_fallback: float = _ESTIMATED_USD_TO_INR_RATE,
+        mcp_service: McpService | None = None,
     ) -> None:
         self._session_repository = session_repository
         self._message_repository = message_repository
@@ -179,6 +183,7 @@ class ChatService:
         self._tool_builder_service = tool_builder_service
         self._chat_execution_log_repository = chat_execution_log_repository
         self._memory_service = memory_service
+        self._mcp_service = mcp_service
         self._tool_frontend_base_url = self._normalize_runtime_base_url(tool_frontend_base_url)
         self._tool_backend_base_url = self._normalize_runtime_base_url(tool_backend_base_url)
         self._usd_inr_rate_api_url = (usd_inr_rate_api_url or "").strip()
@@ -208,6 +213,52 @@ class ChatService:
 
     def get_session(self, session_id: str) -> dict | None:
         return self._session_repository.get_by_id(session_id)
+
+    def get_active_mcp_oauth_request(self, session_id: str) -> dict[str, Any]:
+        if self._session_repository.get_by_id(session_id) is None:
+            return {
+                "available": False,
+                "url": None,
+                "serverName": None,
+                "message": "Session not found.",
+                "containerFound": False,
+                "containerStatus": None,
+            }
+        if self._docker_service is None:
+            return {
+                "available": False,
+                "url": None,
+                "serverName": None,
+                "message": "Docker service is not available.",
+                "containerFound": False,
+                "containerStatus": None,
+            }
+
+        log_result = self._docker_service.get_request_container_logs(request_id=f"chat-{session_id}", tail=32000)
+        logs = str(log_result.get("logs") or "")
+        events = self._extract_mcp_oauth_events(logs, set())
+        container_found = bool(log_result.get("found", False))
+        container_status = log_result.get("status")
+        if not events:
+            return {
+                "available": False,
+                "url": None,
+                "serverName": None,
+                "message": "No pending MCP authorization was found for this chat.",
+                "containerFound": container_found,
+                "containerStatus": str(container_status) if container_status is not None else None,
+            }
+
+        latest_event = events[-1]
+        return {
+            "available": True,
+            "url": latest_event.get("url"),
+            "serverName": latest_event.get("serverName"),
+            "message": latest_event.get("message")
+            or "Authorize this MCP server, then return to this chat while the request continues.",
+            "containerFound": container_found,
+            "containerStatus": str(container_status) if container_status is not None else None,
+        }
 
     def list_messages(self, session_id: str, limit: int = 500) -> list[dict]:
         return self._message_repository.list_for_session(session_id=session_id, limit=limit)
@@ -326,6 +377,7 @@ class ChatService:
                     prompt=prompt,
                     model=selected_model,
                     image_paths=image_paths,
+                    mcp_setup_script=self._mcp_setup_script(),
                 )
                 assistant_text = self._build_assistant_text(completion.logs, completion.success)
                 success = completion.success
@@ -440,6 +492,7 @@ class ChatService:
         raw_execution_logs = ""
         quick_path = quick_answer is not None
         raw_stream_logs = ""
+        emitted_mcp_oauth_urls: set[str] = set()
         try:
             if quick_answer is not None:
                 assistant_text = quick_answer
@@ -501,11 +554,17 @@ class ChatService:
                     prompt=prompt,
                     model=selected_model,
                     image_paths=image_paths,
+                    mcp_setup_script=self._mcp_setup_script(),
                 ):
                     if stream_event.type == "log" and stream_event.chunk:
                         raw_stream_logs = f"{raw_stream_logs}{stream_event.chunk}"
                         if len(raw_stream_logs) > 24000:
                             raw_stream_logs = raw_stream_logs[-24000:]
+                        for oauth_event in self._extract_mcp_oauth_events(
+                            stream_event.chunk,
+                            emitted_mcp_oauth_urls,
+                        ):
+                            yield oauth_event
                         detected_status = self._detect_stream_status(stream_event.chunk)
                         if detected_status and detected_status != stream_status:
                             stream_status = detected_status
@@ -4511,6 +4570,35 @@ class ChatService:
             captured.append(line.rstrip())
 
         return "\n".join(captured).strip()
+
+    def _mcp_setup_script(self) -> str | None:
+        if not self._mcp_service:
+            return None
+        try:
+            script = self._mcp_service.build_codex_setup_script()
+        except Exception as exc:  # pylint: disable=broad-except
+            self._logger.warning("Unable to build MCP setup script: %s", exc)
+            return None
+        return script or None
+
+    def _extract_mcp_oauth_events(self, chunk: str, emitted_urls: set[str]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        server_match = self._MCP_OAUTH_SERVER_RE.search(chunk)
+        server_name = server_match.group(1) if server_match else None
+        for match in self._MCP_OAUTH_URL_RE.finditer(chunk):
+            url = match.group(0).rstrip(".,;\u2060")
+            if url in emitted_urls:
+                continue
+            emitted_urls.add(url)
+            events.append(
+                {
+                    "type": "mcp_oauth",
+                    "url": url,
+                    "serverName": server_name,
+                    "message": "Authorize this MCP server, then return to this chat while the request continues.",
+                }
+            )
+        return events
 
     @staticmethod
     def _system_prompt_for_mode(mode: str) -> str:

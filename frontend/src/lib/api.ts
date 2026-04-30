@@ -250,6 +250,72 @@ export type YouTubeShortFeedResponse = {
   source: "youtube" | "fallback";
 };
 
+export type YouTubeShortQuerySeed = {
+  category: string;
+  query: string;
+};
+
+export type YouTubeShortSettings = {
+  queries: YouTubeShortQuerySeed[];
+  preferredCategories: string[];
+  categoryBoostFactor: number;
+  regionCode: string | null;
+};
+
+export type McpTransport = "stdio" | "streamable_http" | "docker_gateway";
+
+export type McpConnectionStatus = "untested" | "ready" | "error";
+
+export type McpServer = {
+  id: string;
+  name: string;
+  description: string | null;
+  transport: McpTransport;
+  enabled: boolean;
+  command: string | null;
+  args: string[];
+  url: string | null;
+  dockerProfile: string | null;
+  dockerServers: string[];
+  codexName: string;
+  envKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastTestedAt: string | null;
+  lastStatus: McpConnectionStatus;
+  lastMessage: string;
+};
+
+export type McpServerPayload = {
+  name: string;
+  description?: string | null;
+  transport: McpTransport;
+  enabled: boolean;
+  command?: string | null;
+  args?: string[];
+  url?: string | null;
+  dockerProfile?: string | null;
+  dockerServers?: string[];
+  env?: Record<string, string>;
+};
+
+export type DeleteMcpServerResponse = {
+  id: string;
+  deleted: boolean;
+};
+
+export type ZomatoMcpOAuthStart = {
+  authorizationUrl: string;
+  redirectUri: string;
+  state: string;
+  message: string;
+};
+
+export type ZomatoMcpOAuthComplete = {
+  message: string;
+  server: McpServer;
+};
+
 export type InstagramBrowserViewport = {
   width: number;
   height: number;
@@ -262,10 +328,20 @@ export type CodexLoginStreamEvent =
 export type ChatStreamEvent =
   | { type: "user_message"; session: ChatSession; message: ChatMessage }
   | { type: "status"; status: "thinking" | "web_search" | "ready" | string }
+  | { type: "mcp_oauth"; url: string; serverName: string | null; message: string }
   | { type: "assistant_delta"; delta: string }
   | { type: "assistant_message"; session: ChatSession; message: ChatMessage }
   | { type: "done" }
   | { type: "error"; error: string };
+
+export type ChatMcpOAuthStatus = {
+  available: boolean;
+  url: string | null;
+  serverName: string | null;
+  message: string;
+  containerFound: boolean;
+  containerStatus: string | null;
+};
 
 export type ChatModelsResponse = {
   models: string[];
@@ -522,6 +598,115 @@ export async function fetchYouTubeShortsFeed(
     throw new Error(`Unable to fetch YouTube shorts feed: ${response.status} ${text}`);
   }
   return (await response.json()) as YouTubeShortFeedResponse;
+}
+
+export async function fetchYouTubeShortSettings(): Promise<YouTubeShortSettings> {
+  const response = await fetch(`${API_BASE_URL}/integrations/youtube/shorts/settings`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch YouTube shorts settings: ${response.status} ${text}`);
+  }
+  return (await response.json()) as YouTubeShortSettings;
+}
+
+export async function updateYouTubeShortSettings(payload: YouTubeShortSettings): Promise<YouTubeShortSettings> {
+  const response = await fetch(`${API_BASE_URL}/integrations/youtube/shorts/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to update YouTube shorts settings: ${response.status} ${text}`);
+  }
+  return (await response.json()) as YouTubeShortSettings;
+}
+
+export async function fetchMcpServers(): Promise<McpServer[]> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/servers`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch MCP servers: ${response.status} ${text}`);
+  }
+  return (await response.json()) as McpServer[];
+}
+
+export async function createMcpServer(payload: McpServerPayload): Promise<McpServer> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/servers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to create MCP server: ${response.status} ${text}`);
+  }
+  return (await response.json()) as McpServer;
+}
+
+export async function updateMcpServer(serverId: string, payload: McpServerPayload): Promise<McpServer> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/servers/${encodeURIComponent(serverId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to update MCP server: ${response.status} ${text}`);
+  }
+  return (await response.json()) as McpServer;
+}
+
+export async function testMcpServer(serverId: string): Promise<McpServer> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/servers/${encodeURIComponent(serverId)}/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to test MCP server: ${response.status} ${text}`);
+  }
+  return (await response.json()) as McpServer;
+}
+
+export async function deleteMcpServer(serverId: string): Promise<DeleteMcpServerResponse> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/servers/${encodeURIComponent(serverId)}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to delete MCP server: ${response.status} ${text}`);
+  }
+  return (await response.json()) as DeleteMcpServerResponse;
+}
+
+export async function startZomatoMcpOAuth(): Promise<ZomatoMcpOAuthStart> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/zomato/oauth/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to start Zomato OAuth: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ZomatoMcpOAuthStart;
+}
+
+export async function completeZomatoMcpOAuth(payload: {
+  callbackUrl?: string | null;
+  code?: string | null;
+  state?: string | null;
+}): Promise<ZomatoMcpOAuthComplete> {
+  const response = await fetch(`${API_BASE_URL}/integrations/mcp/zomato/oauth/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to complete Zomato OAuth: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ZomatoMcpOAuthComplete;
 }
 
 export async function fetchTools(): Promise<ToolRecord[]> {
@@ -831,6 +1016,15 @@ export async function fetchChatMessages(sessionId: string): Promise<ChatMessage[
     throw new Error(`Unable to fetch chat messages: ${response.status}`);
   }
   return (await response.json()) as ChatMessage[];
+}
+
+export async function fetchChatMcpOAuthStatus(sessionId: string): Promise<ChatMcpOAuthStatus> {
+  const response = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}/mcp/oauth`, { cache: "no-store" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Unable to fetch MCP authorization status: ${response.status} ${text}`);
+  }
+  return (await response.json()) as ChatMcpOAuthStatus;
 }
 
 export async function sendChatMessage(

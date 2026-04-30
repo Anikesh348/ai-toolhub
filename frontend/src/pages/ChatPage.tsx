@@ -8,6 +8,7 @@ import {
   ChatSession,
   ChatStreamEvent,
   createChatSession,
+  fetchChatMcpOAuthStatus,
   fetchChatModels,
   fetchChatMessages,
   fetchChatSessions,
@@ -72,6 +73,24 @@ type ToolBuilderIntakeState = {
 };
 type ToolBuilderBooleanField = "requiresFrontend" | "requiresBackend" | "requiresMongo" | "requiresCron";
 type PendingImageAttachment = { file: File; previewUrl: string };
+type McpOAuthRequest = {
+  url: string;
+  serverName: string | null;
+  message: string;
+};
+
+function isBrokenZomatoDockerOAuthUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const redirectUri = parsed.searchParams.get("redirect_uri") || "";
+    return (
+      parsed.hostname === "mcp-server.zomato.com"
+      && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/callback/i.test(redirectUri)
+    );
+  } catch {
+    return false;
+  }
+}
 
 const MODE_OPTIONS: Array<{ value: SelectableMode; label: string }> = [
   { value: "general", label: "General" },
@@ -291,6 +310,8 @@ const COMPANION_PANEL_STORAGE_KEY = "toolhub.chat.companion.width";
 const DEFAULT_COMPANION_PANEL_WIDTH = 320;
 const MIN_COMPANION_PANEL_WIDTH = 280;
 const MAX_COMPANION_PANEL_WIDTH = 420;
+const SHORTS_START_HISTORY_STORAGE_KEY = "toolhub.chat.shorts.recent-starts";
+const SHORTS_START_HISTORY_LIMIT = 12;
 const SHORTS_NON_REPEAT_WINDOW = 50;
 const SHORTS_FETCH_BATCH_SIZE = 24;
 const SHORTS_PREFETCH_THRESHOLD = 12;
@@ -474,19 +495,59 @@ type ShortsFeedState = {
   recentIds: string[];
 };
 
-function createInitialShortFeedState(pool: YouTubeShort[]): ShortsFeedState {
+type YouTubeShortEmbedOptions = {
+  autoplay?: boolean;
+  mute?: boolean;
+  controls?: boolean;
+};
+
+function readRecentShortStartIds(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(SHORTS_START_HISTORY_STORAGE_KEY);
+    const parsedValue = rawValue ? JSON.parse(rawValue) : [];
+    return Array.isArray(parsedValue)
+      ? parsedValue.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberShortSessionStart(shortId: string): void {
+  if (typeof window === "undefined" || !shortId) {
+    return;
+  }
+
+  try {
+    const recentStarts = readRecentShortStartIds();
+    const nextStarts = [shortId, ...recentStarts.filter((id) => id !== shortId)].slice(0, SHORTS_START_HISTORY_LIMIT);
+    window.localStorage.setItem(SHORTS_START_HISTORY_STORAGE_KEY, JSON.stringify(nextStarts));
+  } catch {
+    // Ignore storage failures; random rotation still works for the current page.
+  }
+}
+
+function createInitialShortFeedState(pool: YouTubeShort[], rememberStart = true): ShortsFeedState {
   if (pool.length <= 0) {
     return { history: [], cursor: 0, recentIds: [] };
   }
-  const firstShort = pool[Math.floor(Math.random() * pool.length)] ?? pool[0];
+  const recentStarts = readRecentShortStartIds();
+  const firstShort = pickNextShortFromPool(pool, recentStarts, recentStarts[0]) ?? pool[0];
   if (!firstShort) {
     return { history: [], cursor: 0, recentIds: [] };
   }
-  return {
+  if (rememberStart) {
+    rememberShortSessionStart(firstShort.id);
+  }
+  return ensureShortLookahead({
     history: [firstShort],
     cursor: 0,
     recentIds: [firstShort.id]
-  };
+  }, pool);
 }
 
 function pickNextShortFromPool(
@@ -542,14 +603,42 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function buildYouTubeShortEmbedUrl(videoId: string): string {
+function ensureShortLookahead(state: ShortsFeedState, pool: YouTubeShort[]): ShortsFeedState {
+  if (pool.length <= 1 || state.history.length <= 0 || state.cursor < state.history.length - 1) {
+    return state;
+  }
+
+  const activeShortId = state.history[state.cursor]?.id;
+  const nextShort = pickNextShortFromPool(pool, state.recentIds, activeShortId);
+  if (!nextShort) {
+    return state;
+  }
+
+  const nonRepeatWindow = Math.max(1, Math.min(pool.length - 1, SHORTS_NON_REPEAT_WINDOW));
+  return {
+    ...state,
+    history: [...state.history, nextShort],
+    recentIds: [...state.recentIds, nextShort.id].slice(-nonRepeatWindow)
+  };
+}
+
+function advanceShortFeedState(state: ShortsFeedState, pool: YouTubeShort[]): ShortsFeedState {
+  if (state.cursor < state.history.length - 1) {
+    return ensureShortLookahead({ ...state, cursor: state.cursor + 1 }, pool);
+  }
+  return ensureShortLookahead(appendNextShort(state, pool), pool);
+}
+
+function buildYouTubeShortEmbedUrl(videoId: string, options: YouTubeShortEmbedOptions = {}): string {
   const params = new URLSearchParams({
-    autoplay: "1",
-    mute: "0",
+    autoplay: options.autoplay === false ? "0" : "1",
+    loop: "1",
+    playlist: videoId,
+    mute: options.mute ? "1" : "0",
     playsinline: "1",
     rel: "0",
     modestbranding: "1",
-    controls: "1"
+    controls: options.controls === false ? "0" : "1"
   });
   return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${params.toString()}`;
 }
@@ -747,6 +836,7 @@ function ToolBuilderIntakeModal({
 function ThinkingCompanionPanel({
   mode,
   activeShort,
+  preloadedShort,
   article,
   onMinimize,
   onOpenShort,
@@ -762,6 +852,7 @@ function ThinkingCompanionPanel({
 }: {
   mode: SelectableThinkingPanelMode;
   activeShort: YouTubeShort;
+  preloadedShort: YouTubeShort | null;
   article: KnowledgeArticle;
   onMinimize: () => void;
   onOpenShort: () => void;
@@ -776,6 +867,9 @@ function ThinkingCompanionPanel({
   allowExternalOpen: boolean;
 }) {
   const shortEmbedUrl = buildYouTubeShortEmbedUrl(activeShort.id);
+  const preloadedShortEmbedUrl = preloadedShort?.id
+    ? buildYouTubeShortEmbedUrl(preloadedShort.id, { autoplay: false, mute: true, controls: false })
+    : null;
 
   if (mode === "insta") {
     return (
@@ -860,6 +954,19 @@ function ThinkingCompanionPanel({
               allowFullScreen
               className="absolute inset-0 h-full w-full border-0"
             />
+            {preloadedShortEmbedUrl && preloadedShort && (
+              <iframe
+                key={`preload-${preloadedShort.id}`}
+                title={`Preload ${preloadedShort.title}`}
+                src={preloadedShortEmbedUrl}
+                loading="eager"
+                referrerPolicy="strict-origin-when-cross-origin"
+                allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                aria-hidden="true"
+                tabIndex={-1}
+                className="pointer-events-none absolute -left-px -top-px h-px w-px border-0 opacity-0"
+              />
+            )}
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-black/90 via-black/30 to-transparent" />
             <div className="absolute bottom-3 left-3 right-14 rounded-2xl border border-white/10 bg-black/60 px-3 py-2 backdrop-blur">
               <p className="text-sm font-medium leading-5 text-[color:var(--text-main)]">
@@ -1127,9 +1234,11 @@ function ChatPageContent() {
   const [activeArticleIndex, setActiveArticleIndex] = useState(0);
   const [shortPool, setShortPool] = useState<YouTubeShort[]>(() => YOUTUBE_SHORTS);
   const [shortFeedState, setShortFeedState] = useState<ShortsFeedState>(() =>
-    createInitialShortFeedState(YOUTUBE_SHORTS)
+    createInitialShortFeedState(YOUTUBE_SHORTS, false)
   );
   const [shortFeedCursor, setShortFeedCursor] = useState<string | null>(null);
+  const [mcpOAuthRequest, setMcpOAuthRequest] = useState<McpOAuthRequest | null>(null);
+  const [mcpOAuthCopyStatus, setMcpOAuthCopyStatus] = useState<string | null>(null);
   const [isPhoneViewport, setIsPhoneViewport] = useState(false);
   const [isStandalonePwa, setIsStandalonePwa] = useState(false);
 
@@ -1149,13 +1258,16 @@ function ChatPageContent() {
   const shortPoolIdsRef = useRef<Set<string>>(new Set(YOUTUBE_SHORTS.map((short) => short.id)));
   const shortFeedCursorRef = useRef<string | null>(null);
   const wasThinkingActiveRef = useRef(false);
+  const companionAsideRef = useRef<HTMLElement | null>(null);
+  const companionResizeRafRef = useRef<number | null>(null);
+  const companionDragWidthRef = useRef<number | null>(null);
 
   const clampCompanionPanelWidth = useCallback((width: number): number => {
     if (typeof window === "undefined") {
       return Math.max(MIN_COMPANION_PANEL_WIDTH, Math.min(MAX_COMPANION_PANEL_WIDTH, width));
     }
 
-    const viewportCap = Math.floor(window.innerWidth * 0.86);
+    const viewportCap = Math.floor(window.innerWidth * 0.96);
     const maxAllowed = Math.max(MIN_COMPANION_PANEL_WIDTH, Math.min(MAX_COMPANION_PANEL_WIDTH, viewportCap));
     return Math.max(MIN_COMPANION_PANEL_WIDTH, Math.min(maxAllowed, width));
   }, []);
@@ -1259,15 +1371,7 @@ function ChatPageContent() {
   }, []);
 
   const handleNextShort = useCallback((): void => {
-    setShortFeedState((current) => {
-      if (current.cursor < current.history.length - 1) {
-        return {
-          ...current,
-          cursor: current.cursor + 1
-        };
-      }
-      return appendNextShort(current, shortPool);
-    });
+    setShortFeedState((current) => advanceShortFeedState(current, shortPool));
   }, [shortPool]);
 
   const handlePreviousShort = useCallback((): void => {
@@ -1309,6 +1413,11 @@ function ChatPageContent() {
     return shortFeedState.history[historyIndex] ?? shortFeedState.history[0] ?? fallbackShort;
   }, [shortFeedState]);
 
+  const preloadedShort = useMemo(() => {
+    const nextIndex = shortFeedState.cursor + 1;
+    return shortFeedState.history[nextIndex] ?? null;
+  }, [shortFeedState]);
+
   const openActiveShort = useCallback((): void => {
     if (!activeShort.id) {
       return;
@@ -1321,10 +1430,20 @@ function ChatPageContent() {
   }, [activeShort, isPhoneViewport, isStandalonePwa]);
 
   useEffect(() => {
+    if (thinkingPanelMode !== "insta") {
+      return;
+    }
     shortFeedExhaustedRef.current = false;
     shortFeedRequestInFlightRef.current = false;
     setShortFeedState(createInitialShortFeedState(shortPool));
-  }, [activeChatId]);
+  }, [activeChatId, thinkingPanelCycle, thinkingPanelMode]);
+
+  useEffect(() => {
+    if (thinkingPanelMode !== "insta") {
+      return;
+    }
+    setShortFeedState((current) => ensureShortLookahead(current, shortPool));
+  }, [thinkingPanelMode, shortPool]);
 
   useEffect(() => {
     shortFeedCursorRef.current = shortFeedCursor;
@@ -1481,32 +1600,87 @@ function ChatPageContent() {
   const handleCompanionResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>): void => {
       event.preventDefault();
+      const handleElement = event.currentTarget;
+      const pointerId = event.pointerId;
       const startX = event.clientX;
       const startWidth = companionPanelWidth;
+      companionDragWidthRef.current = startWidth;
 
       const previousUserSelect = document.body.style.userSelect;
       const previousCursor = document.body.style.cursor;
       document.body.style.userSelect = "none";
       document.body.style.cursor = "col-resize";
 
+      if (handleElement.setPointerCapture) {
+        try {
+          handleElement.setPointerCapture(pointerId);
+        } catch {
+          // Ignore capture errors and keep fallback listeners active.
+        }
+      }
+
       const onPointerMove = (moveEvent: PointerEvent): void => {
+        if (moveEvent.pointerId !== pointerId) {
+          return;
+        }
         const delta = moveEvent.clientX - startX;
         const nextWidth = clampCompanionPanelWidth(startWidth - delta);
-        setCompanionPanelWidth(nextWidth);
+        companionDragWidthRef.current = nextWidth;
+        if (companionResizeRafRef.current !== null) {
+          return;
+        }
+        companionResizeRafRef.current = window.requestAnimationFrame(() => {
+          companionResizeRafRef.current = null;
+          const draftWidth = companionDragWidthRef.current;
+          if (typeof draftWidth !== "number" || !companionAsideRef.current) {
+            return;
+          }
+          companionAsideRef.current.style.width = `min(${draftWidth}px, 96vw)`;
+        });
       };
 
-      const onPointerUp = (): void => {
+      const stopResize = (): void => {
+        if (companionResizeRafRef.current !== null) {
+          window.cancelAnimationFrame(companionResizeRafRef.current);
+          companionResizeRafRef.current = null;
+        }
+        const finalWidth = companionDragWidthRef.current;
+        if (typeof finalWidth === "number") {
+          setCompanionPanelWidth(finalWidth);
+        }
         document.body.style.userSelect = previousUserSelect;
         document.body.style.cursor = previousCursor;
-        window.removeEventListener("pointermove", onPointerMove);
-        window.removeEventListener("pointerup", onPointerUp);
+        handleElement.removeEventListener("pointermove", onPointerMove);
+        handleElement.removeEventListener("pointerup", stopResize);
+        handleElement.removeEventListener("pointercancel", stopResize);
+        handleElement.removeEventListener("lostpointercapture", stopResize);
+        window.removeEventListener("blur", stopResize);
+        if (handleElement.hasPointerCapture?.(pointerId)) {
+          try {
+            handleElement.releasePointerCapture(pointerId);
+          } catch {
+            // Ignore release errors when pointer is already released.
+          }
+        }
       };
 
-      window.addEventListener("pointermove", onPointerMove);
-      window.addEventListener("pointerup", onPointerUp);
+      handleElement.addEventListener("pointermove", onPointerMove);
+      handleElement.addEventListener("pointerup", stopResize);
+      handleElement.addEventListener("pointercancel", stopResize);
+      handleElement.addEventListener("lostpointercapture", stopResize);
+      window.addEventListener("blur", stopResize);
     },
     [clampCompanionPanelWidth, companionPanelWidth]
   );
+
+  useEffect(() => {
+    return () => {
+      if (companionResizeRafRef.current !== null) {
+        window.cancelAnimationFrame(companionResizeRafRef.current);
+        companionResizeRafRef.current = null;
+      }
+    };
+  }, []);
 
   async function loadChats(): Promise<ChatSession[]> {
     const data = sortChatsForSidebar(await fetchChatSessions());
@@ -1706,6 +1880,8 @@ function ChatPageContent() {
     streamTokenRef.current += 1;
     setStreamActivity("ready");
     setStreamingAssistant("");
+    setMcpOAuthRequest(null);
+    setMcpOAuthCopyStatus(null);
     optimisticUserMessageRef.current = null;
 
     if (!activeChatId) {
@@ -1755,6 +1931,41 @@ function ChatPageContent() {
       window.clearInterval(intervalId);
     };
   }, [activeChatId, messages, sending, streamingAssistant]);
+
+  useEffect(() => {
+    if (!activeChatId || mcpOAuthRequest || streamActivity === "ready") {
+      return;
+    }
+
+    let cancelled = false;
+    const targetChatId = activeChatId;
+    const pollForOAuthRequest = async (): Promise<void> => {
+      try {
+        const status = await fetchChatMcpOAuthStatus(targetChatId);
+        if (cancelled || activeChatIdRef.current !== targetChatId || !status.available || !status.url) {
+          return;
+        }
+        setMcpOAuthRequest({
+          url: status.url,
+          serverName: status.serverName,
+          message: status.message || "Authorize this MCP server, then return to this chat while the request continues."
+        });
+        setMcpOAuthCopyStatus(null);
+      } catch {
+        // The stream path remains primary; this poller only rescues blocked OAuth prompts.
+      }
+    };
+
+    void pollForOAuthRequest();
+    const intervalId = window.setInterval(() => {
+      void pollForOAuthRequest();
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeChatId, mcpOAuthRequest, streamActivity]);
 
   useEffect(() => {
     if (!requestedChatId) {
@@ -1856,6 +2067,16 @@ function ChatPageContent() {
       }
       return;
     }
+    if (event.type === "mcp_oauth") {
+      setMcpOAuthRequest({
+        url: event.url,
+        serverName: event.serverName,
+        message: event.message
+      });
+      setMcpOAuthCopyStatus(null);
+      setStreamActivity("thinking");
+      return;
+    }
     if (event.type === "assistant_delta") {
       setStreamActivity("thinking");
       setStreamingAssistant((current) => `${current}${event.delta}`);
@@ -1876,6 +2097,25 @@ function ChatPageContent() {
     if (event.type === "done") {
       setStreamActivity("ready");
       setStreamingAssistant("");
+    }
+  }
+
+  function openMcpOAuthRequest(): void {
+    if (!mcpOAuthRequest?.url) {
+      return;
+    }
+    window.open(mcpOAuthRequest.url, "_blank", "noopener,noreferrer");
+  }
+
+  async function copyMcpOAuthUrl(): Promise<void> {
+    if (!mcpOAuthRequest?.url) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(mcpOAuthRequest.url);
+      setMcpOAuthCopyStatus("Authorization link copied.");
+    } catch {
+      setMcpOAuthCopyStatus("Unable to copy automatically.");
     }
   }
 
@@ -2182,6 +2422,8 @@ function ChatPageContent() {
     setMessages((current) => [...current, optimisticUserMessage]);
     setThinkingPanelCycle((current) => current + 1);
     streamTokenRef.current = streamToken;
+    setMcpOAuthRequest(null);
+    setMcpOAuthCopyStatus(null);
     setPrompt("");
     if (imagesToUpload.length > 0) {
       clearPendingImages();
@@ -2267,6 +2509,9 @@ function ChatPageContent() {
     }
 
     setCompanionOpen(true);
+    if (nextMode === "insta") {
+      setShortFeedState(createInitialShortFeedState(shortPool));
+    }
     if (nextMode !== "knowledge") {
       setExpandedArticleOpen(false);
     }
@@ -2324,6 +2569,9 @@ function ChatPageContent() {
   const companionPanelStyleWidth = `min(${companionPanelWidth}px, 96vw)`;
   const activeArticle = KNOWLEDGE_ARTICLES[clampIndex(activeArticleIndex, KNOWLEDGE_ARTICLES.length)];
   const allowCompanionExternalOpen = !isPhoneViewport && !isStandalonePwa;
+  const mcpOAuthUsesBrokenZomatoRedirect = mcpOAuthRequest
+    ? isBrokenZomatoDockerOAuthUrl(mcpOAuthRequest.url)
+    : false;
 
   return (
     <main className="chat-page-root relative flex h-full min-h-0 w-full min-w-0 max-w-full flex-col overflow-hidden lg:flex-row">
@@ -2667,6 +2915,53 @@ function ChatPageContent() {
         onApply={handleApplyToolBuilderIntake}
       />
 
+      {mcpOAuthRequest && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
+          <button
+            type="button"
+            aria-label="Close MCP authorization prompt"
+            onClick={() => setMcpOAuthRequest(null)}
+            className="absolute inset-0"
+          />
+          <section className="relative z-[81] w-full max-w-lg border border-amber/25 bg-[#11100d] p-5 shadow-[0_24px_70px_-34px_rgba(0,0,0,0.95)]">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">MCP Authorization</p>
+            <h2 className="mt-2 text-lg font-semibold text-[color:var(--text-main)]">
+              {mcpOAuthUsesBrokenZomatoRedirect
+                ? "Zomato Docker Gateway auth is blocked"
+                : `Authorize ${mcpOAuthRequest.serverName || "MCP server"}`}
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-muted">
+              {mcpOAuthUsesBrokenZomatoRedirect
+                ? "Zomato rejects Docker/Codex localhost callbacks. Do not use this link; disable the Docker Gateway Zomato entry in Profile > MCP Servers and use Connect Zomato instead."
+                : `${mcpOAuthRequest.message} Keep this chat open; the request will continue after authorization finishes.`}
+            </p>
+            <div className="mt-4 max-h-28 overflow-auto border border-amber/15 bg-black/35 p-3">
+              <p className="break-all font-[var(--font-mono)] text-[11px] leading-5 text-muted">
+                {mcpOAuthRequest.url}
+              </p>
+            </div>
+            {mcpOAuthCopyStatus && <p className="mt-2 text-xs text-muted">{mcpOAuthCopyStatus}</p>}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => void copyMcpOAuthUrl()}
+                className="btn-ghost px-4 py-2 text-sm"
+              >
+                Copy Link
+              </button>
+              <button
+                type="button"
+                onClick={openMcpOAuthRequest}
+                disabled={mcpOAuthUsesBrokenZomatoRedirect}
+                className="btn-primary px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {mcpOAuthUsesBrokenZomatoRedirect ? "Use Connect Zomato" : "Authorize MCP"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {companionEnabled && companionOpen && thinkingPanelContentMode && (
         <>
           <button
@@ -2676,6 +2971,7 @@ function ChatPageContent() {
             className="fixed inset-0 z-[46] bg-black/60 lg:hidden"
           />
           <aside
+            ref={companionAsideRef}
             className="chat-companion-aside fixed inset-y-0 right-0 z-50 flex min-h-0 overflow-hidden border-l border-amber/20 bg-black/45 text-[color:var(--text-main)] shadow-[0_18px_48px_-24px_rgba(0,0,0,0.9)] backdrop-blur-xl lg:relative lg:z-auto lg:h-full lg:shrink-0 lg:shadow-none"
             style={{ width: companionPanelStyleWidth }}
           >
@@ -2693,6 +2989,7 @@ function ChatPageContent() {
             <ThinkingCompanionPanel
               mode={thinkingPanelContentMode}
               activeShort={activeShort}
+              preloadedShort={preloadedShort}
               article={activeArticle}
               onMinimize={() => setCompanionOpen(false)}
               onOpenShort={openActiveShort}
