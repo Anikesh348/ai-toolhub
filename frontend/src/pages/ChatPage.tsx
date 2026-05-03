@@ -1245,8 +1245,13 @@ function ChatPageContent() {
   const initializedRef = useRef(false);
   const handledNewTokenRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const streamingAssistantRef = useRef<HTMLDivElement | null>(null);
+  const messageElementRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const activeChatIdRef = useRef<string | null>(null);
   const streamTokenRef = useRef(0);
+  const pendingScrollToEndRef = useRef(false);
+  const pendingAssistantScrollMessageIdRef = useRef<string | null>(null);
+  const pendingStreamingStartScrollRef = useRef(false);
   const optimisticUserMessageRef = useRef<{ chatId: string; messageId: string; message: ChatMessage } | null>(null);
   const sendingChatIdRef = useRef<string | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -1285,6 +1290,25 @@ function ChatPageContent() {
 
   function resolveModelForNewChat(): string | null {
     return defaultModel ?? availableModels[0] ?? resolveModelForRequest();
+  }
+
+  function scrollChatTargetIntoView(element: HTMLElement | null, block: ScrollLogicalPosition): void {
+    if (!element) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      element.scrollIntoView({ behavior: "smooth", block, inline: "nearest" });
+    });
+  }
+
+  function latestAssistantMessageId(items: ChatMessage[]): string | null {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const message = items[index];
+      if (message?.role === "assistant") {
+        return message.id;
+      }
+    }
+    return null;
   }
 
   function clearCopyFeedbackTimeout(): void {
@@ -1883,6 +1907,9 @@ function ChatPageContent() {
     setMcpOAuthRequest(null);
     setMcpOAuthCopyStatus(null);
     optimisticUserMessageRef.current = null;
+    pendingAssistantScrollMessageIdRef.current = null;
+    pendingStreamingStartScrollRef.current = false;
+    pendingScrollToEndRef.current = false;
 
     if (!activeChatId) {
       setMessages([]);
@@ -1894,6 +1921,7 @@ function ChatPageContent() {
     void fetchChatMessages(activeChatId)
       .then((data) => {
         const merged = mergeFetchedMessagesWithOptimistic(data, activeChatId);
+        pendingScrollToEndRef.current = true;
         setMessages(merged);
         setStreamActivity(hasPendingAssistantReply(merged) ? "thinking" : "ready");
       })
@@ -1919,6 +1947,9 @@ function ChatPageContent() {
             return;
           }
           const merged = mergeFetchedMessagesWithOptimistic(data, targetChatId);
+          if (hasPendingAssistantReply(messages) && !hasPendingAssistantReply(merged)) {
+            pendingAssistantScrollMessageIdRef.current = latestAssistantMessageId(merged);
+          }
           setMessages(merged);
           setStreamActivity(hasPendingAssistantReply(merged) ? "thinking" : "ready");
         })
@@ -1981,7 +2012,27 @@ function ChatPageContent() {
   }, [requestedChatId, chats]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const pendingAssistantMessageId = pendingAssistantScrollMessageIdRef.current;
+    if (pendingAssistantMessageId) {
+      const element = messageElementRefs.current.get(pendingAssistantMessageId);
+      if (element) {
+        pendingAssistantScrollMessageIdRef.current = null;
+        pendingStreamingStartScrollRef.current = false;
+        scrollChatTargetIntoView(element, "start");
+        return;
+      }
+    }
+
+    if (pendingScrollToEndRef.current) {
+      pendingScrollToEndRef.current = false;
+      scrollChatTargetIntoView(messagesEndRef.current, "end");
+      return;
+    }
+
+    if (pendingStreamingStartScrollRef.current && (streamActivity !== "ready" || streamingAssistant)) {
+      pendingStreamingStartScrollRef.current = false;
+      scrollChatTargetIntoView(streamingAssistantRef.current, "start");
+    }
   }, [messages, streamingAssistant, streamActivity]);
 
   function mergeFetchedMessagesWithOptimistic(fetched: ChatMessage[], chatId: string): ChatMessage[] {
@@ -2086,6 +2137,8 @@ function ChatPageContent() {
       upsertChat(event.session);
       setStreamActivity("ready");
       setStreamingAssistant("");
+      pendingAssistantScrollMessageIdRef.current = event.message.id;
+      pendingStreamingStartScrollRef.current = false;
       setMessages((current) => {
         if (current.some((message) => message.id === event.message.id)) {
           return current;
@@ -2419,6 +2472,8 @@ function ChatPageContent() {
       messageId: optimisticUserMessage.id,
       message: optimisticUserMessage
     };
+    pendingScrollToEndRef.current = true;
+    pendingStreamingStartScrollRef.current = true;
     setMessages((current) => [...current, optimisticUserMessage]);
     setThinkingPanelCycle((current) => current + 1);
     streamTokenRef.current = streamToken;
@@ -2618,7 +2673,17 @@ function ChatPageContent() {
                 const messageAttachments = parseMessageAttachments(message.metadata ?? {});
                 const isCopied = copiedMessageId === message.id;
                 return (
-                  <div key={message.id} className={`flex w-full min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div
+                    key={message.id}
+                    ref={(element) => {
+                      if (element) {
+                        messageElementRefs.current.set(message.id, element);
+                      } else {
+                        messageElementRefs.current.delete(message.id);
+                      }
+                    }}
+                    className={`flex w-full min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
                     <div
                       className={`group relative min-w-0 max-w-[88%] overflow-hidden px-3 py-2.5 ${
                         message.role === "user"
@@ -2677,7 +2742,7 @@ function ChatPageContent() {
               })}
 
               {(streamActivity !== "ready" || streamingAssistant) && (
-                <div className="flex w-full min-w-0 justify-start">
+                <div ref={streamingAssistantRef} className="flex w-full min-w-0 justify-start">
                   <div className="min-w-0 max-w-[88%] overflow-hidden px-3 py-2.5 text-[color:var(--text-main)]">
                     {streamingAssistant ? (
                       <ChatMarkdown content={streamingAssistant} />
