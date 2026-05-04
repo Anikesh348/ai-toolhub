@@ -13,7 +13,6 @@ from app.repositories.build_log_artifact_repository import BuildLogArtifactRepos
 from app.repositories.chat_execution_log_repository import ChatExecutionLogRepository
 from app.repositories.chat_message_repository import ChatMessageRepository
 from app.repositories.chat_session_repository import ChatSessionRepository
-from app.repositories.mcp_server_repository import McpServerRepository
 from app.repositories.port_allocation_repository import PortAllocationRepository
 from app.repositories.request_repository import RequestRepository
 from app.repositories.tool_repository import ToolRepository
@@ -24,7 +23,6 @@ from app.services.codex_service import CodexService
 from app.services.docker_service import DockerService
 from app.services.instagram_service import InstagramService
 from app.services.memory_service import MemoryService
-from app.services.mcp_service import McpService
 from app.services.monitor_service import ToolMonitorService
 from app.services.operator_access_service import OperatorAccessService
 from app.services.port_allocator_service import PortAllocatorService
@@ -50,7 +48,6 @@ class AppState:
     browser_screenshot_service: Optional[BrowserScreenshotService] = None
     instagram_service: Optional[InstagramService] = None
     youtube_service: Optional[YouTubeService] = None
-    mcp_service: Optional[McpService] = None
 
 
 app_state = AppState()
@@ -88,7 +85,6 @@ def create_app() -> FastAPI:
         chat_sessions_collection_name = f"{settings.mongo_collection_prefix}_chat_sessions"
         chat_messages_collection_name = f"{settings.mongo_collection_prefix}_chat_messages"
         chat_execution_logs_collection_name = f"{settings.mongo_collection_prefix}_chat_execution_logs"
-        mcp_servers_collection_name = f"{settings.mongo_collection_prefix}_mcp_servers"
 
         db[requests_collection_name].create_index("status")
         db[requests_collection_name].create_index([("createdAt", -1)])
@@ -111,8 +107,6 @@ def create_app() -> FastAPI:
         db[chat_messages_collection_name].create_index([("sessionId", 1), ("createdAt", 1)])
         db[chat_execution_logs_collection_name].create_index([("sessionId", 1), ("createdAt", -1)])
         db[chat_execution_logs_collection_name].create_index([("mode", 1), ("createdAt", -1)])
-        db[mcp_servers_collection_name].create_index([("enabled", 1), ("createdAt", 1)])
-        db[mcp_servers_collection_name].create_index("name")
 
         request_repository = RequestRepository(db[requests_collection_name])
         build_log_repository = BuildLogRepository(db[logs_collection_name])
@@ -122,10 +116,8 @@ def create_app() -> FastAPI:
         chat_session_repository = ChatSessionRepository(db[chat_sessions_collection_name])
         chat_message_repository = ChatMessageRepository(db[chat_messages_collection_name])
         chat_execution_log_repository = ChatExecutionLogRepository(db[chat_execution_logs_collection_name])
-        mcp_server_repository = McpServerRepository(db[mcp_servers_collection_name])
         instagram_service = InstagramService(settings=settings)
         youtube_service = YouTubeService(settings=settings)
-        mcp_service = McpService(repository=mcp_server_repository)
 
         docker_service = DockerService(settings)
         prompt_service = PromptService()
@@ -200,7 +192,6 @@ def create_app() -> FastAPI:
             usd_inr_rate_timeout_seconds=settings.usd_inr_rate_timeout_seconds,
             usd_inr_rate_cache_ttl_seconds=settings.usd_inr_rate_cache_ttl_seconds,
             usd_inr_rate_fallback=settings.usd_inr_rate_fallback,
-            mcp_service=mcp_service,
         )
 
         app_state.mongo_client = mongo_client
@@ -211,7 +202,6 @@ def create_app() -> FastAPI:
         app_state.browser_screenshot_service = browser_screenshot_service
         app_state.instagram_service = instagram_service
         app_state.youtube_service = youtube_service
-        app_state.mcp_service = mcp_service
 
     @app.on_event("shutdown")
     def shutdown_event() -> None:
@@ -222,7 +212,6 @@ def create_app() -> FastAPI:
         app_state.browser_screenshot_service = None
         app_state.instagram_service = None
         app_state.youtube_service = None
-        app_state.mcp_service = None
         if app_state.mongo_client:
             app_state.mongo_client.close()
 

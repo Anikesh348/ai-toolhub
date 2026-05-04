@@ -8,7 +8,6 @@ import {
   ChatSession,
   ChatStreamEvent,
   createChatSession,
-  fetchChatMcpOAuthStatus,
   fetchChatModels,
   fetchChatMessages,
   fetchChatSessions,
@@ -73,24 +72,6 @@ type ToolBuilderIntakeState = {
 };
 type ToolBuilderBooleanField = "requiresFrontend" | "requiresBackend" | "requiresMongo" | "requiresCron";
 type PendingImageAttachment = { file: File; previewUrl: string };
-type McpOAuthRequest = {
-  url: string;
-  serverName: string | null;
-  message: string;
-};
-
-function isBrokenZomatoDockerOAuthUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const redirectUri = parsed.searchParams.get("redirect_uri") || "";
-    return (
-      parsed.hostname === "mcp-server.zomato.com"
-      && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/callback/i.test(redirectUri)
-    );
-  } catch {
-    return false;
-  }
-}
 
 const MODE_OPTIONS: Array<{ value: SelectableMode; label: string }> = [
   { value: "general", label: "General" },
@@ -1237,8 +1218,6 @@ function ChatPageContent() {
     createInitialShortFeedState(YOUTUBE_SHORTS, false)
   );
   const [shortFeedCursor, setShortFeedCursor] = useState<string | null>(null);
-  const [mcpOAuthRequest, setMcpOAuthRequest] = useState<McpOAuthRequest | null>(null);
-  const [mcpOAuthCopyStatus, setMcpOAuthCopyStatus] = useState<string | null>(null);
   const [isPhoneViewport, setIsPhoneViewport] = useState(false);
   const [isStandalonePwa, setIsStandalonePwa] = useState(false);
 
@@ -1904,8 +1883,6 @@ function ChatPageContent() {
     streamTokenRef.current += 1;
     setStreamActivity("ready");
     setStreamingAssistant("");
-    setMcpOAuthRequest(null);
-    setMcpOAuthCopyStatus(null);
     optimisticUserMessageRef.current = null;
     pendingAssistantScrollMessageIdRef.current = null;
     pendingStreamingStartScrollRef.current = false;
@@ -1962,41 +1939,6 @@ function ChatPageContent() {
       window.clearInterval(intervalId);
     };
   }, [activeChatId, messages, sending, streamingAssistant]);
-
-  useEffect(() => {
-    if (!activeChatId || mcpOAuthRequest || streamActivity === "ready") {
-      return;
-    }
-
-    let cancelled = false;
-    const targetChatId = activeChatId;
-    const pollForOAuthRequest = async (): Promise<void> => {
-      try {
-        const status = await fetchChatMcpOAuthStatus(targetChatId);
-        if (cancelled || activeChatIdRef.current !== targetChatId || !status.available || !status.url) {
-          return;
-        }
-        setMcpOAuthRequest({
-          url: status.url,
-          serverName: status.serverName,
-          message: status.message || "Authorize this MCP server, then return to this chat while the request continues."
-        });
-        setMcpOAuthCopyStatus(null);
-      } catch {
-        // The stream path remains primary; this poller only rescues blocked OAuth prompts.
-      }
-    };
-
-    void pollForOAuthRequest();
-    const intervalId = window.setInterval(() => {
-      void pollForOAuthRequest();
-    }, 1500);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [activeChatId, mcpOAuthRequest, streamActivity]);
 
   useEffect(() => {
     if (!requestedChatId) {
@@ -2118,16 +2060,6 @@ function ChatPageContent() {
       }
       return;
     }
-    if (event.type === "mcp_oauth") {
-      setMcpOAuthRequest({
-        url: event.url,
-        serverName: event.serverName,
-        message: event.message
-      });
-      setMcpOAuthCopyStatus(null);
-      setStreamActivity("thinking");
-      return;
-    }
     if (event.type === "assistant_delta") {
       setStreamActivity("thinking");
       setStreamingAssistant((current) => `${current}${event.delta}`);
@@ -2150,25 +2082,6 @@ function ChatPageContent() {
     if (event.type === "done") {
       setStreamActivity("ready");
       setStreamingAssistant("");
-    }
-  }
-
-  function openMcpOAuthRequest(): void {
-    if (!mcpOAuthRequest?.url) {
-      return;
-    }
-    window.open(mcpOAuthRequest.url, "_blank", "noopener,noreferrer");
-  }
-
-  async function copyMcpOAuthUrl(): Promise<void> {
-    if (!mcpOAuthRequest?.url) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(mcpOAuthRequest.url);
-      setMcpOAuthCopyStatus("Authorization link copied.");
-    } catch {
-      setMcpOAuthCopyStatus("Unable to copy automatically.");
     }
   }
 
@@ -2477,8 +2390,6 @@ function ChatPageContent() {
     setMessages((current) => [...current, optimisticUserMessage]);
     setThinkingPanelCycle((current) => current + 1);
     streamTokenRef.current = streamToken;
-    setMcpOAuthRequest(null);
-    setMcpOAuthCopyStatus(null);
     setPrompt("");
     if (imagesToUpload.length > 0) {
       clearPendingImages();
@@ -2624,10 +2535,6 @@ function ChatPageContent() {
   const companionPanelStyleWidth = `min(${companionPanelWidth}px, 96vw)`;
   const activeArticle = KNOWLEDGE_ARTICLES[clampIndex(activeArticleIndex, KNOWLEDGE_ARTICLES.length)];
   const allowCompanionExternalOpen = !isPhoneViewport && !isStandalonePwa;
-  const mcpOAuthUsesBrokenZomatoRedirect = mcpOAuthRequest
-    ? isBrokenZomatoDockerOAuthUrl(mcpOAuthRequest.url)
-    : false;
-
   return (
     <main className="chat-page-root relative flex h-full min-h-0 w-full min-w-0 max-w-full flex-col overflow-hidden lg:flex-row">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -2979,53 +2886,6 @@ function ChatPageContent() {
         onClose={() => setToolBuilderIntakeOpen(false)}
         onApply={handleApplyToolBuilderIntake}
       />
-
-      {mcpOAuthRequest && (
-        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm">
-          <button
-            type="button"
-            aria-label="Close MCP authorization prompt"
-            onClick={() => setMcpOAuthRequest(null)}
-            className="absolute inset-0"
-          />
-          <section className="relative z-[81] w-full max-w-lg border border-amber/25 bg-[#11100d] p-5 shadow-[0_24px_70px_-34px_rgba(0,0,0,0.95)]">
-            <p className="text-[11px] uppercase tracking-[0.18em] text-amber/70">MCP Authorization</p>
-            <h2 className="mt-2 text-lg font-semibold text-[color:var(--text-main)]">
-              {mcpOAuthUsesBrokenZomatoRedirect
-                ? "Zomato Docker Gateway auth is blocked"
-                : `Authorize ${mcpOAuthRequest.serverName || "MCP server"}`}
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-muted">
-              {mcpOAuthUsesBrokenZomatoRedirect
-                ? "Zomato rejects Docker/Codex localhost callbacks. Do not use this link; disable the Docker Gateway Zomato entry in Profile > MCP Servers and use Connect Zomato instead."
-                : `${mcpOAuthRequest.message} Keep this chat open; the request will continue after authorization finishes.`}
-            </p>
-            <div className="mt-4 max-h-28 overflow-auto border border-amber/15 bg-black/35 p-3">
-              <p className="break-all font-[var(--font-mono)] text-[11px] leading-5 text-muted">
-                {mcpOAuthRequest.url}
-              </p>
-            </div>
-            {mcpOAuthCopyStatus && <p className="mt-2 text-xs text-muted">{mcpOAuthCopyStatus}</p>}
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => void copyMcpOAuthUrl()}
-                className="btn-ghost px-4 py-2 text-sm"
-              >
-                Copy Link
-              </button>
-              <button
-                type="button"
-                onClick={openMcpOAuthRequest}
-                disabled={mcpOAuthUsesBrokenZomatoRedirect}
-                className="btn-primary px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {mcpOAuthUsesBrokenZomatoRedirect ? "Use Connect Zomato" : "Authorize MCP"}
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
 
       {companionEnabled && companionOpen && thinkingPanelContentMode && (
         <>

@@ -226,66 +226,6 @@ class UpdateYouTubeShortSettingsRequest(BaseModel):
     regionCode: Optional[str] = Field(default=None, max_length=8)
 
 
-McpTransport = Literal["stdio", "streamable_http", "docker_gateway"]
-McpConnectionStatus = Literal["untested", "ready", "error"]
-
-
-class McpServerResponse(BaseModel):
-    id: str
-    name: str
-    description: Optional[str] = None
-    transport: McpTransport
-    enabled: bool
-    command: Optional[str] = None
-    args: list[str] = Field(default_factory=list)
-    url: Optional[str] = None
-    dockerProfile: Optional[str] = None
-    dockerServers: list[str] = Field(default_factory=list)
-    codexName: str
-    envKeys: list[str] = Field(default_factory=list)
-    createdAt: datetime
-    updatedAt: datetime
-    lastTestedAt: Optional[datetime] = None
-    lastStatus: McpConnectionStatus = "untested"
-    lastMessage: str
-
-
-class StartZomatoMcpOAuthResponse(BaseModel):
-    authorizationUrl: str
-    redirectUri: str
-    state: str
-    message: str
-
-
-class CompleteZomatoMcpOAuthRequest(BaseModel):
-    callbackUrl: Optional[str] = Field(default=None, max_length=4000)
-    code: Optional[str] = Field(default=None, max_length=1000)
-    state: Optional[str] = Field(default=None, max_length=400)
-
-
-class CompleteZomatoMcpOAuthResponse(BaseModel):
-    message: str
-    server: McpServerResponse
-
-
-class UpsertMcpServerRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    description: Optional[str] = Field(default=None, max_length=400)
-    transport: McpTransport = "stdio"
-    enabled: bool = True
-    command: Optional[str] = Field(default=None, max_length=240)
-    args: list[str] = Field(default_factory=list, max_length=40)
-    url: Optional[str] = Field(default=None, max_length=1000)
-    dockerProfile: Optional[str] = Field(default=None, max_length=120)
-    dockerServers: list[str] = Field(default_factory=list, max_length=40)
-    env: dict[str, str] = Field(default_factory=dict, max_length=40)
-
-
-class DeleteMcpServerResponse(BaseModel):
-    id: str
-    deleted: bool
-
-
 ChatMode = Literal["general", "tool_builder", "operator", "pi_operator"]
 ChatRole = Literal["user", "assistant", "system", "tool"]
 
@@ -337,15 +277,6 @@ class SendChatMessageResponse(BaseModel):
 class StopChatStreamResponse(BaseModel):
     sessionId: str
     stopped: bool
-
-
-class ChatMcpOAuthResponse(BaseModel):
-    available: bool
-    url: Optional[str] = None
-    serverName: Optional[str] = None
-    message: str
-    containerFound: bool = False
-    containerStatus: Optional[str] = None
 
 
 class DeleteChatSessionResponse(BaseModel):

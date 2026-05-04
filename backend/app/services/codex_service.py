@@ -98,7 +98,6 @@ class CodexService:
         model: str | None = None,
         image_paths: list[str] | None = None,
         timeout_seconds: int | None = None,
-        mcp_setup_script: str | None = None,
     ) -> CommandResult:
         request_id = f"chat-{session_id}"
         host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
@@ -115,15 +114,10 @@ class CodexService:
         shell_command = self._apply_general_chat_exec_flags(shell_command)
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
-        shell_command = self._prepend_mcp_setup(shell_command=shell_command, mcp_setup_script=mcp_setup_script)
-        extra_volumes = self._mcp_runtime_volumes(mcp_setup_script)
-        network_mode = self._mcp_runtime_network_mode(mcp_setup_script)
         return self._run_builder_container_with_retries(
             request_id=request_id,
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.build_timeout_seconds,
-            extra_volumes=extra_volumes,
-            network_mode=network_mode,
         )
 
     def stream_chat(
@@ -133,7 +127,6 @@ class CodexService:
         model: str | None = None,
         image_paths: list[str] | None = None,
         timeout_seconds: int | None = None,
-        mcp_setup_script: str | None = None,
     ) -> Iterable[CommandStreamEvent]:
         request_id = f"chat-{session_id}"
         host_job_path, container_job_path = self._docker_service.ensure_job_workspace(request_id)
@@ -150,15 +143,10 @@ class CodexService:
         shell_command = self._apply_general_chat_exec_flags(shell_command)
         shell_command = self._apply_chat_model(shell_command=shell_command, model=model)
         shell_command = self._apply_chat_images(shell_command=shell_command, image_paths=image_paths)
-        shell_command = self._prepend_mcp_setup(shell_command=shell_command, mcp_setup_script=mcp_setup_script)
-        extra_volumes = self._mcp_runtime_volumes(mcp_setup_script)
-        network_mode = self._mcp_runtime_network_mode(mcp_setup_script)
         return self._docker_service.run_builder_container_stream_with_options(
             request_id=request_id,
             shell_command=shell_command,
             timeout_seconds=timeout_seconds or self._settings.build_timeout_seconds,
-            extra_volumes=extra_volumes,
-            network_mode=network_mode,
         )
 
     def stop_chat(self, session_id: str) -> None:
@@ -185,28 +173,6 @@ class CodexService:
             shell_command,
             count=1,
         )
-
-    @staticmethod
-    def _prepend_mcp_setup(shell_command: str, mcp_setup_script: str | None) -> str:
-        setup = (mcp_setup_script or "").strip()
-        if not setup:
-            return shell_command
-        return f"{setup}\n{shell_command}"
-
-    @staticmethod
-    def _mcp_runtime_volumes(mcp_setup_script: str | None) -> dict[str, dict[str, str]] | None:
-        if not (mcp_setup_script or "").strip():
-            return None
-        docker_socket = Path("/var/run/docker.sock")
-        if not docker_socket.exists():
-            return None
-        return {str(docker_socket): {"bind": "/var/run/docker.sock", "mode": "rw"}}
-
-    @staticmethod
-    def _mcp_runtime_network_mode(mcp_setup_script: str | None) -> str | None:
-        if not (mcp_setup_script or "").strip():
-            return None
-        return "host"
 
     def default_chat_model(self) -> str | None:
         return self._settings.default_chat_model

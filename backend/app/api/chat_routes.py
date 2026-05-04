@@ -7,7 +7,6 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.api.schemas import (
     ChatAttachmentResponse,
     ChatExecutionLogResponse,
-    ChatMcpOAuthResponse,
     ChatUsageSummaryResponse,
     ChatMessageResponse,
     ChatMode,
@@ -94,17 +93,6 @@ def list_chat_messages(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     messages = service.list_messages(session_id=session_id, limit=limit)
     return [ChatMessageResponse(**message) for message in messages]
-
-
-@router.get("/sessions/{session_id}/mcp/oauth", response_model=ChatMcpOAuthResponse)
-def get_chat_mcp_oauth_request(
-    session_id: str,
-    service: ChatService = Depends(get_chat_service),
-) -> ChatMcpOAuthResponse:
-    status_payload = service.get_active_mcp_oauth_request(session_id=session_id)
-    if status_payload.get("message") == "Session not found.":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    return ChatMcpOAuthResponse(**status_payload)
 
 
 @router.get("/models", response_model=ChatModelsResponse)

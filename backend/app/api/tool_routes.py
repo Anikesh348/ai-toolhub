@@ -9,8 +9,6 @@ from fastapi.responses import Response, StreamingResponse
 from app.api.schemas import (
     CodexAuthStatusResponse,
     CodexUsageStatusResponse,
-    CompleteZomatoMcpOAuthRequest,
-    CompleteZomatoMcpOAuthResponse,
     DeleteJobResponse,
     DeleteToolResponse,
     GenerateToolRequest,
@@ -22,12 +20,8 @@ from app.api.schemas import (
     JobLogArtifactResponse,
     JobResponse,
     JobSummaryResponse,
-    DeleteMcpServerResponse,
-    McpServerResponse,
-    StartZomatoMcpOAuthResponse,
     StopJobResponse,
     ToolResponse,
-    UpsertMcpServerRequest,
     YouTubeShortFeedResponse,
     YouTubeShortSettingsResponse,
     UpdateYouTubeShortSettingsRequest,
@@ -37,7 +31,6 @@ from app.api.schemas import (
 from app.models.status import BuildStatus
 from app.services.codex_service import CodexService
 from app.services.instagram_service import InstagramService
-from app.services.mcp_service import McpService
 from app.services.tool_builder_service import ToolBuilderService
 from app.services.youtube_service import YouTubeService
 
@@ -86,15 +79,6 @@ def get_youtube_service() -> YouTubeService:
     from app.main import app_state
 
     service = app_state.youtube_service
-    if service is None:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is initializing")
-    return service
-
-
-def get_mcp_service() -> McpService:
-    from app.main import app_state
-
-    service = app_state.mcp_service
     if service is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is initializing")
     return service
@@ -357,90 +341,6 @@ def update_youtube_shorts_settings(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return YouTubeShortSettingsResponse(**updated)
-
-
-@router.get("/integrations/mcp/servers", response_model=list[McpServerResponse])
-def list_mcp_servers(service: McpService = Depends(get_mcp_service)) -> list[McpServerResponse]:
-    return [McpServerResponse(**server) for server in service.list_servers()]
-
-
-@router.post("/integrations/mcp/zomato/oauth/start", response_model=StartZomatoMcpOAuthResponse)
-def start_zomato_mcp_oauth(
-    service: McpService = Depends(get_mcp_service),
-) -> StartZomatoMcpOAuthResponse:
-    try:
-        payload = service.start_zomato_oauth()
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return StartZomatoMcpOAuthResponse(**payload)
-
-
-@router.post("/integrations/mcp/zomato/oauth/complete", response_model=CompleteZomatoMcpOAuthResponse)
-def complete_zomato_mcp_oauth(
-    payload: CompleteZomatoMcpOAuthRequest,
-    service: McpService = Depends(get_mcp_service),
-) -> CompleteZomatoMcpOAuthResponse:
-    try:
-        result = service.complete_zomato_oauth(payload.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return CompleteZomatoMcpOAuthResponse(
-        message=str(result["message"]),
-        server=McpServerResponse(**result["server"]),
-    )
-
-
-@router.post(
-    "/integrations/mcp/servers",
-    response_model=McpServerResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_mcp_server(
-    payload: UpsertMcpServerRequest,
-    service: McpService = Depends(get_mcp_service),
-) -> McpServerResponse:
-    try:
-        server = service.create_server(payload.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return McpServerResponse(**server)
-
-
-@router.put("/integrations/mcp/servers/{server_id}", response_model=McpServerResponse)
-def update_mcp_server(
-    server_id: str,
-    payload: UpsertMcpServerRequest,
-    service: McpService = Depends(get_mcp_service),
-) -> McpServerResponse:
-    try:
-        server = service.update_server(server_id, payload.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    if server is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP server not found")
-    return McpServerResponse(**server)
-
-
-@router.post("/integrations/mcp/servers/{server_id}/test", response_model=McpServerResponse)
-def test_mcp_server(
-    server_id: str,
-    service: McpService = Depends(get_mcp_service),
-) -> McpServerResponse:
-    server = service.test_server(server_id)
-    if server is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP server not found")
-    return McpServerResponse(**server)
-
-
-@router.delete("/integrations/mcp/servers/{server_id}", response_model=DeleteMcpServerResponse)
-def delete_mcp_server(
-    server_id: str,
-    service: McpService = Depends(get_mcp_service),
-) -> DeleteMcpServerResponse:
-    deleted = service.delete_server(server_id)
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP server not found")
-    return DeleteMcpServerResponse(id=server_id, deleted=True)
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
