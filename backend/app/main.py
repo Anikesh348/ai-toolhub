@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -134,6 +135,10 @@ def create_app() -> FastAPI:
             memory_path=settings.resolved_agent_memory_path,
             enabled=settings.agent_memory_enabled,
         )
+        try:
+            memory_service.ensure_initialized()
+        except Exception:  # pylint: disable=broad-except
+            logging.getLogger(__name__).warning("Unable to initialize agent memory file", exc_info=True)
         operator_access_service = OperatorAccessService(settings)
         system_context_service = SystemContextService()
         testing_service = TestingService(settings, docker_service)

@@ -8,8 +8,14 @@ from app.utils.time import now_ist
 class MemoryService:
     _TYPE_BLOCK_START = "<!-- managed:message-types:start -->"
     _TYPE_BLOCK_END = "<!-- managed:message-types:end -->"
+    _ANALYSIS_BLOCK_START = "<!-- managed:chat-analysis:start -->"
+    _ANALYSIS_BLOCK_END = "<!-- managed:chat-analysis:end -->"
     _TYPE_LINE_RE = re.compile(
         r"^- \*\*(?P<kind>[^*]+)\*\*: (?P<count>\d+) message(?:s)?; last: (?P<last>[^;]+); recent: (?P<recent>.*)$"
+    )
+    _ANALYSIS_LINE_RE = re.compile(
+        r"^- \*\*(?P<kind>[^*]+)\*\*: (?P<count>\d+) message(?:s)?; "
+        r"last: (?P<last>[^;]+); signals: (?P<signals>[^;]*); recent: (?P<recent>.*)$"
     )
     _REMEMBER_PATTERNS = (
         re.compile(r"\b(?:please\s+)?remember(?:\s+that)?\s+(.+)", flags=re.IGNORECASE | re.DOTALL),
@@ -19,7 +25,10 @@ class MemoryService:
         re.compile(r"\badd\s+to\s+memory\s*:\s*(.+)", flags=re.IGNORECASE | re.DOTALL),
         re.compile(r"\bsave\s+(?:this\s+)?(?:to\s+)?memory\s*[:\-]?\s*(.+)", flags=re.IGNORECASE | re.DOTALL),
         re.compile(r"\bsave\s+(?:this\s+)?fact\s*[:\-]?\s*(?:that\s+)?(.+)", flags=re.IGNORECASE | re.DOTALL),
-        re.compile(r"\bstore\s+(?:this\s+)?(?:fact\s+)?(?:in\s+memory\s*)?[:\-]?\s*(?:that\s+)?(.+)", flags=re.IGNORECASE | re.DOTALL),
+        re.compile(
+            r"\bstore\s+(?:this\s+)?(?:fact\s+)?(?:in\s+memory\s*)?[:\-]?\s*(?:that\s+)?(.+)",
+            flags=re.IGNORECASE | re.DOTALL,
+        ),
     )
 
     def __init__(self, memory_path: str | Path, enabled: bool = True) -> None:
@@ -39,6 +48,15 @@ class MemoryService:
             return ""
         return content.strip()[:limit]
 
+    def ensure_initialized(self) -> None:
+        if not self._enabled:
+            return
+        with self._lock:
+            existing = self._read()
+            if existing.strip():
+                return
+            self._write(self._ensure_document(existing))
+
     def update_from_user_message(self, content: str, mode: str) -> None:
         if not self._enabled:
             return
@@ -52,6 +70,12 @@ class MemoryService:
             if remembered_note:
                 current = self._append_remembered_note(current, remembered_note)
             current = self._update_message_type_summary(current, mode=mode, message_preview=self._preview(cleaned))
+            current = self._update_chat_analysis_summary(
+                current,
+                mode=mode,
+                message=cleaned,
+                message_preview=self._preview(cleaned),
+            )
             self._write(current)
 
     def _read(self) -> str:
@@ -76,7 +100,11 @@ class MemoryService:
             "## Message Type Summary\n"
             f"{self._TYPE_BLOCK_START}\n"
             "_No messages recorded yet._\n"
-            f"{self._TYPE_BLOCK_END}\n"
+            f"{self._TYPE_BLOCK_END}\n\n"
+            "## Chat Analysis Summary\n"
+            f"{self._ANALYSIS_BLOCK_START}\n"
+            "_No chat patterns recorded yet._\n"
+            f"{self._ANALYSIS_BLOCK_END}\n"
         )
 
     @classmethod
@@ -155,6 +183,30 @@ class MemoryService:
             return pattern.sub(block, content, count=1)
         return f"{content.rstrip()}\n\n## Message Type Summary\n{block}\n"
 
+    def _update_chat_analysis_summary(self, document: str, mode: str, message: str, message_preview: str) -> str:
+        stats = self._parse_analysis_stats(document)
+        now = now_ist().isoformat()
+        signals = self._analysis_signals(content=message, mode=mode)
+        for category in self._infer_chat_categories(content=message, mode=mode):
+            current = stats.get(category, {"count": 0, "last": now, "signals": [], "recent": []})
+            recent = [item for item in current.get("recent", []) if item != message_preview]
+            recent.insert(0, message_preview)
+            merged_signals = list(dict.fromkeys([*signals, *current.get("signals", [])]))[:5]
+            stats[category] = {
+                "count": int(current.get("count", 0)) + 1,
+                "last": now,
+                "signals": merged_signals,
+                "recent": recent[:3],
+            }
+        block = self._render_analysis_block(stats)
+        if self._ANALYSIS_BLOCK_START in document and self._ANALYSIS_BLOCK_END in document:
+            pattern = re.compile(
+                rf"{re.escape(self._ANALYSIS_BLOCK_START)}.*?{re.escape(self._ANALYSIS_BLOCK_END)}",
+                flags=re.DOTALL,
+            )
+            return pattern.sub(block, document, count=1)
+        return f"{document.rstrip()}\n\n## Chat Analysis Summary\n{block}\n"
+
     def _parse_type_stats(self, content: str) -> dict[str, dict]:
         stats: dict[str, dict] = {}
         in_block = False
@@ -188,6 +240,122 @@ class MemoryService:
             lines.append(f"- **{kind}**: {count} {noun}; last: {item.get('last')}; recent: {recent}")
         lines.append(self._TYPE_BLOCK_END)
         return "\n".join(lines)
+
+    def _parse_analysis_stats(self, content: str) -> dict[str, dict]:
+        stats: dict[str, dict] = {}
+        in_block = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped == self._ANALYSIS_BLOCK_START:
+                in_block = True
+                continue
+            if stripped == self._ANALYSIS_BLOCK_END:
+                break
+            if not in_block:
+                continue
+            match = self._ANALYSIS_LINE_RE.match(stripped)
+            if not match:
+                continue
+            signals = [
+                item.strip()
+                for item in match.group("signals").split(", ")
+                if item.strip() and item.strip() != "none"
+            ]
+            recent = [item.strip() for item in match.group("recent").split(" | ") if item.strip()]
+            stats[match.group("kind").strip().lower()] = {
+                "count": int(match.group("count")),
+                "last": match.group("last").strip(),
+                "signals": signals[:5],
+                "recent": recent[:3],
+            }
+        return stats
+
+    def _render_analysis_block(self, stats: dict[str, dict]) -> str:
+        lines = [self._ANALYSIS_BLOCK_START]
+        for kind in sorted(stats):
+            item = stats[kind]
+            signals = ", ".join(str(value) for value in item.get("signals", []) if value) or "none"
+            recent = " | ".join(str(value) for value in item.get("recent", []) if value) or "none"
+            count = int(item.get("count", 0))
+            noun = "message" if count == 1 else "messages"
+            lines.append(
+                f"- **{kind}**: {count} {noun}; last: {item.get('last')}; signals: {signals}; recent: {recent}"
+            )
+        lines.append(self._ANALYSIS_BLOCK_END)
+        return "\n".join(lines)
+
+    @classmethod
+    def _infer_chat_categories(cls, content: str, mode: str) -> list[str]:
+        lowered = content.lower()
+        categories: list[str] = []
+        if cls._extract_remembered_note(content) or cls._contains_any(
+            lowered,
+            ("agent memory", "memory file", "remember", "memorize", "add to memory", "save this", "store this"),
+        ):
+            categories.append("memory and preferences")
+        if cls._contains_any(
+            lowered,
+            ("bug", "error", "failed", "failure", "fix", "debug", "traceback", "exception", "crash"),
+        ):
+            categories.append("debugging and fixes")
+        if cls._contains_any(
+            lowered,
+            (
+                "code",
+                "frontend",
+                "backend",
+                "api",
+                "test",
+                "typescript",
+                "python",
+                "react",
+                "docker",
+                "commit",
+                "push",
+                "deploy",
+            ),
+        ):
+            categories.append("software development")
+        if cls._contains_any(
+            lowered,
+            ("search", "research", "latest", "compare", "source", "browse", "look up", "web"),
+        ):
+            categories.append("research")
+        if cls._contains_any(lowered, ("image", "screenshot", "design", "ui", "ux", "visual", "photo", "mockup")):
+            categories.append("visual and ux")
+        if cls._contains_any(lowered, ("spreadsheet", "csv", "excel", "chart", "data", "analysis", "metric", "report")):
+            categories.append("data analysis")
+        if cls._contains_any(
+            lowered,
+            ("write", "draft", "summarize", "explain", "document", "readme", "copy", "content"),
+        ):
+            categories.append("writing and explanation")
+        if cls._contains_any(lowered, ("plan", "roadmap", "task", "workflow", "strategy", "schedule", "reminder")):
+            categories.append("planning")
+        if mode == "tool_builder":
+            categories.append("tool building")
+        if mode in {"operator", "pi_operator"}:
+            categories.append("operator tasks")
+        return list(dict.fromkeys(categories or ["general conversation"]))[:4]
+
+    @classmethod
+    def _analysis_signals(cls, content: str, mode: str) -> list[str]:
+        lowered = content.lower()
+        signals: list[str] = [f"mode:{cls._normalize_mode(mode)}"]
+        for label, terms in (
+            ("explicit-memory", ("remember", "memorize", "add to memory", "save this", "store this")),
+            ("implementation", ("implement", "add", "fix", "update", "change", "commit", "push")),
+            ("investigation", ("why", "how", "go through", "inspect", "analyse", "analyze", "review")),
+            ("preference", ("i prefer", "i like", "always", "never", "my timezone", "my preferred")),
+            ("durability", ("survive restart", "persistent", "durable", "restart")),
+        ):
+            if cls._contains_any(lowered, terms):
+                signals.append(label)
+        return signals[:5]
+
+    @staticmethod
+    def _contains_any(content: str, needles: tuple[str, ...]) -> bool:
+        return any(needle in content for needle in needles)
 
     @staticmethod
     def _normalize_mode(mode: str) -> str:

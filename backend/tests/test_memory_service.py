@@ -15,6 +15,9 @@ def test_memory_service_remembers_explicit_note_and_tracks_message_type(tmp_path
     assert "- **general**: 1 message;" in content
     assert "- **tool_builder**: 1 message;" in content
     assert "Can you improve the tool builder?" in content
+    assert "## Chat Analysis Summary" in content
+    assert "- **memory and preferences**: 1 message;" in content
+    assert "- **tool building**: 1 message;" in content
 
 
 def test_memory_service_deduplicates_remembered_notes(tmp_path) -> None:
@@ -72,3 +75,37 @@ def test_memory_service_prompt_context_returns_existing_markdown(tmp_path) -> No
     service = MemoryService(memory_path)
 
     assert "Use compact summaries" in service.prompt_context()
+
+
+def test_memory_service_analyzes_chat_categories_and_signals(tmp_path) -> None:
+    memory_path = tmp_path / "memory.md"
+    service = MemoryService(memory_path)
+
+    service.update_from_user_message(
+        "Can you inspect the React frontend bug, fix the test, commit and push?",
+        mode="general",
+    )
+    service.update_from_user_message(
+        "Can you go through the agent memory file and make sure it survives restart?",
+        mode="general",
+    )
+
+    content = memory_path.read_text(encoding="utf-8")
+
+    assert "- **debugging and fixes**: 1 message;" in content
+    assert "- **software development**: 1 message;" in content
+    assert "- **memory and preferences**: 1 message;" in content
+    assert "signals: mode:general, implementation, investigation" in content
+    assert "durability" in content
+
+
+def test_memory_service_initializes_durable_memory_file(tmp_path) -> None:
+    memory_path = tmp_path / "persisted" / "memory.md"
+    service = MemoryService(memory_path)
+
+    service.ensure_initialized()
+
+    content = memory_path.read_text(encoding="utf-8")
+    assert content.startswith("# Agent Memory")
+    assert "## Remembered Notes" in content
+    assert "## Chat Analysis Summary" in content
