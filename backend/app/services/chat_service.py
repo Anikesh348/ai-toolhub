@@ -1386,7 +1386,9 @@ class ChatService:
             ]
         if memory_context:
             memory_block = (
-                "Saved agent memory from memory.md (use only when relevant; user-editable):\n"
+                "Saved agent memory from memory.md. Treat Learned User Profile and Remembered Notes as durable "
+                "user facts. Use them when relevant, especially for questions about the user's preferences, "
+                "identity, projects, or prior instructions:\n"
                 f"{memory_context.strip()}\n"
             )
             if "Conversation:" in lines:
